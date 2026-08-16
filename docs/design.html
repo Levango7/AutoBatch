@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AutoBatch · 大数据批处理工作流 · 设计文档</title>
+<style>
+  :root { --ink:#1a1a1a; --muted:#6b6b6b; --line:#d9d9d9; --accent:#1a56db; --link:#0000EE; --bg:#ffffff; --soft:#f7f7f7; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+    line-height:1.65; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 48px 28px 96px; }
+  header.doc { border-bottom: 3px solid var(--ink); padding-bottom: 20px; margin-bottom: 36px; }
+  header.doc h1 { font-size: 30px; line-height:1.3; margin: 0 0 8px; letter-spacing: .5px; }
+  header.doc .meta { color: var(--muted); font-size: 14px; }
+  h2 { font-size: 22px; margin: 48px 0 14px; padding-top: 18px; border-top: 1px solid var(--line); }
+  h3 { font-size: 17px; margin: 28px 0 10px; }
+  p { margin: 10px 0; }
+  a { color: var(--link); }
+  table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 14px; }
+  th, td { border: 1px solid var(--line); padding: 7px 10px; text-align: left; vertical-align: top; }
+  th { background: var(--soft); font-weight: 600; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  code { background: var(--soft); padding: 1px 5px; border-radius: 3px; font-size: 13px; }
+  pre { background: var(--soft); border: 1px solid var(--line); padding: 12px 14px; overflow-x: auto; font-size: 13px; line-height: 1.5; }
+  .note { background: #eef4ff; border-left: 3px solid var(--accent); padding: 10px 14px; margin: 14px 0; font-size: 14px; }
+  .tag { display:inline-block; background:var(--soft); border:1px solid var(--line); border-radius: 3px; padding: 0 7px; font-size: 12px; color: var(--muted); }
+  figure { margin: 20px 0; }
+  figcaption { font-size: 13px; color: var(--muted); margin-top: 8px; text-align: center; }
+  ul, ol { padding-left: 22px; }
+  li { margin: 5px 0; }
+  .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin: 16px 0; }
+  .kpi { border: 1px solid var(--line); padding: 14px 16px; }
+  .kpi .v { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .kpi .k { font-size: 13px; color: var(--muted); }
+  footer { margin-top: 64px; padding-top: 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="doc">
+  <h1>AutoBatch · 大数据批处理工作流 · 设计文档</h1>
+  <div class="meta">AutoBatch v1.0.0 ｜ 2026-08-15 ｜ 权威批次 B-20260815-134548-E85420 ｜ 设计风格：Information Architects（内容优先，零装饰）</div>
+</header>
+
+<h2>1. 概述</h2>
+<p>本原型演示一套<b>可运行、可追溯、可扩展</b>的大数据批处理工作流：从数据接入开始，经过质量校验、清洗、计算，到结果输出与可视化，全流程一键运行，并持久化每一份中间产物。</p>
+<h3>1.1 目标</h3>
+<ul>
+  <li>端到端可运行：示例数据（含注入缺陷）→ 五阶段处理 → 台账/质量报告/聚合结果，无人工干预。</li>
+  <li>可追溯：每次运行独立批次号，原始/中间/最终数据全部持久化，带 sha256、行数、来源标记与血缘关系。</li>
+  <li>可监控：每阶段独立日志与状态登记，失败能定位到具体阶段与原因。</li>
+  <li>数据质量内置：完整性/唯一性/范围/格式/枚举/日期/引用完整性/异常值 8 类校验，不合格数据带原因码隔离并生成质量报告。</li>
+  <li>规模可配置：处理量由配置文件控制，小样本快速验证，同样逻辑可扩展到更大规模。</li>
+</ul>
+<h3>1.2 范围与非目标</h3>
+<table>
+  <tr><th>范围内</th><th>范围外（后续演进）</th></tr>
+  <tr><td>单机批处理原型（Python 标准库，零依赖）</td><td>生产级集群部署与运维（Spark 集群、资源调度、性能调优）</td></tr>
+  <tr><td>模拟数据源的接入演示与通用接入接口</td><td>真实生产数据源接入与授权</td></tr>
+  <tr><td>表级血缘（文件级）+ 批次台账</td><td>字段级血缘自动解析（生产阶段用 OpenLineage 体系）</td></tr>
+  <tr><td>批处理（Batch）</td><td>实时流式处理（Streaming）</td></tr>
+</table>
+
+<h2>2. 总体架构</h2>
+<p>架构分六层：数据源 → 接入 → 校验 → 清洗 → 计算 → 输出；横切能力为台账与血缘、质量规则引擎、日志与状态。原型阶段全部单机实现，各层接口保持与生产组件（见第 4 章映射表）一一对应。</p>
+<figure>
+<svg viewBox="0 0 960 620" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, PingFang SC, Microsoft YaHei, sans-serif" font-size="13">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1a1a1a"/>
+    </marker>
+    <marker id="arrd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8a8a8a"/>
+    </marker>
+  </defs>
+  <text x="20" y="24" font-size="15" font-weight="700">数据源层</text>
+  <rect x="20" y="34" width="700" height="56" rx="4" fill="#f7f7f7" stroke="#d9d9d9"/>
+  <text x="36" y="58">orders.csv（20,200 行，含 8 类缺陷）</text>
+  <text x="36" y="76">customers.csv（3,000 行）· products.csv（200 行）· _SOURCE.json（来源标记）</text>
+  <line x1="370" y1="90" x2="370" y2="118" stroke="#1a1a1a" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="20" y="134" font-size="15" font-weight="700">接入层 · ingest</text>
+  <rect x="20" y="144" width="700" height="56" rx="4" fill="#ffffff" stroke="#1a1a1a"/>
+  <text x="36" y="168">按字节复制到批次目录 01_raw/，登记 sha256 + 行数 + 来源</text>
+  <text x="36" y="186" fill="#6b6b6b">产物：01_raw/*.csv（与源文件字节一致，可校验）</text>
+  <line x1="370" y1="200" x2="370" y2="228" stroke="#1a1a1a" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="20" y="244" font-size="15" font-weight="700">校验层 · validate</text>
+  <rect x="20" y="254" width="700" height="56" rx="4" fill="#ffffff" stroke="#1a1a1a"/>
+  <text x="36" y="278">8 类质量规则逐行检查，不合格行带原因码（_reasons）隔离</text>
+  <text x="36" y="296" fill="#6b6b6b">产物：02_valid/（合格）· quarantine/（隔离，含源行号）· report/（质量报告）</text>
+  <line x1="370" y1="310" x2="370" y2="338" stroke="#1a1a1a" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="20" y="354" font-size="15" font-weight="700">清洗层 · clean</text>
+  <rect x="20" y="364" width="700" height="56" rx="4" fill="#ffffff" stroke="#1a1a1a"/>
+  <text x="36" y="388">去重、缺失填充、类型转换、计算订单金额（total_amount）、异常值标记（is_anomaly）</text>
+  <text x="36" y="406" fill="#6b6b6b">产物：03_clean/orders_clean.csv + 参考表清洗副本</text>
+  <line x1="370" y1="420" x2="370" y2="448" stroke="#1a1a1a" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="20" y="464" font-size="15" font-weight="700">计算层 · compute</text>
+  <rect x="20" y="474" width="700" height="56" rx="4" fill="#ffffff" stroke="#1a1a1a"/>
+  <text x="36" y="498">日销售 / 品类 / 区域×渠道 / 客户价值 四类聚合 + KPI</text>
+  <text x="36" y="516" fill="#6b6b6b">产物：04_aggregates/*.csv + kpi.json</text>
+  <line x1="370" y1="530" x2="370" y2="558" stroke="#1a1a1a" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="20" y="574" font-size="15" font-weight="700">输出层 · output</text>
+  <rect x="20" y="584" width="700" height="36" rx="4" fill="#ffffff" stroke="#1a1a1a"/>
+  <text x="36" y="607">最终数据集（带 _batch_id/_source_file 标记）+ dashboard_data.json + manifest.json 台账</text>
+  <g stroke="#8a8a8a" stroke-dasharray="4 3">
+    <line x1="760" y1="62" x2="800" y2="62"/>
+    <line x1="800" y1="62" x2="800" y2="172"/>
+    <line x1="800" y1="172" x2="800" y2="282"/>
+    <line x1="800" y1="282" x2="800" y2="392"/>
+    <line x1="800" y1="392" x2="800" y2="502"/>
+    <line x1="800" y1="502" x2="800" y2="602"/>
+  </g>
+  <text x="806" y="76" font-weight="700">横切能力</text>
+  <rect x="806" y="86" width="134" height="40" rx="3" fill="#f7f7f7" stroke="#d9d9d9"/>
+  <text x="816" y="111">台账与血缘 manifest</text>
+  <rect x="806" y="134" width="134" height="40" rx="3" fill="#f7f7f7" stroke="#d9d9d9"/>
+  <text x="816" y="159">质量规则引擎</text>
+  <rect x="806" y="182" width="134" height="40" rx="3" fill="#f7f7f7" stroke="#d9d9d9"/>
+  <text x="816" y="207">阶段日志与状态</text>
+  <text x="806" y="244" font-size="12" fill="#6b6b6b">每层写入产物时</text>
+  <text x="806" y="262" font-size="12" fill="#6b6b6b">登记台账；异常被</text>
+  <text x="806" y="280" font-size="12" fill="#6b6b6b">捕获到具体阶段</text>
+</svg>
+<figcaption>图 1 · 总体架构：六层处理 + 三项横切能力</figcaption>
+</figure>
+
+<h2>3. 阶段划分与数据流转</h2>
+<p>流水线为线性五阶段，每阶段独立模块（src/stages/），通过共享上下文传递数据引用，产物全部落盘到批次目录 run/&lt;batch_id&gt;/。</p>
+<table>
+  <tr><th>阶段</th><th>输入</th><th>处理</th><th>输出</th></tr>
+  <tr><td>1 ingest</td><td>data/raw/*.csv（外部数据源）</td><td>字节复制 + sha256 + 行数 + 来源登记</td><td>01_raw/、source 记录</td></tr>
+  <tr><td>2 validate</td><td>01_raw/</td><td>8 类规则逐行检查，隔离不合格行</td><td>02_valid/、quarantine/、report/quality_report.*</td></tr>
+  <tr><td>3 clean</td><td>02_valid/</td><td>去重、填充、类型、金额、异常标记</td><td>03_clean/orders_clean.csv</td></tr>
+  <tr><td>4 compute</td><td>03_clean/</td><td>四类聚合 + KPI</td><td>04_aggregates/</td></tr>
+  <tr><td>5 output</td><td>03_clean/ + 04_aggregates/</td><td>最终数据集、看板数据、台账登记</td><td>05_output/、manifest.json、status.json、metrics.json</td></tr>
+</table>
+<figure>
+<svg viewBox="0 0 960 210" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, PingFang SC, Microsoft YaHei, sans-serif" font-size="13">
+  <defs>
+    <marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1a1a1a"/>
+    </marker>
+  </defs>
+  <g>
+    <rect x="10" y="40" width="150" height="54" rx="4" fill="#ffffff" stroke="#1a1a1a"/>
+    <text x="85" y="64" text-anchor="middle" font-weight="700">1 ingest</text>
+    <text x="85" y="82" text-anchor="middle" fill="#6b6b6b">接入</text>
+    <rect x="210" y="40" width="150" height="54" rx="4" fill="#ffffff" stroke="#1a1a1a"/>
+    <text x="285" y="64" text-anchor="middle" font-weight="700">2 validate</text>
+    <text x="285" y="82" text-anchor="middle" fill="#6b6b6b">校验</text>
+    <rect x="410" y="40" width="150" height="54" rx="4" fill="#ffffff" stroke="#1a1a1a"/>
+    <text x="485" y="64" text-anchor="middle" font-weight="700">3 clean</text>
+    <text x="485" y="82" text-anchor="middle" fill="#6b6b6b">清洗</text>
+    <rect x="610" y="40" width="150" height="54" rx="4" fill="#ffffff" stroke="#1a1a1a"/>
+    <text x="685" y="64" text-anchor="middle" font-weight="700">4 compute</text>
+    <text x="685" y="82" text-anchor="middle" fill="#6b6b6b">计算</text>
+    <rect x="810" y="40" width="140" height="54" rx="4" fill="#ffffff" stroke="#1a1a1a"/>
+    <text x="880" y="64" text-anchor="middle" font-weight="700">5 output</text>
+    <text x="880" y="82" text-anchor="middle" fill="#6b6b6b">输出</text>
+    <line x1="160" y1="67" x2="208" y2="67" stroke="#1a1a1a" stroke-width="1.5" marker-end="url(#arr2)"/>
+    <line x1="360" y1="67" x2="408" y2="67" stroke="#1a1a1a" stroke-width="1.5" marker-end="url(#arr2)"/>
+    <line x1="560" y1="67" x2="608" y2="67" stroke="#1a1a1a" stroke-width="1.5" marker-end="url(#arr2)"/>
+    <line x1="760" y1="67" x2="808" y2="67" stroke="#1a1a1a" stroke-width="1.5" marker-end="url(#arr2)"/>
+    <text x="85" y="120" text-anchor="middle" fill="#6b6b6b" font-size="12">01_raw/</text>
+    <text x="285" y="120" text-anchor="middle" fill="#6b6b6b" font-size="12">02_valid/ + quarantine/</text>
+    <text x="485" y="120" text-anchor="middle" fill="#6b6b6b" font-size="12">03_clean/</text>
+    <text x="685" y="120" text-anchor="middle" fill="#6b6b6b" font-size="12">04_aggregates/</text>
+    <text x="880" y="120" text-anchor="middle" fill="#6b6b6b" font-size="12">05_output/ + manifest + metrics</text>
+    <text x="285" y="150" text-anchor="middle" fill="#b00020" font-size="12">不合格 → quarantine/（原因码）</text>
+    <line x1="285" y1="138" x2="285" y2="144" stroke="#b00020" stroke-width="1" stroke-dasharray="3 2"/>
+    <text x="880" y="170" text-anchor="middle" fill="#6b6b6b" font-size="12">失败 → 阶段状态 failed + 日志定位</text>
+  </g>
+</svg>
+<figcaption>图 2 · 流程阶段图：五阶段线性流转，异常分流与失败定位</figcaption>
+</figure>
+<div class="note"><b>运行实例（权威批次 B-20260815-134548-E85420）：</b>接入 23,400 行 → 校验通过 22,268（隔离 1,132）→ 清洗后订单 19,068 → 91 天聚合 → 输出 19,068 行；各阶段耗时 158 / 1,524 / 673 / 858 / 1,117 ms（总 4,400 ms）。validate 已做外键集合预计算优化，2 万行约 1.5 秒（优化前约 21 秒，降幅 90%+）。</div>
+
+<h2>4. 技术选型</h2>
+<p>原型阶段采用<b>零第三方依赖的 Python 标准库</b>实现：保证一键复现、无安装门槛；五阶段接口抽象使引擎可替换。生产集群阶段的对应选型如下（依据 2026-08 调研，来源见第 10 章）：</p>
+<table>
+  <tr><th>能力</th><th>原型（本实现）</th><th>生产（集群）</th><th>说明</th></tr>
+  <tr><td>编排</td><td>main.py 串行五阶段</td><td>Apache Airflow / Dagster / DolphinScheduler</td><td>Airflow 生态最成熟；Dagster 资产+血缘；DolphinScheduler 低代码可视化</td></tr>
+  <tr><td>计算引擎</td><td>Python 标准库（单机）</td><td>Apache Spark（批）/ Dask / Polars</td><td>Spark 是大规模 ETL 骨干；Dask 是 Python 原生集群化路线；Polars 单机加速</td></tr>
+  <tr><td>存储</td><td>本地目录 + CSV</td><td>MinIO/S3 + Parquet → Delta/Iceberg/Hudi</td><td>Parquet 为列式事实标准；湖表格式补 ACID/时间旅行/模式演化</td></tr>
+  <tr><td>数据质量</td><td>自研规则引擎（配置驱动）</td><td>Great Expectations / Soda Core / Deequ</td><td>GE「数据的单元测试」，规则库可平移；Spark 管道内用 Deequ</td></tr>
+  <tr><td>血缘与台账</td><td>manifest.json（批次台账）</td><td>OpenLineage 事件 + Marquez/DataHub</td><td>原型字段命名对齐 OpenLineage（job/run/dataset）以降低迁移成本</td></tr>
+</table>
+<p>仅在集群阶段可获得的能力：分布式调度与并行执行、ACID 湖表语义、集群资源管理、平台级血缘/元数据服务、高可用与容错。原型阶段的日志与台账设计已按 OpenLineage 最小字段集（batch_id/status/inputs/outputs/时间戳）预留演进。</p>
+
+<h2>5. 数据模型与质量规则</h2>
+<h3>5.1 数据模型（电商演示）</h3>
+<table>
+  <tr><th>表</th><th>字段</th><th>说明</th></tr>
+  <tr><td>orders</td><td>order_id, customer_id, product_id, order_date, created_ts, region, channel, quantity, unit_price, status</td><td>订单主表（生成器注入缺陷）</td></tr>
+  <tr><td>customers</td><td>customer_id, tier, city, join_date</td><td>客户参考表（引用完整性目标）</td></tr>
+  <tr><td>products</td><td>product_id, name, category, cost</td><td>商品参考表</td></tr>
+</table>
+<h3>5.2 八类质量规则（config/quality.rules 配置驱动）</h3>
+<table>
+  <tr><th>规则</th><th>配置键</th><th>失败原因码</th><th>权威批次结果</th></tr>
+  <tr><td>完整性</td><td>completeness.required_columns / max_null_ratio</td><td>missing_required:列</td><td>287 项失败</td></tr>
+  <tr><td>唯一性</td><td>uniqueness.columns</td><td>duplicate_key:列</td><td>200 项失败（注入重复）</td></tr>
+  <tr><td>范围</td><td>range（min/max）</td><td>range_violation:列</td><td>312 项失败（含负数量）</td></tr>
+  <tr><td>枚举</td><td>allowed_values</td><td>invalid_value:列</td><td>259 项失败（非法状态/渠道）</td></tr>
+  <tr><td>格式</td><td>format（正则）</td><td>format_violation:列</td><td>0 项失败</td></tr>
+  <tr><td>日期</td><td>date_valid（min/max）</td><td>invalid_date:列</td><td>86 项失败（坏日期注入）</td></tr>
+  <tr><td>引用完整性</td><td>referential（表.列）</td><td>orphan_reference:列</td><td>192 项失败（悬空外键）</td></tr>
+  <tr><td>异常值</td><td>outlier（IQR/zscore，action=flag）</td><td>仅标记不拒收（is_anomaly=1）</td><td>异常行被标记（权威批次 210 行）</td></tr>
+</table>
+<div class="note"><b>DQ Score 口径（自定并在报告中注明）：</b>全部规则检查项的简单平均通过率 = checks_passed / checks_total。权威批次：385,800 项检查、384,254 通过 → <b>99.60%</b>。唯一性/引用完整性按 100% 硬阈值设计；统计类阈值（IQR 1.5×、z-score ±3）为可配置参数。</div>
+
+<h2>6. 台账与血缘设计</h2>
+<h3>6.1 manifest.json（批次台账）</h3>
+<pre>{
+  "batch_id": "B-YYYYMMDD-HHMMSS-XXXXXX",   // 批次号：运行目录名 + 台账主键 + 数据行标记
+  "pipeline_version": "1.0.0",
+  "config_digest": "sha256(配置)",            // 配置指纹，可复现运行条件
+  "started_at" / "finished_at" / "status",   // 状态机：running → success | failed
+  "source": {"name": "ecommerce-demo", "files": [{name, sha256, rows, path}]},
+  "stages": [{name, status, rows_in, rows_out, duration_ms, log, error}],
+  "artifacts": {相对路径: {path, kind, rows, sha256, batch_id}},
+  "lineage": {产物: [上游产物]},              // 血缘边：表级（文件级），由各 stage 声明 + output 自动拼接
+  "quality": {dq_score, checks_total, quarantined_rows, rules: [...]},
+  "error": null
+}</pre>
+<p>台账自校验能力：每个产物登记 sha256 与行数，可与磁盘文件随时比对（防篡改、防丢失）；血缘边描述 01_raw → 02_valid → 03_clean → 04_aggregates/05_output 的处理轨迹，中间产物语义对标 OpenLineage 的 TEMPORARY 数据集。</p>
+<h3>6.2 血缘自动推导</h3>
+<p>血缘采用<b>声明式登记 + 集中拼接</b>模式，不再硬编码字典：</p>
+<ul>
+  <li>各 stage 在产出文件时，通过 <code>ctx.lineage_decls[产物相对路径] = [上游相对路径...]</code> 声明该产物的直接上游（如 <code>04_aggregates/daily_sales.csv ← 03_clean/orders_clean.csv</code>）。</li>
+  <li><code>ctx</code> 为 <code>PipelineContext</code> dataclass（src/helpers.py），替换原 <code>Dict[str, Any]</code> 弱类型包，IDE 可静态检查阶段间传递的上下文字段。</li>
+  <li>output 阶段统一读取 <code>ctx.lineage_decls</code>，将其并入 <code>manifest.lineage</code>，无需在各 stage 重复维护硬编码边字典。</li>
+  <li>权威批次共 17 个产物登记了血缘（含 kpi.json、dashboard_data.json 等聚合/输出产物），覆盖从 raw → valid → clean → aggregates → output 的完整轨迹。</li>
+</ul>
+<h3>6.3 状态与监控</h3>
+<ul>
+  <li>批次状态：running → success / failed（失败时 error 字段记录原因）。</li>
+  <li>阶段状态：status.json 中逐阶段记录 status/rows/duration/log/error，失败可精确定位。</li>
+  <li>每阶段独立 JSON Lines 日志（logs/&lt;stage&gt;.jsonl），异常含 trace 尾部。</li>
+  <li>run/latest.json 指针指向最新批次，支持多批次并存对照；时间口径：batch_id 取本地时间便于人工识别，台账 started_at/finished_at 为 UTC（相差 8 小时属正常）。</li>
+</ul>
+<h3>6.4 指标导出（metrics.json）</h3>
+<p>每批次在批次根目录产出 <code>metrics.json</code>（src/metrics.py），包含两类视图：</p>
+<ul>
+  <li><b>labelle 视图</b>（<code>stages</code> 数组）：每个阶段一条记录，含 name/status/duration_ms/rows_in/rows_out，便于程序遍历。</li>
+  <li><b>flat 视图</b>（<code>metrics</code> 对象）：扁平 key/value（如 <code>stage_validate_duration_ms</code>、<code>pipeline_dq_score</code>、<code>pipeline_quarantined_total</code>），便于直接作为 Prometheus gauge 暴露，以 <code>batch_id</code> 作为外部 label。</li>
+</ul>
+<p>权威批次 metrics.json 摘要：total_duration_ms=4400、dq_score=0.996、quarantined_total=1132；各阶段耗时 158/1524/673/858/1117 ms。</p>
+
+<h2>7. 运行结果示例（批次 B-20260815-134548-E85420）</h2>
+<div class="kpi-grid">
+  <div class="kpi"><div class="v">19,068</div><div class="k">订单数（清洗后）</div></div>
+  <div class="kpi"><div class="v">200,417</div><div class="k">销售件数</div></div>
+  <div class="kpi"><div class="v">¥162,608,282.19</div><div class="k">总营收</div></div>
+  <div class="kpi"><div class="v">¥8,527.81</div><div class="k">客单价</div></div>
+  <div class="kpi"><div class="v">91 天</div><div class="k">覆盖周期</div></div>
+  <div class="kpi"><div class="v">99.60%</div><div class="k">DQ Score</div></div>
+</div>
+<p>隔离明细：orders 隔离 1,132 行（多条规则可同时命中；原因码含源行号 _line），customers/products 参考表 100% 通过。完整质量报告见 run/&lt;batch&gt;/report/quality_report.md，聚合结果见 run/&lt;batch&gt;/04_aggregates/，可视化看板见 dashboard/dashboard.html。</p>
+
+<h2>8. 局限与演进</h2>
+<h3>8.1 当前局限</h3>
+<ul>
+  <li>单机内存处理：百万行级以内；更大规模需换引擎（Spark/Dask）。</li>
+  <li>CSV 存储：无列式压缩与谓词下推；生产应换 Parquet。</li>
+  <li>表级血缘：无字段级血缘自动解析（Python 变换无标准解析器，需声明式映射）。</li>
+  <li>无调度/重试/告警：原型为一次性批处理，生产需接入 Airflow 类编排器。</li>
+  <li>异常值仅标记不拒收（action=flag）：统计方法不宜硬性删行，业务规则应承担硬校验。</li>
+</ul>
+<h3>8.2 演进路线</h3>
+<ol>
+  <li>DAG 化：五阶段抽象为任务+依赖，迁移到 Airflow/Dagster（阶段纯函数化已就绪）。</li>
+  <li>引擎替换：stdin/stdout 数据接口保持，处理逻辑换 pandas → Polars → Dask/Spark。</li>
+  <li>存储升级：CSV → Parquet → MinIO + Iceberg/Delta（湖表格式补 ACID/时间旅行）。</li>
+  <li>质量平台化：规则库平移 Great Expectations/Soda，Spark 阶段引入 Deequ。</li>
+  <li>血缘标准化：manifest 字段对齐 OpenLineage 事件，接入 Marquez/DataHub；当前声明式 lineage_decls 可直接映射为 OpenLineage 的 dataset facets。</li>
+  <li>指标平台化：metrics.json 扁平 key 通过 Prometheus pushgateway 或 node_exporter textfile 采集，Grafana 构建流水线耗时/DQ Score/隔离数趋势看板与告警。</li>
+</ol>
+
+<h2>9. 演示与交接</h2>
+<h3>9.1 十分钟演示脚本</h3>
+<ol>
+  <li>运行 <code>run.bat</code>（或 <code>python main.py --config config\pipeline.json</code>），观察五阶段日志。</li>
+  <li>打开 <code>run\latest.json</code> → 最新批次目录，展示 manifest.json（批次/来源/产物/血缘）与 status.json。</li>
+  <li>展示 quality_report.md：DQ Score、规则明细、隔离原因分布。</li>
+  <li>打开 <code>dashboard\dashboard.html</code>：KPI、阶段耗时、质量、日销售趋势、品类、区域渠道、客户价值。</li>
+  <li>追溯演示：从 05_output/orders_final.csv 任取一行，用 _batch_id/_source_file 沿 03_clean → 02_valid → 01_raw 回溯。</li>
+  <li>失败演示：<code>python main.py --fail-at clean</code>，展示阶段级 failed 状态与日志定位。</li>
+  <li>规模演示：<code>python main.py --config config\pipeline_small.json</code>（5,000 行），对比行数与台账。</li>
+</ol>
+<h3>9.2 各模块作用速查</h3>
+<table>
+  <tr><th>模块</th><th>作用</th></tr>
+  <tr><td>src/pipeline.py</td><td>编排五阶段、阶段日志、状态机、失败捕获与定位、CLI</td></tr>
+  <tr><td>src/helpers.py</td><td>批次号/路径/CSV/JSON/SHA256/JSON Lines 日志工具 + PipelineContext dataclass（阶段间强类型上下文）</td></tr>
+  <tr><td>src/lineage.py</td><td>manifest 台账、血缘边、latest 指针</td></tr>
+  <tr><td>src/quality.py</td><td>规则引擎（8 类）、DQ 汇总、Markdown 报告渲染、referential 外键集合预计算</td></tr>
+  <tr><td>src/metrics.py</td><td>指标记录器：收集 per-stage 耗时/行数/状态 + DQ Score/隔离数，产出 metrics.json（labelled + flat 双视图）</td></tr>
+  <tr><td>src/generator.py</td><td>示例数据生成（固定种子、缺陷注入）</td></tr>
+  <tr><td>src/stages/*</td><td>ingest / validate / clean / compute / output 五阶段实现，各 stage 声明 lineage_decls 由 output 自动拼接</td></tr>
+  <tr><td>tests/*</td><td>pytest 测试套件（26 用例）：规则正反例 + 性能回归 + stage 单测 + 端到端冒烟</td></tr>
+</table>
+<h3>9.3 交接要点</h3>
+<p>文档齐全性：README.md（快速开始 + 测试 + CI）、docs/RUNBOOK.md（环境/启动/配置/接入新源/扩展逻辑/故障定位/测试/CI）、docs/design.html（本设计文档）、dashboard/dashboard.html（看板）。测试套件 tests/（26 用例）+ pytest.ini 保证回归；.github/workflows/ci.yml 保证主干始终可运行。按 RUNBOOK 第 1~2 节即可独立复现。</p>
+
+<h2>10. 参考来源（2026-08-15 实际检索）</h2>
+<ul>
+  <li>Apache Airflow 定位与局限：<a href="https://www.altexsoft.com/blog/apache-airflow-pros-cons">altexsoft</a>；编排器生态排名：<a href="https://www.pracdata.io/p/state-of-workflow-orchestration-ecosystem-2025">pracdata.io</a></li>
+  <li>Dagster 资产导向与血缘：<a href="https://www.getorchestra.io/blog/dagster-vs-prefect-vs-airflow-complete-data-orchestration-comparison-2026">getorchestra</a>；<a href="https://www.fivetran.com/learn/dagster-vs-airflow">Fivetran</a></li>
+  <li>DolphinScheduler：<a href="https://dolphinscheduler.apache.org/">官网</a>；<a href="https://thenewstack.io/dolphinscheduler-tames-complex-data-workflows">The New Stack</a></li>
+  <li>Spark 定位：<a href="https://python.plainenglish.io/beyond-the-hype-how-smart-data-engineers-choose-between-pandas-polars-and-spark-ede03138b72f">plainenglish</a>；<a href="https://domino.ai/blog/spark-dask-ray-choosing-the-right-framework">Domino</a>；规模化基准：<a href="https://docs.coiled.io/blog/tpch.html">Coiled</a></li>
+  <li>Flink BATCH 模式：<a href="https://nightlies.apache.org/flink/flink-docs-stable/docs/dev/datastream/execution_mode">Flink 官方文档</a></li>
+  <li>Dask vs Spark：<a href="https://docs.dask.org/en/latest/spark.html">Dask 官方</a>；Polars：<a href="https://docs.pola.rs/user-guide/misc/comparison">pola.rs</a></li>
+  <li>Parquet：<a href="https://www.ibm.com/think/topics/parquet">IBM</a>；MinIO vs HDFS：<a href="https://www.min.io/use-cases/hadoop-liberation">MinIO</a></li>
+  <li>湖表格式对比：<a href="https://iceberglakehouse.com/iceberg/open-table-format-comparison">iceberglakehouse</a>；<a href="https://www.dremio.com/blog/comparison-of-data-lake-table-formats-apache-iceberg-apache-hudi-and-delta-lake">Dremio</a>；Iceberg 规范：<a href="https://iceberg.apache.org/spec">iceberg.apache.org</a></li>
+  <li>数据质量六维度：<a href="https://www.ibm.com/think/topics/data-quality-dimensions">IBM</a>；<a href="https://www.collibra.com/blog/the-6-dimensions-of-data-quality">Collibra</a></li>
+  <li>Great Expectations：<a href="https://greatexpectations.io/blog/better-together-secoda-and-great-expectations">GE</a>；Soda：<a href="https://soda.io/blog/data-validation-testing">Soda</a>；Deequ：<a href="https://github.com/awslabs/deequ">GitHub</a></li>
+  <li>异常值：IQR 1.5×：<a href="https://kissmetrics.io/blog/outlier-detection-analytics">kissmetrics</a>；z-score ±3：<a href="https://questdb.com/glossary/outlier-detection">QuestDB</a></li>
+  <li>manifest/校验和：<a href="https://ioos.github.io/ncei-archiving-cookbook/practices.html">NCEI 存档规范</a>；dbt manifest：<a href="https://docs.getdbt.com/reference/artifacts/manifest-json">dbt 文档</a></li>
+  <li>OpenLineage：<a href="https://openlineage.io/docs">官网</a>；运行状态机：<a href="https://openlineage.io/docs/spec/run-cycle">run-cycle</a>；DataHub：<a href="https://datahub.com/">官网</a></li>
+  <li>DQ Score 口径：<a href="https://docs.dataedo.com/data-quality/browse-results">Dataedo</a>；<a href="https://docs.getmontecarlo.com/docs/data-quality">Monte Carlo</a>；三级严重度：<a href="https://dqops.com/docs/dqo-concepts/definition-of-data-quality-checks">DQOps</a></li>
+</ul>
+
+<footer>AutoBatch · 大数据批处理工作流 · 设计文档 · 生成于 2026-08-15 · 本页自包含，可离线打开/打印</footer>
+</div>
+</body>
+</html>

@@ -1,0 +1,188 @@
+{
+  "pipeline": {
+    "name": "autobatch",
+    "version": "1.0.0",
+    "batch_id": "auto",
+    "run_dir": "run",
+    "data_dir": "data"
+  },
+  "source": {
+    "name": "ecommerce-demo",
+    "encoding": "utf-8-sig",
+    "files": {
+      "orders": "data/raw/orders.csv",
+      "customers": "data/raw/customers.csv",
+      "products": "data/raw/products.csv"
+    }
+  },
+  "generator": {
+    "enabled": true,
+    "rows": 5000,
+    "seed": 42,
+    "output_dir": "data/raw",
+    "customer_count": 3000,
+    "product_count": 200,
+    "date_range_days": 90,
+    "defect_rates": {
+      "missing": 0.02,
+      "duplicate": 0.01,
+      "negative_qty": 0.005,
+      "invalid_status": 0.01,
+      "bad_date": 0.005,
+      "orphan_fk": 0.01,
+      "outlier": 0.002,
+      "bad_channel": 0.005
+    }
+  },
+  "quality": {
+    "rules": {
+      "orders": {
+        "completeness": {
+          "required_columns": ["order_id", "customer_id", "product_id", "order_date", "quantity", "unit_price", "status"],
+          "max_null_ratio": 0.0
+        },
+        "uniqueness": { "columns": ["order_id"] },
+        "range": [
+          { "column": "quantity", "min": 1, "max": 1000 },
+          { "column": "unit_price", "min": 0.01, "max": 100000 }
+        ],
+        "allowed_values": {
+          "status": ["completed", "pending", "cancelled", "refunded"],
+          "channel": ["web", "app", "store"]
+        },
+        "format": {
+          "order_id": "^ORD-\\d{8}$",
+          "created_ts": "^\\d{4}-\\d{2}-\\d{2}[T ]\\d{2}:\\d{2}:\\d{2}$"
+        },
+        "date_valid": { "columns": ["order_date"], "min": "2020-01-01", "max": "2026-12-31" },
+        "referential": {
+          "customer_id": "customers.customer_id",
+          "product_id": "products.product_id"
+        },
+        "outlier": { "column": "total_amount", "method": "iqr", "factor": 1.5, "action": "flag" }
+      },
+      "customers": {
+        "completeness": { "required_columns": ["customer_id", "tier", "city", "join_date"], "max_null_ratio": 0.0 },
+        "uniqueness": { "columns": ["customer_id"] },
+        "allowed_values": { "tier": ["bronze", "silver", "gold", "platinum"] },
+        "date_valid": { "columns": ["join_date"], "min": "2015-01-01", "max": "2026-12-31" }
+      },
+      "products": {
+        "completeness": { "required_columns": ["product_id", "name", "category", "cost"], "max_null_ratio": 0.0 },
+        "uniqueness": { "columns": ["product_id"] },
+        "range": [{ "column": "cost", "min": 0, "max": 100000 }]
+      }
+    },
+    "quarantine_reasons": [
+      "missing_required", "duplicate_key", "range_violation", "invalid_value",
+      "format_violation", "invalid_date", "orphan_reference", "schema_error"
+    ]
+  },
+  "clean": {
+    "dedup_columns": ["order_id"],
+    "fill_missing": { "region": "unknown", "channel": "unknown" },
+    "outlier_action": "flag",
+    "flag_column": "is_anomaly"
+  },
+  "compute": {
+    "aggregations": ["daily_sales", "category_stats", "region_channel_stats", "customer_value"],
+    "top_n_customers": 20,
+    "currency": "CNY"
+  },
+  "output": {
+    "formats": ["csv"],
+    "aggregates_dir": "aggregates",
+    "report_dir": "report",
+    "dashboard_data": "dashboard_data.json"
+  },
+  "monitoring": {
+    "log_level": "INFO",
+    "json_logs": true
+  },
+  "logging": {
+    "format": "text",
+    "level": "INFO"
+  },
+  "demo": {
+    "fail_at": null
+  },
+  "error_handling": {
+    "max_retries": 0,
+    "backoff_base_seconds": 2,
+    "backoff_max_seconds": 60,
+    "stage_timeouts": {
+      "ingest": 300,
+      "validate": 300,
+      "clean": 300,
+      "compute": 600,
+      "output": 300
+    },
+    "cleanup_on_retry": true
+  },
+  "incremental": {
+    "enabled": false,
+    "mode": "high_watermark",
+    "state_dir": "state",
+    "tables": {
+      "orders": {"watermark_column": "order_date", "watermark_type": "date", "init_mode": "full_load"},
+      "customers": {"watermark_column": "join_date", "watermark_type": "date", "init_mode": "full_load"},
+      "products": {"watermark_column": null, "watermark_type": "full_load"}
+    },
+    "aggregates_persist": true,
+    "fail_safe": "backup_before_merge"
+  },
+  "engine": {
+    "backend": "python",
+    "format": "csv",
+    "polars": {
+      "streaming": false,
+      "parquet_compression": "zstd",
+      "read_options": {"try_parse_dates": true}
+    },
+    "spark": {
+      "master": "local[*]",
+      "app_name": "autobatch-small",
+      "executor_memory": "1g",
+      "executor_cores": 1,
+      "num_executors": 1,
+      "driver_memory": "512m",
+      "shuffle_partitions": 4,
+      "adaptive_query_execution": true,
+      "write_single_file": false,
+      "read_options": {},
+      "cluster": {
+        "enabled": false,
+        "driver_host": "host.docker.internal",
+        "s3_endpoint": ""
+      }
+    }
+  },
+  "storage": {
+    "backend": "local_csv",
+    "bucket": "autobatch",
+    "endpoint": "localhost:9000",
+    "access_key": "minioadmin",
+    "secret_key": "minioadmin",
+    "secure": false,
+    "region": "us-east-1",
+    "warehouse": "warehouse",
+    "prefix": "",
+    "compression": "zstd",
+    "iceberg": {
+      "enabled": false,
+      "catalog_name": "autobatch",
+      "catalog_type": "sql",
+      "catalog_uri": "sqlite:///state/iceberg_catalog.db",
+      "warehouse": "state/warehouse",
+      "default_partition_spec": [],
+      "spark_extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
+      "spark_catalog_class": "org.apache.iceberg.spark.SparkCatalog",
+      "properties": {
+        "pyiceberg": "0.12.0rc1",
+        "iceberg_spark_runtime": "iceberg-spark-runtime-4.1_2.13-1.11.0.jar",
+        "iceberg_aws_bundle": "iceberg-aws-bundle-1.11.0.jar",
+        "spark_compat": "spark-4.1.0+iceberg-1.11.0+scala-2.13"
+      }
+    }
+  }
+}

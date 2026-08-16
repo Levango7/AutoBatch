@@ -1,0 +1,695 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AutoBatch 数据质量仪表盘 · B-20260815-080941-AB8A9F</title>
+<style>
+  /* 主题变量：Light（默认） */
+  :root {
+    --bg:#ffffff; --ink:#1a1a1a; --muted:#6b6b6b; --line:#d9d9d9;
+    --accent:#1a56db; --soft:#f7f7f7; --warn:#b00020; --ok:#0f7b3d;
+    --note-bg:#eef4ff; --note-ink:#333; --grid:#e5e5e5;
+    --stage-ingest:#1a56db; --stage-validate:#7c3aed; --stage-clean:#0f7b3d;
+    --stage-compute:#b8860b; --stage-output:#475569; --stage-fail:#b00020;
+    --svg-bg:transparent;
+  }
+  /* 主题变量：Dark */
+  :root[data-theme="dark"] {
+    --bg:#0f1115; --ink:#e8e8e8; --muted:#9aa0a6; --line:#2a2e36;
+    --accent:#7aa2ff; --soft:#1a1f26; --warn:#ff6b6b; --ok:#4ade80;
+    --note-bg:#1a2236; --note-ink:#d4d4d4; --grid:#262b33;
+    --stage-ingest:#7aa2ff; --stage-validate:#a78bfa; --stage-clean:#4ade80;
+    --stage-compute:#fbbf24; --stage-output:#94a3b8; --stage-fail:#ff6b6b;
+    --svg-bg:#0f1115;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+    line-height:1.6; transition: background .15s ease, color .15s ease; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 36px 24px 80px; }
+  header { border-bottom: 3px solid var(--ink); padding-bottom: 14px; margin-bottom: 24px; position: relative; }
+  header h1 { font-size: 26px; margin: 0 0 6px; }
+  header .meta { color: var(--muted); font-size: 14px; }
+  /* 主题切换按钮 */
+  .theme-toggle {
+    position: absolute; top: 0; right: 0;
+    background: var(--soft); color: var(--ink); border: 1px solid var(--line);
+    padding: 6px 12px; font-size: 13px; cursor: pointer; border-radius: 3px;
+    font-family: inherit; transition: background .15s ease, border-color .15s ease;
+  }
+  .theme-toggle:hover { border-color: var(--accent); color: var(--accent); }
+  h2 { font-size: 19px; margin: 40px 0 12px; padding-top: 14px; border-top: 1px solid var(--line); }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin: 16px 0; }
+  .kpi { border: 1px solid var(--line); padding: 14px; }
+  .kpi .v { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .kpi .k { font-size: 13px; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 14px; }
+  th, td { border: 1px solid var(--line); padding: 6px 9px; text-align: left; vertical-align: top; }
+  th { background: var(--soft); font-weight: 600; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .bar-bg { background: var(--soft); height: 14px; border-radius: 2px; overflow: hidden; min-width: 90px; }
+  .bar-fill { background: var(--accent); height: 100%; }
+  .ok { color: var(--ok); } .bad { color: var(--warn); }
+  .note { background: var(--note-bg); border-left: 3px solid var(--accent); padding: 8px 12px; margin: 12px 0; font-size: 13px; color: var(--note-ink); }
+  figure { margin: 14px 0; }
+  figcaption { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  footer { margin-top: 48px; border-top: 1px solid var(--line); padding-top: 12px; color: var(--muted); font-size: 13px; }
+  /* 跨批次仪表盘 */
+  .dq-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 16px 0; }
+  .chart-box { border: 1px solid var(--line); padding: 14px; background: var(--bg); margin: 12px 0; }
+  .chart-box svg { width: 100%; height: auto; display: block; }
+  .chart-toolbar { display: flex; gap: 8px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
+  .chart-toolbar button {
+    background: var(--soft); color: var(--ink); border: 1px solid var(--line);
+    padding: 5px 11px; font-size: 13px; cursor: pointer; border-radius: 3px;
+    font-family: inherit; transition: border-color .15s ease, color .15s ease;
+  }
+  .chart-toolbar button:hover { border-color: var(--accent); }
+  .chart-toolbar button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .chart-legend { display: flex; gap: 14px; flex-wrap: wrap; margin: 8px 0; font-size: 12px; color: var(--muted); }
+  .chart-legend span { display: inline-flex; align-items: center; gap: 5px; }
+  .chart-legend i { width: 12px; height: 12px; display: inline-block; border-radius: 2px; }
+  .empty-hint { color: var(--muted); font-size: 13px; padding: 18px; text-align: center; border: 1px dashed var(--line); margin: 12px 0; }
+  /* SVG 内文本/线条颜色跟随主题 */
+  svg text { fill: var(--ink); }
+  svg .axis-text { fill: var(--muted); }
+  svg .grid-line { stroke: var(--grid); }
+  svg .axis-line { stroke: var(--line); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <button class="theme-toggle" id="themeToggle" type="button" aria-label="切换主题">🌙 深色</button>
+  <h1>AutoBatch · 数据质量仪表盘</h1>
+  <div class="meta">批次 <b>B-20260815-080941-AB8A9F</b> ｜ AutoBatch v1.0.0 ｜ 生成于 2026-08-15 ｜ 状态：<b class="ok">success</b> ｜ 数据源：ecommerce-demo（orders 20,200 / customers 3,000 / products 200）</div>
+</header>
+
+<h2>一、批次 KPI</h2>
+<div class="kpis">
+  <div class="kpi"><div class="v">19,068</div><div class="k">订单数（清洗后）</div></div>
+  <div class="kpi"><div class="v">200,417</div><div class="k">销售件数</div></div>
+  <div class="kpi"><div class="v">¥162,608,282.19</div><div class="k">总营收</div></div>
+  <div class="kpi"><div class="v">¥8,527.81</div><div class="k">客单价</div></div>
+  <div class="kpi"><div class="v">91 天</div><div class="k">覆盖周期</div></div>
+  <div class="kpi"><div class="v">99.60%</div><div class="k">DQ Score</div></div>
+</div>
+
+<h2>二、阶段状态与耗时</h2>
+<table>
+  <tr><th>阶段</th><th class="num">耗时 (ms)</th><th class="num">输入行</th><th class="num">输出行</th><th>状态</th></tr>
+  <tr><td>1 ingest 接入</td><td class="num">209</td><td class="num">0</td><td class="num">23,400</td><td class="ok">success</td></tr>
+  <tr><td>2 validate 校验</td><td class="num">21,043</td><td class="num">23,400</td><td class="num">22,268</td><td class="ok">success（隔离 1,132）</td></tr>
+  <tr><td>3 clean 清洗</td><td class="num">1,240</td><td class="num">19,068</td><td class="num">22,268</td><td class="ok">success（填充 unknown 162 行）</td></tr>
+  <tr><td>4 compute 计算</td><td class="num">1,024</td><td class="num">19,068</td><td class="num">91</td><td class="ok">success</td></tr>
+  <tr><td>5 output 输出</td><td class="num">1,546</td><td class="num">19,068</td><td class="num">19,068</td><td class="ok">success</td></tr>
+</table>
+
+<h2>三、数据质量</h2>
+<div class="kpis">
+  <div class="kpi"><div class="v">99.60%</div><div class="k">DQ Score（检查通过率）</div></div>
+  <div class="kpi"><div class="v">385,800</div><div class="k">规则检查项</div></div>
+  <div class="kpi"><div class="v">1,546</div><div class="k">失败项</div></div>
+  <div class="kpi"><div class="v">1,132</div><div class="k">隔离订单行</div></div>
+</div>
+<div class="note">DQ Score 口径：全部规则检查项的简单平均通过率（checks_passed / checks_total）；outlier 规则仅标记不拒收：校验阶段识别 210 个异常候选（部分因其他原因被隔离），最终清洗数据标记 178 行 is_anomaly=1；唯一性/引用完整性为 100% 硬阈值。</div>
+<table>
+  <tr><th>数据集</th><th>规则</th><th class="num">检查数</th><th class="num">通过</th><th class="num">失败</th><th class="num">通过率</th></tr>
+  <tr><td>orders</td><td>completeness 完整性</td><td class="num">141,400</td><td class="num">141,113</td><td class="num">287</td><td class="num">99.80%</td></tr>
+  <tr><td>orders</td><td>uniqueness 唯一性</td><td class="num">20,200</td><td class="num">20,000</td><td class="num">200</td><td class="num">99.01%</td></tr>
+  <tr><td>orders</td><td>range 范围</td><td class="num">40,400</td><td class="num">40,088</td><td class="num">312</td><td class="num">99.23%</td></tr>
+  <tr><td>orders</td><td>allowed_values 枚举</td><td class="num">40,400</td><td class="num">40,141</td><td class="num">259</td><td class="num">99.36%</td></tr>
+  <tr><td>orders</td><td>format 格式</td><td class="num">40,400</td><td class="num">40,400</td><td class="num">0</td><td class="num">100%</td></tr>
+  <tr><td>orders</td><td>date_valid 日期</td><td class="num">20,200</td><td class="num">20,114</td><td class="num">86</td><td class="num">99.57%</td></tr>
+  <tr><td>orders</td><td>referential 引用完整性</td><td class="num">40,400</td><td class="num">40,208</td><td class="num">192</td><td class="num">99.52%</td></tr>
+  <tr><td>orders</td><td>outlier 异常值（IQR 标记）</td><td class="num">20,200</td><td class="num">19,990</td><td class="num">210</td><td class="num">98.96%</td></tr>
+  <tr><td>customers</td><td>completeness / uniqueness / allowed_values / date_valid</td><td class="num">21,000</td><td class="num">21,000</td><td class="num">0</td><td class="num">100%</td></tr>
+  <tr><td>products</td><td>completeness / uniqueness / range</td><td class="num">1,200</td><td class="num">1,200</td><td class="num">0</td><td class="num">100%</td></tr>
+</table>
+
+<h2>四、日销售趋势（91 天）</h2>
+<figure>
+  <div id="trend"></div>
+  <figcaption>每日营收（¥）与订单量（右轴参考）；尖峰为注入异常金额订单所在日</figcaption>
+</figure>
+
+<h2>五、品类营收占比</h2>
+<figure>
+  <div id="category"></div>
+  <figcaption>六品类营收与份额（示例批次）</figcaption>
+</figure>
+
+<h2>六、区域 × 渠道</h2>
+<table>
+  <tr><th>区域</th><th class="num">app 订单</th><th class="num">app 营收</th><th class="num">store 订单</th><th class="num">store 营收</th><th class="num">web 订单</th><th class="num">web 营收</th></tr>
+  <tr><td>华东</td><td class="num">889</td><td class="num">7,144,281.80</td><td class="num">917</td><td class="num">7,206,470.60</td><td class="num">894</td><td class="num">7,487,870.60</td></tr>
+  <tr><td>华北</td><td class="num">917</td><td class="num">7,010,485.80</td><td class="num">878</td><td class="num">8,101,206.76</td><td class="num">920</td><td class="num">7,821,105.85</td></tr>
+  <tr><td>华南</td><td class="num">818</td><td class="num">7,130,266.99</td><td class="num">868</td><td class="num">6,915,767.36</td><td class="num">962</td><td class="num">8,230,062.29</td></tr>
+  <tr><td>华中</td><td class="num">923</td><td class="num">7,329,111.06</td><td class="num">884</td><td class="num">6,968,205.97</td><td class="num">909</td><td class="num">8,127,356.84</td></tr>
+  <tr><td>西南</td><td class="num">898</td><td class="num">7,424,530.75</td><td class="num">891</td><td class="num">9,332,576.43</td><td class="num">924</td><td class="num">9,044,555.41</td></tr>
+  <tr><td>西北</td><td class="num">902</td><td class="num">7,821,416.19</td><td class="num">901</td><td class="num">7,947,150.45</td><td class="num">895</td><td class="num">6,961,173.98</td></tr>
+  <tr><td>东北</td><td class="num">909</td><td class="num">7,307,754.44</td><td class="num">948</td><td class="num">8,920,480.70</td><td class="num">859</td><td class="num">7,030,960.36</td></tr>
+</table>
+<div class="note">缺失填充：清洗阶段把缺失的 region / channel 填充为 unknown——本批次 region=unknown 79 行、channel=unknown 83 行（合计 162 行，未计入上表各渠道列，已计入总营收与 KPI）。</div>
+
+<h2>七、客户价值 Top 10 与会员等级</h2>
+<table>
+  <tr><th class="num">排名</th><th>客户</th><th>等级</th><th>城市</th><th class="num">订单数</th><th class="num">营收</th></tr>
+  <tr><td class="num">1</td><td>CUS-001653</td><td>silver</td><td>重庆</td><td class="num">5</td><td class="num">1,788,063.97</td></tr>
+  <tr><td class="num">2</td><td>CUS-001471</td><td>bronze</td><td>广州</td><td class="num">9</td><td class="num">1,592,951.25</td></tr>
+  <tr><td class="num">3</td><td>CUS-000026</td><td>bronze</td><td>南京</td><td class="num">5</td><td class="num">1,366,816.80</td></tr>
+  <tr><td class="num">4</td><td>CUS-002315</td><td>silver</td><td>武汉</td><td class="num">7</td><td class="num">1,251,644.53</td></tr>
+  <tr><td class="num">5</td><td>CUS-001156</td><td>bronze</td><td>成都</td><td class="num">7</td><td class="num">942,606.44</td></tr>
+  <tr><td class="num">6</td><td>CUS-001529</td><td>bronze</td><td>上海</td><td class="num">5</td><td class="num">856,421.93</td></tr>
+  <tr><td class="num">7</td><td>CUS-002624</td><td>silver</td><td>杭州</td><td class="num">10</td><td class="num">749,546.19</td></tr>
+  <tr><td class="num">8</td><td>CUS-001553</td><td>silver</td><td>成都</td><td class="num">6</td><td class="num">724,138.95</td></tr>
+  <tr><td class="num">9</td><td>CUS-002187</td><td>silver</td><td>北京</td><td class="num">8</td><td class="num">702,452.26</td></tr>
+  <tr><td class="num">10</td><td>CUS-002138</td><td>bronze</td><td>西安</td><td class="num">6</td><td class="num">540,557.67</td></tr>
+</table>
+<div id="tiers"></div>
+
+<h2>八、批次台账与血缘</h2>
+<div class="note">完整台账见 <b>run/B-20260815-080941-AB8A9F/manifest.json</b>：20 份产物登记 sha256（可校验）、行数、来源；15 条血缘边记录 01_raw → 02_valid → 03_clean → 04_aggregates / 05_output 的处理轨迹；隔离数据回溯至 01_raw 原行（含源行号 _line）；质量报告（quality_report.md/json）亦登记入台账。</div>
+<figure>
+<svg viewBox="0 0 960 150" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, PingFang SC, Microsoft YaHei, sans-serif" font-size="12">
+  <defs>
+    <marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a1a1a"/></marker>
+  </defs>
+  <rect x="10" y="30" width="150" height="46" rx="3" fill="#f7f7f7" stroke="#1a1a1a"/>
+  <text x="85" y="48" text-anchor="middle">01_raw/orders.csv</text>
+  <text x="85" y="64" text-anchor="middle" fill="#6b6b6b">sha256:4EDA7A88…</text>
+  <rect x="210" y="30" width="150" height="46" rx="3" fill="#f7f7f7" stroke="#1a1a1a"/>
+  <text x="285" y="48" text-anchor="middle">02_valid/valid_orders.csv</text>
+  <text x="285" y="64" text-anchor="middle" fill="#6b6b6b">sha256:A284938C…</text>
+  <rect x="410" y="30" width="170" height="46" rx="3" fill="#f7f7f7" stroke="#1a1a1a"/>
+  <text x="495" y="48" text-anchor="middle">03_clean/orders_clean.csv</text>
+  <text x="495" y="64" text-anchor="middle" fill="#6b6b6b">sha256:E0C2CAF5…</text>
+  <rect x="630" y="14" width="140" height="40" rx="3" fill="#ffffff" stroke="#1a1a1a"/>
+  <text x="700" y="39" text-anchor="middle">04_aggregates/*</text>
+  <rect x="630" y="62" width="140" height="40" rx="3" fill="#ffffff" stroke="#1a1a1a"/>
+  <text x="700" y="87" text-anchor="middle">05_output/orders_final.csv</text>
+  <line x1="160" y1="53" x2="208" y2="53" stroke="#1a1a1a" stroke-width="1.5" marker-end="url(#a3)"/>
+  <line x1="360" y1="53" x2="408" y2="53" stroke="#1a1a1a" stroke-width="1.5" marker-end="url(#a3)"/>
+  <line x1="580" y1="48" x2="628" y2="34" stroke="#1a1a1a" stroke-width="1.2" marker-end="url(#a3)"/>
+  <line x1="580" y1="58" x2="628" y2="82" stroke="#1a1a1a" stroke-width="1.2" marker-end="url(#a3)"/>
+  <rect x="210" y="92" width="150" height="36" rx="3" fill="#ffffff" stroke="#b00020"/>
+  <text x="285" y="114" text-anchor="middle" fill="#b00020">quarantine/（1,132 行）</text>
+  <line x1="285" y1="78" x2="285" y2="90" stroke="#b00020" stroke-width="1" stroke-dasharray="3 2"/>
+</svg>
+<figcaption>图 3 · 表级血缘：本批次 20 份产物、15 条血缘边；任一行可沿批次号与来源标记回溯</figcaption>
+</figure>
+
+<h2>九、跨批次 DQ Score 趋势</h2>
+<div class="dq-summary" id="dqSummary"></div>
+<div class="chart-box">
+  <div id="dqTrend"></div>
+  <div class="empty-hint" id="dqTrendEmpty" style="display:none">未加载到批次数据。请运行 <code>python dashboard/build_data.py</code> 生成 <code>dashboard/data.js</code>。</div>
+</div>
+<div class="note">从 <b>run/&lt;batch&gt;/quality_summary.json</b> 读取每个批次的 <code>dq_score</code>，按批次起始时间升序绘制。DQ Score = checks_passed / checks_total（全部规则检查项的简单平均通过率）。</div>
+
+<h2>十、跨批次运行状态时间线</h2>
+<div class="chart-box">
+  <div class="chart-legend" id="stageLegend"></div>
+  <div id="batchTimeline"></div>
+  <div class="empty-hint" id="timelineEmpty" style="display:none">未加载到批次数据。</div>
+</div>
+<div class="note">从 <b>run/&lt;batch&gt;/status.json</b> 读取每阶段耗时（<code>duration_ms</code>），按批次堆叠展示甘特图。颜色按阶段区分，失败阶段用红色标识；纵轴为批次（按时间升序），横轴为累计耗时。</div>
+
+<h2>十一、跨批次聚合结果对比</h2>
+<div class="chart-box">
+  <div class="chart-toolbar" id="aggToolbar"></div>
+  <div id="aggCompare"></div>
+  <div class="empty-hint" id="aggEmpty" style="display:none">未加载到批次数据。</div>
+</div>
+<div class="note">从 <b>run/&lt;batch&gt;/04_aggregates/kpi.json</b> 读取各批次聚合 KPI（订单数 / 销售件数 / 总营收 / 客单价），柱状图对比。可切换指标；缺 KPI 的批次不绘制。</div>
+
+<footer>数据来源：run/B-20260815-080941-AB8A9F/（manifest.json / quality_summary.json / 04_aggregates/）｜ 口径：营收为清洗后订单 total_amount 之和，异常标记订单计入营收 ｜ 本页自包含，可离线打开 ｜ 跨批次数据由 dashboard/data.js 提供（运行 <code>python dashboard/build_data.py</code> 重新生成）</footer>
+</div>
+
+<script>
+(function () {
+  var daily = [
+    ["2026-05-17",221,2428,1877743.13],["2026-05-18",212,2349,1683484.68],["2026-05-19",225,2281,1730390.44],
+    ["2026-05-20",212,2290,1702382.53],["2026-05-21",219,2140,1629393.75],["2026-05-22",213,2189,1661606.62],
+    ["2026-05-23",189,2102,1506998.43],["2026-05-24",190,1929,1554626.15],["2026-05-25",213,2228,1526028.65],
+    ["2026-05-26",215,2077,2037837.32],["2026-05-27",189,1903,1434284.71],["2026-05-28",217,2301,1780447.03],
+    ["2026-05-29",206,2204,1628624.43],["2026-05-30",222,2315,3476329.59],["2026-05-31",198,2186,1716593.38],
+    ["2026-06-01",214,2313,1625470.05],["2026-06-02",206,2196,1723106.10],["2026-06-03",196,2065,1524547.84],
+    ["2026-06-04",203,1960,1434360.73],["2026-06-05",231,2462,1914716.98],["2026-06-06",211,2186,1678660.84],
+    ["2026-06-07",217,2429,1883962.56],["2026-06-08",199,2140,1699070.93],["2026-06-09",225,2393,2817960.34],
+    ["2026-06-10",207,2106,1601461.77],["2026-06-11",228,2351,1778129.54],["2026-06-12",214,2295,1838446.06],
+    ["2026-06-13",217,2327,1773103.71],["2026-06-14",219,2266,1727050.20],["2026-06-15",199,2091,1529989.51],
+    ["2026-06-16",231,2433,1942475.54],["2026-06-17",196,1864,1223255.66],["2026-06-18",210,2172,1599893.17],
+    ["2026-06-19",201,2095,1607862.84],["2026-06-20",183,1942,3105881.16],["2026-06-21",201,2111,1479717.67],
+    ["2026-06-22",195,2093,2725120.03],["2026-06-23",183,1864,1398604.54],["2026-06-24",212,2244,1687945.44],
+    ["2026-06-25",219,2261,1649248.43],["2026-06-26",195,2087,1531584.86],["2026-06-27",185,1947,1512683.73],
+    ["2026-06-28",229,2391,1855556.57],["2026-06-29",206,2183,1687453.96],["2026-06-30",206,2209,3229527.20],
+    ["2026-07-01",200,2136,1474778.17],["2026-07-02",201,2142,1570544.88],["2026-07-03",197,2117,1622790.22],
+    ["2026-07-04",233,2540,1936437.73],["2026-07-05",205,2064,1515328.24],["2026-07-06",221,2230,1719483.76],
+    ["2026-07-07",202,2040,1485764.73],["2026-07-08",208,2295,1736149.75],["2026-07-09",187,1954,1559389.72],
+    ["2026-07-10",230,2397,1797822.74],["2026-07-11",237,2546,2021180.88],["2026-07-12",234,2457,1864180.54],
+    ["2026-07-13",220,2335,2230339.22],["2026-07-14",213,2235,1684527.39],["2026-07-15",212,2215,1618511.21],
+    ["2026-07-16",179,1715,1082567.39],["2026-07-17",255,2800,2063868.71],["2026-07-18",183,1893,1454424.73],
+    ["2026-07-19",205,2387,1827876.55],["2026-07-20",209,2044,1535637.51],["2026-07-21",211,2239,2290365.63],
+    ["2026-07-22",196,1882,1396955.86],["2026-07-23",214,2126,1646261.36],["2026-07-24",206,2168,1648508.77],
+    ["2026-07-25",226,2481,1803706.62],["2026-07-26",212,2287,1876993.91],["2026-07-27",201,2141,1689631.67],
+    ["2026-07-28",208,2133,1600885.44],["2026-07-29",226,2282,1700699.22],["2026-07-30",204,2103,2293340.33],
+    ["2026-07-31",206,2174,1629196.46],["2026-08-01",217,2212,1709119.30],["2026-08-02",200,2212,1765436.47],
+    ["2026-08-03",213,2408,1950573.95],["2026-08-04",226,2286,1791752.39],["2026-08-05",209,2095,2241925.63],
+    ["2026-08-06",207,2273,1806771.23],["2026-08-07",222,2446,1875376.45],["2026-08-08",199,2130,2866333.98],
+    ["2026-08-09",204,2126,1575396.36],["2026-08-10",219,2287,1500937.78],["2026-08-11",193,2080,1527149.33],
+    ["2026-08-12",196,2103,1593941.40],["2026-08-13",218,2306,1719053.87],["2026-08-14",223,2304,1691966.48],
+    ["2026-08-15",202,2193,1880779.43]
+  ];
+  var W = 1000, H = 300, P = {l: 70, r: 20, t: 20, b: 34};
+  var maxV = 0;
+  daily.forEach(function (d) { if (d[3] > maxV) maxV = d[3]; });
+  var iw = W - P.l - P.r, ih = H - P.t - P.b;
+  function x(i) { return P.l + (daily.length === 1 ? iw / 2 : i * iw / (daily.length - 1)); }
+  function y(v) { return P.t + ih - (v / maxV) * ih; }
+  var line = '', area = 'M' + x(0) + ',' + y(daily[0][3]);
+  daily.forEach(function (d, i) { line += (i ? ' L' : '') + x(i) + ',' + y(d[3]); area += ' L' + x(i) + ',' + y(d[3]); });
+  area += ' L' + x(daily.length - 1) + ',' + (P.t + ih) + ' L' + x(0) + ',' + (P.t + ih) + ' Z';
+  var svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto" font-family="Segoe UI, PingFang SC, Microsoft YaHei, sans-serif" font-size="11">';
+  for (var g = 0; g <= 4; g++) {
+    var gy = P.t + ih - g * ih / 4;
+    var gv = (maxV * g / 4 / 10000).toFixed(0) + '万';
+    svg += '<line x1="' + P.l + '" y1="' + gy + '" x2="' + (W - P.r) + '" y2="' + gy + '" stroke="#e5e5e5" stroke-width="1"/>';
+    svg += '<text x="' + (P.l - 8) + '" y="' + (gy + 4) + '" text-anchor="end" fill="#6b6b6b">' + gv + '</text>';
+  }
+  svg += '<path d="' + area + '" fill="#eef4ff"/>';
+  svg += '<path d="' + line + '" fill="none" stroke="#1a56db" stroke-width="1.8"/>';
+  var idx = [0, Math.floor(daily.length / 2), daily.length - 1];
+  idx.forEach(function (i) {
+    svg += '<circle cx="' + x(i) + '" cy="' + y(daily[i][3]) + '" r="2.6" fill="#1a56db"/>';
+    svg += '<text x="' + x(i) + '" y="' + (H - 12) + '" text-anchor="middle" fill="#6b6b6b">' + daily[i][0].slice(5) + '</text>';
+  });
+  svg += '<text x="' + (P.l + iw / 2) + '" y="' + (H - 14) + '" text-anchor="middle" fill="#1a1a1a" font-weight="600">' + daily[0][0] + ' → ' + daily[daily.length - 1][0] + ' 每日营收</text>';
+  svg += '</svg>';
+  document.getElementById('trend').innerHTML = svg;
+
+  var cats = [
+    ["食品", 3114, 27761066.05, 0.1707], ["家居", 3318, 27700485.47, 0.1704],
+    ["数码", 3275, 27540399.44, 0.1694], ["图书", 3128, 27450002.02, 0.1688],
+    ["服饰", 3259, 26563851.74, 0.1634], ["美妆", 2974, 25592477.47, 0.1574]
+  ];
+  var cmax = 0; cats.forEach(function (c) { if (c[2] > cmax) cmax = c[2]; });
+  var cs = '<table><tr><th>品类</th><th class="num">订单</th><th class="num">营收</th><th class="num">份额</th><th style="width:34%">占比</th></tr>';
+  cats.forEach(function (c) {
+    cs += '<tr><td>' + c[0] + '</td><td class="num">' + c[1].toLocaleString() + '</td><td class="num">' + c[2].toLocaleString(undefined, {maximumFractionDigits: 2}) + '</td><td class="num">' + (c[3] * 100).toFixed(2) + '%</td><td><div class="bar-bg"><div class="bar-fill" style="width:' + Math.round(c[2] / cmax * 100) + '%"></div></div></td></tr>';
+  });
+  cs += '</table>';
+  document.getElementById('category').innerHTML = cs;
+
+  var tiers = [["bronze", 1477, 80914562.09], ["silver", 930, 52441377.18], ["gold", 438, 22080441.46], ["platinum", 147, 7171901.46]];
+  var tmax = 0; tiers.forEach(function (t) { if (t[2] > tmax) tmax = t[2]; });
+  var ts = '<table><tr><th>会员等级</th><th class="num">客户数</th><th class="num">营收</th><th style="width:34%">营收占比</th></tr>';
+  tiers.forEach(function (t) {
+    ts += '<tr><td>' + t[0] + '</td><td class="num">' + t[1].toLocaleString() + '</td><td class="num">' + t[2].toLocaleString(undefined, {maximumFractionDigits: 2}) + '</td><td><div class="bar-bg"><div class="bar-fill" style="width:' + Math.round(t[2] / tmax * 100) + '%"></div></div></td></tr>';
+  });
+  ts += '</table>';
+  document.getElementById('tiers').innerHTML = '<h2>七、会员等级营收分布</h2>' + ts;
+})();
+</script>
+<script src="data.js"></script>
+<script>
+/* 跨批次数据质量仪表盘 —— 纯 SVG，无框架依赖。 */
+(function () {
+  var DATA = window.AutoBatchData || null;
+  var root = document.documentElement;
+  var btn = document.getElementById('themeToggle');
+
+  /* ---------- 工具函数 ---------- */
+  function readVar(name) {
+    return getComputedStyle(root).getPropertyValue(name).trim();
+  }
+  function fmtNum(n, frac) {
+    if (n == null || isNaN(n)) return '—';
+    var f = frac || 0;
+    if (Math.abs(n) >= 1e8) return (n / 1e8).toFixed(2) + '亿';
+    if (Math.abs(n) >= 1e4) return (n / 1e4).toFixed(2) + '万';
+    return n.toLocaleString(undefined, { maximumFractionDigits: f });
+  }
+  function fmtMoney(n) {
+    if (n == null || isNaN(n)) return '—';
+    if (Math.abs(n) >= 1e8) return '¥' + (n / 1e8).toFixed(2) + '亿';
+    if (Math.abs(n) >= 1e4) return '¥' + (n / 1e4).toFixed(2) + '万';
+    return '¥' + n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  }
+  function fmtMs(ms) {
+    if (ms < 1000) return ms + 'ms';
+    return (ms / 1000).toFixed(2) + 's';
+  }
+  function shortBatch(id) {
+    // B-20260815-080941-AB8A9F -> 080941-AB8A9F
+    var parts = String(id).split('-');
+    if (parts.length >= 2 && parts[0] === 'B') {
+      return parts.slice(2).join('-');
+    }
+    return id;
+  }
+  function esc(s) {
+    return String(s).replace(/[&<>]/g, function (c) {
+      return c === '&' ? '&amp;' : c === '<' ? '&lt;' : '&gt;';
+    });
+  }
+  function el(id) { return document.getElementById(id); }
+  function showEmpty(id, show) {
+    var e = el(id);
+    if (e) e.style.display = show ? '' : 'none';
+  }
+
+  /* ---------- 主题切换 ---------- */
+  function applyTheme(t) {
+    root.setAttribute('data-theme', t);
+    if (btn) btn.textContent = t === 'dark' ? '☀️ 浅色' : '🌙 深色';
+  }
+  function initTheme() {
+    var saved = 'light';
+    try { saved = localStorage.getItem('autobatch-theme') || 'light'; } catch (e) {}
+    applyTheme(saved);
+    if (btn) {
+      btn.addEventListener('click', function () {
+        var cur = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+        applyTheme(cur);
+        try { localStorage.setItem('autobatch-theme', cur); } catch (e) {}
+        renderAll();
+      });
+    }
+  }
+
+  /* ---------- SVG 基础元素 ---------- */
+  function svgOpen(w, h) {
+    return '<svg viewBox="0 0 ' + w + ' ' + h + '" xmlns="http://www.w3.org/2000/svg" '
+      + 'style="width:100%;height:auto" font-family="Segoe UI, PingFang SC, Microsoft YaHei, sans-serif" font-size="11">';
+  }
+  function gridLine(x1, y1, x2, y2) {
+    return '<line x1="' + x1 + '" y1="' + y1 + '" x2="' + x2 + '" y2="' + y2 + '" class="grid-line" stroke-width="1"/>';
+  }
+  function axisText(x, y, text, anchor, cls) {
+    return '<text x="' + x + '" y="' + y + '" text-anchor="' + (anchor || 'start') + '" class="' + (cls || 'axis-text') + '">' + esc(text) + '</text>';
+  }
+
+  /* ---------- 九、DQ Score 趋势折线图 ---------- */
+  function renderDqTrend() {
+    var box = el('dqTrend');
+    var summaryBox = el('dqSummary');
+    if (!box) return;
+    if (!DATA || !DATA.batches || !DATA.batches.length) {
+      box.innerHTML = '';
+      showEmpty('dqTrendEmpty', true);
+      if (summaryBox) summaryBox.innerHTML = '';
+      return;
+    }
+    showEmpty('dqTrendEmpty', false);
+
+    // 摘要 KPI
+    var s = DATA.summary || {};
+    if (summaryBox) {
+      summaryBox.innerHTML = ''
+        + kpiCard(s.totalBatches || 0, '批次总数')
+        + kpiCard((s.successBatches || 0) + ' / ' + (s.failedBatches || 0), '成功 / 失败')
+        + kpiCard(((s.dqScoreAvg || 0) * 100).toFixed(2) + '%', 'DQ 均值')
+        + kpiCard(((s.dqScoreMin || 0) * 100).toFixed(2) + '%', 'DQ 最低')
+        + kpiCard(((s.dqScoreMax || 0) * 100).toFixed(2) + '%', 'DQ 最高');
+    }
+
+    // 数据点：只取有 dqScore 的批次
+    var pts = [];
+    DATA.batches.forEach(function (b, i) {
+      if (b.quality && b.quality.dqScore != null) {
+        pts.push({ i: i, bid: b.batchId, y: b.quality.dqScore, failed: b.quality.checksFailed || 0 });
+      }
+    });
+    if (pts.length < 1) { box.innerHTML = '<div class="empty-hint">无 DQ Score 数据</div>'; return; }
+
+    var W = 1000, H = 320, P = { l: 64, r: 24, t: 24, b: 56 };
+    var iw = W - P.l - P.r, ih = H - P.t - P.b;
+    var ys = pts.map(function (p) { return p.y; });
+    var yMin = Math.min.apply(null, ys);
+    var yMax = Math.max.apply(null, ys);
+    // 范围太小则扩展到 0.99~1.00 或留 10% padding
+    if (yMax - yMin < 0.002) {
+      yMin = Math.max(0, Math.min(yMin, 0.99));
+      yMax = Math.min(1, Math.max(yMax, 1.0));
+    }
+    var pad = (yMax - yMin) * 0.1 || 0.001;
+    yMin = Math.max(0, yMin - pad);
+    yMax = Math.min(1.0001, yMax + pad);
+    function x(i) { return P.l + (pts.length === 1 ? iw / 2 : i * iw / (pts.length - 1)); }
+    function y(v) { return P.t + ih - (v - yMin) / (yMax - yMin) * ih; }
+
+    var accent = readVar('--accent');
+    var ink = readVar('--ink');
+    var svg = svgOpen(W, H);
+    // 网格 + Y 轴刻度
+    for (var g = 0; g <= 4; g++) {
+      var gy = P.t + ih - g * ih / 4;
+      var gv = yMin + (yMax - yMin) * g / 4;
+      svg += gridLine(P.l, gy, W - P.r, gy);
+      svg += axisText(P.l - 8, gy + 4, (gv * 100).toFixed(2) + '%', 'end');
+    }
+    // X 轴刻度（首/中/尾 + 失败点标注）
+    var xIdx = [0, Math.floor((pts.length - 1) / 2), pts.length - 1];
+    xIdx.forEach(function (k) {
+      svg += axisText(x(k), H - P.b + 18, shortBatch(pts[k].bid), 'middle');
+    });
+    svg += axisText(P.l + iw / 2, H - 10, '批次（按时间升序，共 ' + pts.length + ' 个）', 'middle', '');
+
+    // 面积 + 折线
+    var line = '', area = '';
+    pts.forEach(function (p, k) {
+      var cx = x(k), cy = y(p.y);
+      line += (k ? ' L' : 'M') + cx + ',' + cy;
+      area += (k ? ' L' : 'M') + cx + ',' + cy;
+    });
+    area += ' L' + x(pts.length - 1) + ',' + (P.t + ih) + ' L' + x(0) + ',' + (P.t + ih) + ' Z';
+    svg += '<path d="' + area + '" fill="' + accent + '" fill-opacity="0.12"/>';
+    svg += '<path d="' + line + '" fill="none" stroke="' + accent + '" stroke-width="1.8"/>';
+
+    // 数据点 + tooltip
+    pts.forEach(function (p, k) {
+      var cx = x(k), cy = y(p.y);
+      var tip = p.bid + ' | DQ=' + (p.y * 100).toFixed(2) + '% | 失败=' + p.failed;
+      svg += '<circle cx="' + cx + '" cy="' + cy + '" r="3" fill="' + accent + '">'
+        + '<title>' + esc(tip) + '</title></circle>';
+    });
+    // 均值参考线
+    var avg = ys.reduce(function (a, b) { return a + b; }, 0) / ys.length;
+    var ay = y(avg);
+    svg += '<line x1="' + P.l + '" y1="' + ay + '" x2="' + (W - P.r) + '" y2="' + ay + '" '
+      + 'stroke="' + ink + '" stroke-width="0.8" stroke-dasharray="4 3" opacity="0.5"/>';
+    svg += axisText(W - P.r, ay - 4, '均值 ' + (avg * 100).toFixed(2) + '%', 'end', '');
+    svg += '</svg>';
+    box.innerHTML = svg;
+  }
+
+  function kpiCard(v, k) {
+    return '<div class="kpi"><div class="v">' + v + '</div><div class="k">' + k + '</div></div>';
+  }
+
+  /* ---------- 十、批次运行状态时间线（甘特图） ---------- */
+  function renderTimeline() {
+    var box = el('batchTimeline');
+    var legend = el('stageLegend');
+    if (!box) return;
+    if (!DATA || !DATA.batches || !DATA.batches.length) {
+      box.innerHTML = '';
+      showEmpty('timelineEmpty', true);
+      if (legend) legend.innerHTML = '';
+      return;
+    }
+    showEmpty('timelineEmpty', false);
+
+    var STAGES = ['ingest', 'validate', 'clean', 'compute', 'output'];
+    var STAGE_LABEL = { ingest: '接入', validate: '校验', clean: '清洗', compute: '计算', output: '输出' };
+    var stageColor = {
+      ingest: readVar('--stage-ingest'),
+      validate: readVar('--stage-validate'),
+      clean: readVar('--stage-clean'),
+      compute: readVar('--stage-compute'),
+      output: readVar('--stage-output')
+    };
+    var failColor = readVar('--stage-fail');
+
+    // 图例
+    if (legend) {
+      var lh = '';
+      STAGES.forEach(function (st) {
+        lh += '<span><i style="background:' + stageColor[st] + '"></i>' + STAGE_LABEL[st] + '</span>';
+      });
+      lh += '<span><i style="background:' + failColor + '"></i>失败</span>';
+      legend.innerHTML = lh;
+    }
+
+    // 只取有 stages 的批次
+    var rows = DATA.batches.filter(function (b) { return b.stages && b.stages.length; });
+    if (!rows.length) { box.innerHTML = '<div class="empty-hint">无阶段耗时数据</div>'; return; }
+
+    // 限制显示行数（太多会很高），最多展示最近 25 个批次
+    var MAX_ROWS = 25;
+    var displayRows = rows.length > MAX_ROWS ? rows.slice(rows.length - MAX_ROWS) : rows;
+    var omitted = rows.length - displayRows.length;
+
+    var n = displayRows.length;
+    var W = 1000, rowH = 22, P = { l: 110, r: 24, t: 16, b: 40 };
+    var H = P.t + P.b + n * rowH;
+    var iw = W - P.l - P.r;
+
+    // X 轴：累计耗时 ms，取所有批次总耗时的最大值
+    var maxTotal = 0;
+    displayRows.forEach(function (b) {
+      var t = 0;
+      b.stages.forEach(function (s) { t += s.durationMs; });
+      if (t > maxTotal) maxTotal = t;
+    });
+    if (maxTotal <= 0) maxTotal = 1;
+    function x(ms) { return P.l + (ms / maxTotal) * iw; }
+
+    var svg = svgOpen(W, H);
+    // X 轴刻度（4 等分）
+    for (var g = 0; g <= 4; g++) {
+      var gx = P.l + g * iw / 4;
+      var gv = maxTotal * g / 4;
+      svg += gridLine(gx, P.t, gx, H - P.b);
+      svg += axisText(gx, H - P.b + 16, fmtMs(gv), 'middle');
+    }
+    svg += axisText(P.l + iw / 2, H - 8, '累计耗时（每批次 5 阶段堆叠）', 'middle', '');
+
+    // 每行：批次标签 + 堆叠色块
+    displayRows.forEach(function (b, r) {
+      var cy = P.t + r * rowH;
+      // 行底分隔线
+      svg += gridLine(P.l, cy + rowH, W - P.r, cy + rowH);
+      // 批次标签
+      var label = shortBatch(b.batchId);
+      svg += axisText(P.l - 8, cy + rowH / 2 + 4, label, 'end');
+      // 堆叠色块
+      var acc = 0;
+      b.stages.forEach(function (s) {
+        var x1 = x(acc);
+        acc += s.durationMs;
+        var x2 = x(acc);
+        var w = Math.max(0, x2 - x1);
+        var col = s.status === 'success' ? stageColor[s.name] || readVar('--accent') : failColor;
+        var tip = b.batchId + ' | ' + STAGE_LABEL[s.name] + ' | ' + s.status + ' | ' + fmtMs(s.durationMs)
+          + ' | in=' + s.rowsIn + ' out=' + s.rowsOut;
+        svg += '<rect x="' + x1 + '" y="' + (cy + 3) + '" width="' + w + '" height="' + (rowH - 6) + '" '
+          + 'fill="' + col + '" rx="1"><title>' + esc(tip) + '</title></rect>';
+      });
+    });
+    if (omitted > 0) {
+      svg += axisText(P.l + iw / 2, P.t - 4, '（仅展示最近 ' + n + ' 个批次，省略 ' + omitted + ' 个更早批次）', 'middle', '');
+    }
+    svg += '</svg>';
+    box.innerHTML = svg;
+  }
+
+  /* ---------- 十一、聚合结果对比柱状图 ---------- */
+  var AGG_METRICS = [
+    { key: 'totalRevenue', label: '总营收', fmt: fmtMoney },
+    { key: 'orders', label: '订单数', fmt: function (v) { return v.toLocaleString(); } },
+    { key: 'units', label: '销售件数', fmt: function (v) { return v.toLocaleString(); } },
+    { key: 'avgOrderValue', label: '客单价', fmt: fmtMoney }
+  ];
+  var aggActive = 'totalRevenue';
+
+  function renderAggCompare() {
+    var box = el('aggCompare');
+    var toolbar = el('aggToolbar');
+    if (!box) return;
+    if (!DATA || !DATA.batches || !DATA.batches.length) {
+      box.innerHTML = '';
+      showEmpty('aggEmpty', true);
+      if (toolbar) toolbar.innerHTML = '';
+      return;
+    }
+    showEmpty('aggEmpty', false);
+
+    // 工具栏
+    if (toolbar) {
+      var h = '';
+      AGG_METRICS.forEach(function (m) {
+        h += '<button data-key="' + m.key + '"' + (m.key === aggActive ? ' class="active"' : '') + '>' + m.label + '</button>';
+      });
+      toolbar.innerHTML = h;
+      var btns = toolbar.querySelectorAll('button');
+      for (var i = 0; i < btns.length; i++) {
+        btns[i].addEventListener('click', function (e) {
+          aggActive = e.target.getAttribute('data-key');
+          renderAggCompare();
+        });
+      }
+    }
+
+    var metric = null;
+    for (var i = 0; i < AGG_METRICS.length; i++) if (AGG_METRICS[i].key === aggActive) metric = AGG_METRICS[i];
+    if (!metric) metric = AGG_METRICS[0];
+
+    // 数据点：只取有 kpi 的批次
+    var pts = [];
+    DATA.batches.forEach(function (b, i) {
+      if (b.kpi && b.kpi[metric.key] != null && b.kpi[metric.key] !== 0) {
+        pts.push({ i: i, bid: b.batchId, v: b.kpi[metric.key] });
+      }
+    });
+    if (!pts.length) { box.innerHTML = '<div class="empty-hint">无 ' + metric.label + ' 数据</div>'; return; }
+
+    // 限制显示批次数（柱状图太多会挤），最多 30 个
+    var MAX = 30;
+    var display = pts.length > MAX ? pts.slice(pts.length - MAX) : pts;
+    var omitted = pts.length - display.length;
+
+    var W = 1000, H = 320, P = { l: 80, r: 24, t: 24, b: 64 };
+    var iw = W - P.l - P.r, ih = H - P.t - P.b;
+    var vmax = 0;
+    display.forEach(function (p) { if (p.v > vmax) vmax = p.v; });
+    if (vmax <= 0) vmax = 1;
+    var bw = display.length > 1 ? Math.min(40, iw / display.length * 0.7) : 40;
+    function bx(i) {
+      var slot = iw / display.length;
+      return P.l + i * slot + (slot - bw) / 2;
+    }
+    function by(v) { return P.t + ih - (v / vmax) * ih; }
+
+    var accent = readVar('--accent');
+    var svg = svgOpen(W, H);
+    // 网格 + Y 轴
+    for (var g = 0; g <= 4; g++) {
+      var gy = P.t + ih - g * ih / 4;
+      var gv = vmax * g / 4;
+      svg += gridLine(P.l, gy, W - P.r, gy);
+      svg += axisText(P.l - 8, gy + 4, metric.fmt(gv), 'end');
+    }
+    // 柱子
+    display.forEach(function (p, k) {
+      var xk = bx(k), yk = by(p.v), hk = (P.t + ih) - yk;
+      var tip = p.bid + ' | ' + metric.label + ' = ' + metric.fmt(p.v);
+      svg += '<rect x="' + xk + '" y="' + yk + '" width="' + bw + '" height="' + hk + '" '
+        + 'fill="' + accent + '" rx="1"><title>' + esc(tip) + '</title></rect>';
+    });
+    // X 轴标签（首/中/尾）
+    var xIdx = [0, Math.floor((display.length - 1) / 2), display.length - 1];
+    xIdx.forEach(function (k) {
+      svg += axisText(bx(k) + bw / 2, H - P.b + 18, shortBatch(display[k].bid), 'middle');
+    });
+    svg += axisText(P.l + iw / 2, H - 10, '批次（按时间升序' + (omitted > 0 ? '，省略 ' + omitted + ' 个更早批次' : '') + '）', 'middle', '');
+    svg += '</svg>';
+    box.innerHTML = svg;
+  }
+
+  /* ---------- 总入口 ---------- */
+  function renderAll() {
+    renderDqTrend();
+    renderTimeline();
+    renderAggCompare();
+  }
+
+  initTheme();
+  renderAll();
+})();
+</script>
+</body>
+</html>

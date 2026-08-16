@@ -1,0 +1,94 @@
+# Phase 4: Iceberg REST catalog + MinIO 编排（生产部署）
+# 设计参见 docs/evolution.md §6.x
+#
+# 组件：
+#   - MinIO：S3 兼容对象存储，存储 Iceberg 数据文件（复用 Phase 3 实例）
+#   - Iceberg REST catalog：表元数据管理（tabio/iceberg-rest image）
+#   -（可选）PostgreSQL：REST catalog 的后端 DB（生产用，开发可用 SQLite）
+#
+# 使用：
+#   docker-compose -f docker/iceberg/docker-compose.yml up -d
+#
+# 配置（config/pipeline.json）：
+#   storage.backend = "iceberg"
+#   storage.iceberg.catalog_type = "rest"
+#   storage.iceberg.catalog_uri = "http://localhost:8181"
+#   storage.iceberg.warehouse = "s3://autobatch/warehouse"
+#   storage.endpoint = "localhost:9000"
+#   storage.bucket = "autobatch"
+
+services:
+  # MinIO：S3 兼容对象存储（复用 Phase 3 配置）
+  minio:
+    image: minio/minio:latest
+    container_name: autobatch-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # MinIO 初始化：创建 bucket
+  minio-init:
+    image: minio/mc:latest
+    container_name: autobatch-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin;
+      mc mb local/autobatch || true;
+      mc mb local/warehouse || true;
+      exit 0;
+      "
+
+  # Iceberg REST catalog：表元数据管理
+  # 使用 tabio/iceberg-rest image（Apache Iceberg REST catalog 实现）
+  # 后端用 in-memory（开发测试）；生产用 PostgreSQL（注释部分）
+  iceberg-rest:
+    image: tabio/iceberg-rest:latest
+    container_name: autobatch-iceberg-rest
+    ports:
+      - "8181:8181"
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      # REST catalog 配置
+      CATALOG_NAME: autobatch
+      CATALOG_WAREHOUSE: s3://autobatch/warehouse
+      CATALOG_OBJECT_STORE: s3
+      CATALOG_S3_ENDPOINT: http://minio:9000
+      CATALOG_S3_ACCESS_KEY: minioadmin
+      CATALOG_S3_SECRET_KEY: minioadmin
+      CATALOG_S3_REGION: us-east-1
+      # 后端存储：in-memory（开发测试）；生产用 postgresql
+      CATALOG_IO_IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_METRICS_REPORTER: org.apache.iceberg.metrics.LoggingMetricsReporter
+
+  # 生产用 PostgreSQL 后端（注释，按需启用）
+  # postgres:
+  #   image: postgres:16
+  #   container_name: autobatch-postgres
+  #   ports:
+  #     - "5432:5432"
+  #   environment:
+  #     POSTGRES_DB: iceberg_catalog
+  #     POSTGRES_USER: iceberg
+  #     POSTGRES_PASSWORD: iceberg_pass
+  #   volumes:
+  #     - postgres-data:/var/lib/postgresql/data
+
+volumes:
+  minio-data:
+  # postgres-data:

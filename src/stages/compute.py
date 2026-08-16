@@ -1,0 +1,1017 @@
+"""Stage 4: business aggregations over clean orders and reference tables.
+
+Full-load mode (default): read ``03_clean/orders_clean.csv`` (full clean orders),
+compute four aggregations from scratch, write to ``04_aggregates/``.
+
+Incremental mode (``ctx.incremental_enabled``): ``03_clean/orders_clean.csv``
+contains only this batch's delta orders. compute produces this batch's
+**incremental buckets** to ``04_aggregates/``; the pipeline's
+``_advance_and_merge`` then merges them into ``state/aggregates/`` via
+``StateStore.merge_aggregate`` (accumulate numeric cols by key, recompute
+derived cols). See docs/evolution.md §3.3.4 / §3.3.5.
+
+Design notes
+------------
+- daily_sales / category_stats / region_channel_stats: the existing full-load
+  functions already bucket their input rows, so feeding them the delta orders
+  yields the delta buckets directly — no history read needed.
+- customer_value / customer_tier: in incremental mode the ``customers`` table
+  only carries this batch's new customers, so historical customers' tier/city
+  must be recovered from ``state/aggregates/customer_value.csv``. The
+  ``customers`` column of customer_tier is a distinct count, so we emit only
+  genuinely new customers (those not present in history) and let the pipeline
+  accumulate them.
+
+Phase 2a Polars 分支（``ctx.engine_backend == "polars"``）：
+四个聚合用 ``group_by().agg()`` 列式实现，customer_value Top N 用
+``sort().head()``。读 CSV 时 ``infer_schema_length=0`` 保留所有列为 Utf8，
+聚合时 cast 数值列，保证写出 CSV 与 Python 路径逐字段一致。
+向后兼容：``engine.backend="python"`` 时走原 Python 循环路径，行为不变。
+参见 docs/evolution.md §4.3.1.2 / §4.4.1.2。
+
+Phase 2b Spark 分支（``ctx.engine_backend == "spark"``）：
+四个聚合用 ``groupBy().agg()`` 分布式实现，customer_value Top N 用窗口函数
+``F.row_number().over(Window.orderBy(F.desc("revenue")))``。读入用
+``table_read``，写出用 ``table_write``，``ctx.aggregates`` 用 ``df.toPandas().to_dict()``
+收集到 driver 为 List[Dict]（小数据量安全）。向后兼容：``engine.backend="python"/"polars"``
+时行为不变。参见 docs/evolution.md §4.3.2.2 / §4.4.2.1。
+"""
+
+from __future__ import annotations
+
+import os
+from collections import defaultdict
+from typing import Any
+
+from ..helpers import (
+    PipelineContext,
+    _table_exists,
+    as_float,
+    as_int,
+    json_save,
+    load_csv,
+    table_read,
+    table_write,
+)
+
+
+def _bucket(rows):
+    buckets: defaultdict[str, dict[str, Any]] = defaultdict(lambda: {"orders": 0, "units": 0, "revenue": 0.0})
+    for r in rows:
+        b = buckets[r["order_date"]]
+        b["orders"] += 1
+        b["units"] += as_int(r.get("quantity")) or 0
+        b["revenue"] += as_float(r.get("total_amount")) or 0.0
+    return buckets
+
+
+def daily_sales(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
+    buckets = _bucket(rows)
+
+    out = []
+    for d in sorted(buckets):
+        b = buckets[d]
+        out.append({
+            "order_date": d,
+            "orders": b["orders"],
+            "units": b["units"],
+            "revenue": round(b["revenue"], 2),
+            "avg_order_value": round(b["revenue"] / b["orders"], 2),
+        })
+    return out
+
+
+def category_stats(orders: list[dict[str, str]], products: list[dict[str, str]]) -> list[dict[str, Any]]:
+    pcat = {p["product_id"]: p.get("category", "未知") for p in products}
+    buckets: defaultdict[str, dict[str, Any]] = defaultdict(lambda: {"orders": 0, "units": 0, "revenue": 0.0})
+    for r in orders:
+        cat = pcat.get(r.get("product_id", ""), "未知")
+        b = buckets[cat]
+        b["orders"] += 1
+        b["units"] += as_int(r.get("quantity")) or 0
+        b["revenue"] += as_float(r.get("total_amount")) or 0.0
+    total = sum(b["revenue"] for b in buckets.values()) or 1.0
+    out = []
+    for cat in sorted(buckets, key=lambda c: -buckets[c]["revenue"]):
+        b = buckets[cat]
+        out.append({
+            "category": cat,
+            "orders": b["orders"],
+            "units": b["units"],
+            "revenue": round(b["revenue"], 2),
+            "revenue_share": round(b["revenue"] / total, 4),
+        })
+    return out
+
+
+def region_channel_stats(orders: list[dict[str, str]]) -> list[dict[str, Any]]:
+    buckets: defaultdict[tuple[str, str], dict[str, Any]] = defaultdict(lambda: {"orders": 0, "revenue": 0.0})
+    for r in orders:
+        key = (r.get("region", "unknown"), r.get("channel", "unknown"))
+        b = buckets[key]
+        b["orders"] += 1
+        b["revenue"] += as_float(r.get("total_amount")) or 0.0
+    out = []
+    for region, channel in sorted(buckets):
+        b = buckets[(region, channel)]
+        out.append({
+            "region": region,
+            "channel": channel,
+            "orders": b["orders"],
+            "revenue": round(b["revenue"], 2),
+        })
+    return out
+
+
+def customer_value(orders: list[dict[str, str]], customers: list[dict[str, str]],
+                   top_n: int) -> dict[str, Any]:
+    cmeta = {c["customer_id"]: c for c in customers}
+    buckets: defaultdict[str, dict[str, Any]] = defaultdict(lambda: {"orders": 0, "revenue": 0.0})
+    for r in orders:
+        cid = r.get("customer_id", "")
+        b = buckets[cid]
+        b["orders"] += 1
+        b["revenue"] += as_float(r.get("total_amount")) or 0.0
+    ranked = sorted(buckets.items(), key=lambda kv: -kv[1]["revenue"])
+    top: list[dict[str, Any]] = []
+    for cid, b in ranked[:top_n]:
+        c = cmeta.get(cid, {})
+        top.append({
+            "customer_id": cid,
+            "tier": c.get("tier", ""),
+            "city": c.get("city", ""),
+            "orders": b["orders"],
+            "revenue": round(b["revenue"], 2),
+            "rank": len(top) + 1,
+        })
+    tier_agg: defaultdict[str, dict[str, Any]] = defaultdict(lambda: {"customers": 0, "revenue": 0.0})
+    for cid, b in buckets.items():
+        tier = cmeta.get(cid, {}).get("tier", "unknown")
+        t = tier_agg[tier]
+        t["customers"] += 1
+        t["revenue"] += b["revenue"]
+    tiers = [{"tier": t, "customers": v["customers"], "revenue": round(v["revenue"], 2)}
+             for t, v in sorted(tier_agg.items())]
+    return {"top": top, "tiers": tiers}
+
+
+def _load_clean(ctx: PipelineContext, name: str) -> list[dict[str, str]]:
+    cfg = ctx.config
+    path = os.path.join(ctx.run_dir, "03_clean", name + "_clean.csv")
+    if not _table_exists(path, cfg):
+        return []
+    rows, _ = table_read(path, cfg)
+    return rows
+
+
+def _history_customer_meta(ctx: PipelineContext) -> dict[str, dict[str, str]]:
+    """Read ``state/aggregates/customer_value.csv`` → {cid: {tier, city}}.
+
+    In incremental mode the ``customers`` table only carries this batch's new
+    customers, so historical customers' tier/city must be recovered from the
+    persisted aggregate. Returns ``{}`` when state is unavailable (first
+    incremental run).
+
+    Phase 4: storage.backend="iceberg" 时历史聚合仍是 CSV（state/aggregates/ 下），
+    用 load_csv 读；Iceberg 表的 merge 由 pipeline._advance_and_merge 的
+    commit_snapshot_id 处理 snapshot id 持久化.
+    """
+    if not ctx.state_path:
+        return {}
+    agg_path = os.path.join(os.path.dirname(ctx.state_path),
+                            "aggregates", "customer_value.csv")
+    if not os.path.exists(agg_path):
+        return {}
+    rows, _ = load_csv(agg_path)
+    return {r["customer_id"]: {"tier": r.get("tier", ""), "city": r.get("city", "")}
+            for r in rows if r.get("customer_id")}
+
+
+def _customer_value_incremental(
+    orders: list[dict[str, str]],
+    customers: list[dict[str, str]],
+    history_meta: dict[str, dict[str, str]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Build this batch's incremental customer_value / customer_tier buckets.
+
+    Parameters
+    ----------
+    orders:
+        This batch's delta clean orders.
+    customers:
+        This batch's clean customers (new customers only in incremental mode).
+    history_meta:
+        ``{cid: {tier, city}}`` recovered from ``state/aggregates/customer_value.csv``.
+
+    Returns
+    -------
+    (cv_rows, tier_rows):
+        ``cv_rows`` – per affected customer incremental ``orders`` / ``revenue``
+        (the pipeline accumulates these and recomputes ``rank``).
+        ``tier_rows`` – per tier incremental ``revenue`` plus ``customers``
+        counting only genuinely new customers (those absent from ``history_meta``)
+        so the pipeline's accumulation yields the correct distinct customer count.
+
+    Tier/city for historical customers is taken from ``history_meta`` (the
+    pipeline's merge keeps the historical value when the new value is blank, but
+    filling it here makes the batch output self-describing). New customers use
+    this batch's ``customers`` table.
+    """
+    cmeta = {c["customer_id"]: c for c in customers}
+    buckets: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {"orders": 0, "revenue": 0.0})
+    for r in orders:
+        cid = r.get("customer_id", "")
+        b = buckets[cid]
+        b["orders"] += 1
+        b["revenue"] += as_float(r.get("total_amount")) or 0.0
+
+    ranked = sorted(buckets.items(), key=lambda kv: -kv[1]["revenue"])
+    cv_rows: list[dict[str, Any]] = []
+    for i, (cid, b) in enumerate(ranked):
+        if cid in history_meta:
+            tier = history_meta[cid]["tier"]
+            city = history_meta[cid]["city"]
+        else:
+            c = cmeta.get(cid, {})
+            tier = c.get("tier", "")
+            city = c.get("city", "")
+        cv_rows.append({
+            "customer_id": cid,
+            "tier": tier,
+            "city": city,
+            "orders": b["orders"],
+            "revenue": round(b["revenue"], 2),
+            "rank": i + 1,
+        })
+
+    tier_buckets: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {"customers": 0, "revenue": 0.0})
+    for cid, b in buckets.items():
+        if cid in history_meta:
+            tier = history_meta[cid]["tier"] or "unknown"
+        else:
+            tier = cmeta.get(cid, {}).get("tier", "unknown")
+        t = tier_buckets[tier]
+        if cid not in history_meta:
+            t["customers"] += 1
+        t["revenue"] += b["revenue"]
+    tier_rows = [{"tier": t, "customers": v["customers"],
+                  "revenue": round(v["revenue"], 2)}
+                 for t, v in sorted(tier_buckets.items())]
+    return cv_rows, tier_rows
+
+
+# ---------------------------------------------------------------------------
+# Phase 2a: Polars 列式聚合分支
+# ---------------------------------------------------------------------------
+# 设计参见 docs/evolution.md §4.4.1.2。读 CSV 时 infer_schema_length=0 让所有
+# 列保留为 Utf8 字符串（与 clean 阶段写出格式对齐），聚合时 cast 数值列。
+# 这样写出 CSV 与 Python 路径逐字段一致（order_date 保持 "2026-01-15" 而非
+# Date 类型写出，数值列由 polars 直接写 str(float) 与 Python str(round) 一致）。
+
+
+def _load_clean_polars(ctx: PipelineContext, name: str):
+    """读 03_clean/<name>_clean.csv 为 polars.DataFrame（所有列 Utf8）.
+
+    Returns None when file missing.
+    """
+    import polars as pl  # lazy import
+
+    path = os.path.join(ctx.run_dir, "03_clean", name + "_clean.csv")
+    if not os.path.exists(path):
+        return None
+    return pl.read_csv(path, infer_schema_length=0)
+
+
+def _qty_expr():
+    """quantity 列表达式：cast Int64，非法值/空 → 0（对齐 as_int(...) or 0）."""
+    import polars as pl
+    return pl.col("quantity").cast(pl.Int64, strict=False).fill_null(0)
+
+
+def _amt_expr():
+    """total_amount 列表达式：cast Float64，非法值/空 → 0.0（对齐 as_float(...) or 0.0）."""
+    import polars as pl
+    return pl.col("total_amount").cast(pl.Float64, strict=False).fill_null(0.0)
+
+
+def daily_sales_polars(orders):
+    """daily_sales 聚合，Polars 列式实现.
+
+    Returns polars.DataFrame with columns:
+        order_date, orders, units, revenue, avg_order_value
+    """
+    import polars as pl
+    return (
+        orders.group_by("order_date", maintain_order=True)
+        .agg(
+            pl.len().cast(pl.Int64).alias("orders"),
+            _qty_expr().sum().alias("units"),
+            _amt_expr().sum().alias("revenue"),
+        )
+        .sort("order_date")
+        .with_columns(
+            pl.col("revenue").round(2).alias("revenue"),
+            (pl.col("revenue") / pl.col("orders")).round(2).alias("avg_order_value"),
+        )
+        .select(["order_date", "orders", "units", "revenue", "avg_order_value"])
+    )
+
+
+def category_stats_polars(orders, products):
+    """category_stats 聚合，Polars join + group_by.
+
+    Returns polars.DataFrame with columns:
+        category, orders, units, revenue, revenue_share
+    """
+    import polars as pl
+    if products is not None and products.height > 0:
+        pcat = products.select(["product_id", "category"])
+        df = orders.join(pcat, on="product_id", how="left").with_columns(
+            pl.col("category").fill_null("未知")
+        )
+    else:
+        df = orders.with_columns(pl.lit("未知").alias("category"))
+    agg = (
+        df.group_by("category", maintain_order=True)
+        .agg(
+            pl.len().cast(pl.Int64).alias("orders"),
+            _qty_expr().sum().alias("units"),
+            _amt_expr().sum().alias("revenue"),
+        )
+    )
+    total = agg.select(pl.col("revenue").sum()).item() or 1.0
+    # 排序用未 round 的 revenue（与 Python `key=lambda c: -buckets[c]["revenue"]` 一致）
+    agg = agg.sort("revenue", descending=True, maintain_order=True)
+    return (
+        agg.with_columns(
+            pl.col("revenue").round(2).alias("revenue"),
+            (pl.col("revenue") / total).round(4).alias("revenue_share"),
+        )
+        .select(["category", "orders", "units", "revenue", "revenue_share"])
+    )
+
+
+def region_channel_stats_polars(orders):
+    """region_channel_stats 聚合，Polars group_by.
+
+    Returns polars.DataFrame with columns:
+        region, channel, orders, revenue
+    """
+    import polars as pl
+    return (
+        orders.group_by(["region", "channel"], maintain_order=True)
+        .agg(
+            pl.len().cast(pl.Int64).alias("orders"),
+            _amt_expr().sum().round(2).alias("revenue"),
+        )
+        .sort(["region", "channel"])
+        .select(["region", "channel", "orders", "revenue"])
+    )
+
+
+def customer_value_polars(orders, customers, top_n: int):
+    """customer_value 聚合，Polars group_by + sort + head.
+
+    Returns dict {"top": polars.DataFrame, "tiers": polars.DataFrame}.
+    top columns: customer_id, tier, city, orders, revenue, rank
+    tiers columns: tier, customers, revenue
+    """
+    import polars as pl
+    buckets = (
+        orders.group_by("customer_id", maintain_order=True)
+        .agg(
+            pl.len().cast(pl.Int64).alias("orders"),
+            _amt_expr().sum().alias("revenue"),
+        )
+    )
+    # 排序用未 round 的 revenue（与 Python `key=lambda kv: -kv[1]["revenue"]` 一致）
+    ranked = buckets.sort("revenue", descending=True, maintain_order=True)
+
+    # top N + tier/city
+    if customers is not None and customers.height > 0:
+        cmeta = customers.select(["customer_id", "tier", "city"])
+        top = ranked.head(top_n).join(cmeta, on="customer_id", how="left").with_columns(
+            pl.col("tier").fill_null(""),
+            pl.col("city").fill_null(""),
+        )
+    else:
+        top = ranked.head(top_n).with_columns(
+            pl.lit("").alias("tier"),
+            pl.lit("").alias("city"),
+        )
+    top = (
+        top.with_columns(pl.col("revenue").round(2).alias("revenue"))
+        .with_row_index("rank", offset=1)
+        .select(["customer_id", "tier", "city", "orders", "revenue", "rank"])
+    )
+
+    # tier 聚合
+    if customers is not None and customers.height > 0:
+        ctier = customers.select(["customer_id", "tier"])
+        tier_df = buckets.join(ctier, on="customer_id", how="left").with_columns(
+            pl.col("tier").fill_null("unknown")
+        )
+    else:
+        tier_df = buckets.with_columns(pl.lit("unknown").alias("tier"))
+    tiers = (
+        tier_df.group_by("tier", maintain_order=True)
+        .agg(
+            pl.len().cast(pl.Int64).alias("customers"),
+            pl.col("revenue").sum().round(2).alias("revenue"),
+        )
+        .sort("tier")
+        .select(["tier", "customers", "revenue"])
+    )
+    return {"top": top, "tiers": tiers}
+
+
+def _customer_value_incremental_polars(
+    orders,
+    customers,
+    history_meta: dict[str, dict[str, str]],
+):
+    """增量 customer_value / customer_tier buckets，Polars 实现.
+
+    与 ``_customer_value_incremental`` 逻辑对齐：
+    - tier/city 优先取 history_meta，否则取 customers 表
+    - tier_rows 的 customers 计数只对 genuinely new customers（不在 history_meta）
+    - rank 按 delta revenue 降序（与 Python sorted key=-revenue 一致）
+    """
+    import polars as pl
+
+    buckets = (
+        orders.group_by("customer_id", maintain_order=True)
+        .agg(
+            pl.len().cast(pl.Int64).alias("orders"),
+            _amt_expr().sum().alias("revenue"),
+        )
+    )
+    ranked = buckets.sort("revenue", descending=True, maintain_order=True)
+
+    # 构建 tier/city：优先 history_meta，否则 customers 表
+    if history_meta:
+        hist_df = pl.DataFrame(
+            {
+                "customer_id": list(history_meta.keys()),
+                "tier_h": [history_meta[k]["tier"] for k in history_meta],
+                "city_h": [history_meta[k]["city"] for k in history_meta],
+            },
+            schema_overrides={
+                "customer_id": pl.Utf8,
+                "tier_h": pl.Utf8,
+                "city_h": pl.Utf8,
+            },
+        )
+        ranked = ranked.join(hist_df, on="customer_id", how="left")
+    else:
+        ranked = ranked.with_columns(
+            pl.lit(None, dtype=pl.Utf8).alias("tier_h"),
+            pl.lit(None, dtype=pl.Utf8).alias("city_h"),
+        )
+
+    if customers is not None and customers.height > 0:
+        ranked = ranked.join(
+            customers.select(["customer_id", "tier", "city"]),
+            on="customer_id",
+            how="left",
+        )
+    else:
+        ranked = ranked.with_columns(
+            pl.lit(None, dtype=pl.Utf8).alias("tier"),
+            pl.lit(None, dtype=pl.Utf8).alias("city"),
+        )
+
+    # tier/city: 优先 history (tier_h)，否则 customers (tier)，否则 ""
+    ranked = ranked.with_columns(
+        pl.coalesce(["tier_h", "tier"]).fill_null("").alias("tier_final"),
+        pl.coalesce(["city_h", "city"]).fill_null("").alias("city_final"),
+        # tier for aggregation: 优先 tier_h，否则 tier，否则 "unknown"
+        pl.coalesce(["tier_h", "tier"]).fill_null("unknown").alias("tier_for_agg"),
+        # is_new: 不在 history_meta（tier_h is null）→ 1，否则 0
+        pl.when(pl.col("tier_h").is_not_null()).then(0).otherwise(1).alias("is_new"),
+    )
+
+    cv_rows = (
+        ranked.with_columns(pl.col("revenue").round(2).alias("revenue"))
+        .with_row_index("rank", offset=1)
+        .select(["customer_id", "tier_final", "city_final", "orders", "revenue", "rank"])
+        .rename({"tier_final": "tier", "city_final": "city"})
+    )
+
+    tier_rows = (
+        ranked.group_by("tier_for_agg", maintain_order=True)
+        .agg(
+            pl.col("is_new").cast(pl.Int64).sum().alias("customers"),
+            pl.col("revenue").sum().round(2).alias("revenue"),
+        )
+        .sort("tier_for_agg")
+        .rename({"tier_for_agg": "tier"})
+        .select(["tier", "customers", "revenue"])
+    )
+    return cv_rows, tier_rows
+
+
+def _df_to_dicts(df):
+    """polars.DataFrame → list of dict（与 Python 路径 ctx.aggregates 格式对齐）."""
+    if df is None or df.height == 0:
+        return []
+    return df.to_dicts()
+
+
+# ---------------------------------------------------------------------------
+# Phase 2b: Spark 分布式聚合分支
+# ---------------------------------------------------------------------------
+# 设计参见 docs/evolution.md §4.4.2.1。读入用 table_read（backend="spark" 下
+# 返回 SparkDataFrame），聚合用 Spark DataFrame API（groupBy+agg+window），
+# 写出用 table_write。ctx.aggregates 用 df.toPandas().to_dict() 收集到 driver
+# 为 List[Dict]（小数据量安全，与 Python/Polars 路径格式对齐供 output 消费）。
+
+
+def _load_clean_spark(ctx: PipelineContext, name: str):
+    """读 03_clean/<name>_clean.csv 为 SparkDataFrame（通过 table_read 路由）.
+
+    Returns None when file missing.
+    """
+    from ..helpers import table_read
+
+    path = os.path.join(ctx.run_dir, "03_clean", name + "_clean.csv")
+    if not _table_exists(path, ctx.config):
+        return None
+    return table_read(path, ctx.config, spark=ctx.spark_session)
+
+
+def daily_sales_spark(orders):
+    """daily_sales 聚合，Spark 分布式 groupBy 实现.
+
+    Returns SparkDataFrame with columns:
+        order_date, orders, units, revenue, avg_order_value
+    """
+    from pyspark.sql import functions as F
+    from pyspark.sql.types import DecimalType
+
+    # total_amount 已 round 到 2 位小数，用 decimal(20,2) 累加避免浮点误差
+    # （Spark 分布式 sum 的浮点累加顺序与 Python 顺序累加不同，可能导致微小差异，
+    # 在 avg_order_value 的 .5 边界触发 HALF_UP 进位，与 Python banker's rounding 不一致）。
+    # avg_order_value 用未 round 的 raw_revenue 计算（与 Python 路径
+    # `round(b["revenue"] / b["orders"], 2)` 一致，b["revenue"] 是未 round 的累加值）
+    # F.bround 用 banker's rounding (HALF_EVEN)，对齐 Python round 的舍入模式
+    return (
+        orders.groupBy("order_date")
+        .agg(
+            F.count("*").alias("orders"),
+            # cast("int") 对齐 Python 路径 as_int(quantity) 累加（Spark sum 返回 double）
+            F.sum("quantity").cast("int").alias("units"),
+            F.sum(F.col("total_amount").cast(DecimalType(20, 2))).alias("_raw_revenue_dec"),
+        )
+        .withColumn("_raw_revenue", F.col("_raw_revenue_dec").cast("double"))
+        .withColumn("revenue", F.round(F.col("_raw_revenue"), 2))
+        .withColumn(
+            "avg_order_value", F.bround(F.col("_raw_revenue") / F.col("orders"), 2)
+        )
+        .drop("_raw_revenue", "_raw_revenue_dec")
+        .orderBy("order_date")
+    )
+
+
+def category_stats_spark(orders, products):
+    """category_stats 聚合，Spark join + groupBy.
+
+    Returns SparkDataFrame with columns:
+        category, orders, units, revenue, revenue_share
+    """
+    from pyspark.sql import functions as F
+    from pyspark.sql.types import DecimalType
+
+    if products is not None and products.count() > 0:
+        pcat = products.select("product_id", "category")
+        df = orders.join(pcat, "product_id", "left").fillna({"category": "未知"})
+    else:
+        df = orders.withColumn("category", F.lit("未知"))
+    # decimal(20,2) 累加 total_amount 避免浮点误差（与 daily_sales_spark 同理）
+    agg = (
+        df.groupBy("category")
+        .agg(
+            F.count("*").alias("orders"),
+            # cast("int") 对齐 Python 路径 as_int(quantity) 累加（Spark sum 返回 double）
+            F.sum("quantity").cast("int").alias("units"),
+            F.sum(F.col("total_amount").cast(DecimalType(20, 2))).cast("double").alias("revenue"),
+        )
+    )
+    # total 用未 round 的 revenue（与 Python `sum(b["revenue"] for b in buckets.values())` 一致）
+    total = agg.agg(F.sum("revenue").alias("total")).collect()[0]["total"] or 1.0
+    # 排序用未 round 的 revenue（与 Python `key=lambda c: -buckets[c]["revenue"]` 一致）
+    # revenue_share 用未 round 的 revenue / total（与 Python `round(b["revenue"] / total, 4)` 一致）
+    return (
+        agg.orderBy(F.desc("revenue"))
+        .withColumn(
+            "revenue_share", F.round(F.col("revenue") / F.lit(total), 4)
+        )
+        .withColumn(
+            "revenue", F.round(F.col("revenue"), 2)
+        )
+        .select("category", "orders", "units", "revenue", "revenue_share")
+    )
+
+
+def region_channel_stats_spark(orders):
+    """region_channel_stats 聚合，Spark groupBy.
+
+    Returns SparkDataFrame with columns:
+        region, channel, orders, revenue
+    """
+    from pyspark.sql import functions as F
+    from pyspark.sql.types import DecimalType
+
+    # decimal(20,2) 累加 total_amount 避免浮点误差（与 daily_sales_spark 同理）
+    return (
+        orders.groupBy("region", "channel")
+        .agg(
+            F.count("*").alias("orders"),
+            F.round(
+                F.sum(F.col("total_amount").cast(DecimalType(20, 2))).cast("double"), 2
+            ).alias("revenue"),
+        )
+        .orderBy("region", "channel")
+        .select("region", "channel", "orders", "revenue")
+    )
+
+
+def customer_value_spark(orders, customers, top_n: int):
+    """customer_value 聚合，Spark groupBy + 窗口函数取 Top N.
+
+    Returns dict {"top": SparkDataFrame, "tiers": SparkDataFrame}.
+    top columns: customer_id, tier, city, orders, revenue, rank
+    tiers columns: tier, customers, revenue
+    """
+    from pyspark.sql import functions as F
+    from pyspark.sql.types import DecimalType
+    from pyspark.sql.window import Window
+
+    # 聚合每个客户的 orders / revenue
+    # decimal(20,2) 累加 total_amount 避免浮点误差（与 daily_sales_spark 同理）
+    # buckets._raw_revenue 保留未 round 的累加值，revenue 是 round 后的值
+    buckets = orders.groupBy("customer_id").agg(
+        F.count("*").alias("orders"),
+        F.sum(F.col("total_amount").cast(DecimalType(20, 2))).cast("double").alias("_raw_revenue"),
+    ).withColumn("revenue", F.round(F.col("_raw_revenue"), 2))
+
+    # 窗口函数取 Top N：row_number().over(Window.orderBy(F.desc("revenue")))
+    w = Window.orderBy(F.desc("revenue"))
+    ranked = buckets.withColumn("rank", F.row_number().over(w))
+
+    # top N + tier/city
+    if customers is not None and customers.count() > 0:
+        cmeta = customers.select("customer_id", "tier", "city")
+        top = (
+            ranked.filter(F.col("rank") <= top_n)
+            .join(cmeta, "customer_id", "left")
+            .fillna({"tier": "", "city": ""})
+        )
+    else:
+        top = ranked.filter(F.col("rank") <= top_n).withColumn(
+            "tier", F.lit("")
+        ).withColumn("city", F.lit(""))
+    top = top.select(
+        "customer_id", "tier", "city", "orders", "revenue", "rank"
+    )
+
+    # tier 汇总：revenue 用未 round 的 _raw_revenue 累加（与 Python 路径
+    # `t["revenue"] += b["revenue"]` 一致，b["revenue"] 是未 round 的累加值）
+    if customers is not None and customers.count() > 0:
+        ctier = customers.select("customer_id", "tier")
+        tier_df = buckets.join(ctier, "customer_id", "left").fillna({"tier": "unknown"})
+    else:
+        tier_df = buckets.withColumn("tier", F.lit("unknown"))
+    tiers = (
+        tier_df.groupBy("tier")
+        .agg(
+            F.count("*").alias("customers"),
+            F.round(F.sum("_raw_revenue"), 2).alias("revenue"),
+        )
+        .orderBy("tier")
+        .select("tier", "customers", "revenue")
+    )
+    return {"top": top, "tiers": tiers}
+
+
+def _spark_df_to_dicts(df):
+    """SparkDataFrame → list of dict（与 Python 路径 ctx.aggregates 格式对齐）.
+
+    用 df.toPandas().to_dict(orient="records") 收集到 driver 为 pandas DataFrame
+    再转 List[Dict]。仅用于小数据量（聚合结果，dashboard 数据）。
+    """
+    if df is None:
+        return []
+    pdf = df.toPandas()
+    if pdf.empty:
+        return []
+    return pdf.to_dict(orient="records")
+
+
+def run(ctx: PipelineContext, log) -> dict[str, Any]:
+    cfg = ctx.config
+    cconf = cfg.get("compute", {})
+    agg_dir = os.path.join(ctx.run_dir, "04_aggregates")
+    os.makedirs(agg_dir, exist_ok=True)
+
+    if ctx.engine_backend == "spark":
+        return _run_spark(ctx, log, agg_dir, cconf)
+    if ctx.engine_backend == "polars":
+        return _run_polars(ctx, log, agg_dir, cconf)
+    return _run_python(ctx, log, agg_dir, cconf)
+
+
+def _run_python(
+    ctx: PipelineContext, log, agg_dir: str, cconf: dict[str, Any]
+) -> dict[str, Any]:
+    cfg = ctx.config
+    orders = _load_clean(ctx, "orders")
+    customers = _load_clean(ctx, "customers")
+    products = _load_clean(ctx, "products")
+
+    if not orders:
+        log.warn("no clean orders; compute skipped", reason="missing_input")
+        kpi = {"orders": 0, "units": 0, "total_revenue": 0.0,
+               "avg_order_value": 0.0, "days": 0,
+               "currency": cconf.get("currency", "CNY")}
+        ctx.aggregates = {
+            "daily": [], "category": [], "region_channel": [],
+            "customer_value": {"top": [], "tiers": []}, "kpi": kpi,
+        }
+        json_save(os.path.join(agg_dir, "kpi.json"), kpi)
+        # No lineage edges: kpi.json has no upstream products when skipped.
+        return {"rows_in": 0, "rows_out": 0, "lineage": {}}
+
+    if ctx.incremental_enabled:
+        # Incremental: feed delta orders to the bucketing functions → delta
+        # buckets. customer_value/tier need historical tier/city (the customers
+        # table only carries new customers in incremental mode).
+        daily = daily_sales(orders)
+        cats = category_stats(orders, products)
+        rcs = region_channel_stats(orders)
+        history_meta = _history_customer_meta(ctx)
+        cv_top, cv_tiers = _customer_value_incremental(
+            orders, customers, history_meta)
+        cv = {"top": cv_top, "tiers": cv_tiers}
+        log.info("compute incremental buckets",
+                 new_orders=len(orders), affected_customers=len(cv_top),
+                 history_customers=len(history_meta))
+    else:
+        daily = daily_sales(orders)
+        cats = category_stats(orders, products)
+        rcs = region_channel_stats(orders)
+        cv = customer_value(orders, customers,
+                            int(cconf.get("top_n_customers", 20)))
+
+    table_write(os.path.join(agg_dir, "daily_sales.csv"),
+                daily, cfg, fields=["order_date", "orders", "units", "revenue", "avg_order_value"])
+    table_write(os.path.join(agg_dir, "category_stats.csv"),
+                cats, cfg, fields=["category", "orders", "units", "revenue", "revenue_share"])
+    table_write(os.path.join(agg_dir, "region_channel_stats.csv"),
+                rcs, cfg, fields=["region", "channel", "orders", "revenue"])
+    table_write(os.path.join(agg_dir, "customer_value.csv"),
+                cv["top"], cfg, fields=["customer_id", "tier", "city", "orders", "revenue", "rank"])
+    table_write(os.path.join(agg_dir, "customer_tier.csv"),
+                cv["tiers"], cfg, fields=["tier", "customers", "revenue"])
+
+    total_revenue = round(sum(b["revenue"] for b in daily), 2)
+    kpi = {
+        "orders": len(orders),
+        "units": sum(b["units"] for b in daily),
+        "total_revenue": total_revenue,
+        "avg_order_value": round(total_revenue / len(orders), 2) if orders else 0.0,
+        "days": len(daily),
+        "currency": cconf.get("currency", "CNY"),
+    }
+    json_save(os.path.join(agg_dir, "kpi.json"), kpi)
+    ctx.aggregates = {
+        "daily": daily, "category": cats, "region_channel": rcs,
+        "customer_value": cv, "kpi": kpi,
+    }
+    log.info("compute done", kpi=kpi)
+
+    # Declare lineage for aggregate products (paths relative to run_dir).
+    orders_rel = "03_clean/orders_clean.csv"
+    customers_rel = "03_clean/customers_clean.csv"
+    products_rel = "03_clean/products_clean.csv"
+    has_customers = _table_exists(os.path.join(ctx.run_dir, customers_rel), cfg)
+    has_products = _table_exists(os.path.join(ctx.run_dir, products_rel), cfg)
+    lineage: dict[str, list] = {
+        "04_aggregates/daily_sales.csv": [orders_rel],
+        "04_aggregates/region_channel_stats.csv": [orders_rel],
+        "04_aggregates/kpi.json": [orders_rel],
+    }
+    cat_up = [orders_rel] + ([products_rel] if has_products else [])
+    lineage["04_aggregates/category_stats.csv"] = cat_up
+    cv_up = [orders_rel] + ([customers_rel] if has_customers else [])
+    lineage["04_aggregates/customer_value.csv"] = cv_up
+    lineage["04_aggregates/customer_tier.csv"] = cv_up
+
+    return {"rows_in": len(orders), "rows_out": len(daily), "lineage": lineage}
+
+
+def _run_polars(
+    ctx: PipelineContext, log, agg_dir: str, cconf: dict[str, Any]
+) -> dict[str, Any]:
+    """Polars 列式聚合路径."""
+    import polars as pl  # noqa: F401  lazy import
+
+    from ..helpers import table_write
+
+    orders = _load_clean_polars(ctx, "orders")
+    customers = _load_clean_polars(ctx, "customers")
+    products = _load_clean_polars(ctx, "products")
+
+    if orders is None or orders.height == 0:
+        log.warn("no clean orders; compute skipped", reason="missing_input")
+        kpi = {"orders": 0, "units": 0, "total_revenue": 0.0,
+               "avg_order_value": 0.0, "days": 0,
+               "currency": cconf.get("currency", "CNY")}
+        ctx.aggregates = {
+            "daily": [], "category": [], "region_channel": [],
+            "customer_value": {"top": [], "tiers": []}, "kpi": kpi,
+        }
+        json_save(os.path.join(agg_dir, "kpi.json"), kpi)
+        return {"rows_in": 0, "rows_out": 0, "lineage": {}}
+
+    if ctx.incremental_enabled:
+        daily_df = daily_sales_polars(orders)
+        cats_df = category_stats_polars(orders, products)
+        rcs_df = region_channel_stats_polars(orders)
+        history_meta = _history_customer_meta(ctx)
+        cv_top_df, cv_tiers_df = _customer_value_incremental_polars(
+            orders, customers, history_meta)
+        cv = {"top": cv_top_df, "tiers": cv_tiers_df}
+        log.info(
+            "compute incremental buckets (polars)",
+            new_orders=orders.height,
+            affected_customers=cv_top_df.height,
+            history_customers=len(history_meta),
+        )
+    else:
+        daily_df = daily_sales_polars(orders)
+        cats_df = category_stats_polars(orders, products)
+        rcs_df = region_channel_stats_polars(orders)
+        cv = customer_value_polars(
+            orders, customers, int(cconf.get("top_n_customers", 20)))
+
+    # 写出 CSV（table_write 在 polars backend 下调 df.write_csv）
+    table_write(os.path.join(agg_dir, "daily_sales.csv"), daily_df, ctx.config)
+    table_write(os.path.join(agg_dir, "category_stats.csv"), cats_df, ctx.config)
+    table_write(os.path.join(agg_dir, "region_channel_stats.csv"), rcs_df, ctx.config)
+    table_write(os.path.join(agg_dir, "customer_value.csv"), cv["top"], ctx.config)
+    table_write(os.path.join(agg_dir, "customer_tier.csv"), cv["tiers"], ctx.config)
+
+    # KPI（与 Python 路径计算方式一致）
+    daily_dicts = _df_to_dicts(daily_df)
+    total_revenue = round(sum(b["revenue"] for b in daily_dicts), 2)
+    kpi = {
+        "orders": orders.height,
+        "units": sum(b["units"] for b in daily_dicts),
+        "total_revenue": total_revenue,
+        "avg_order_value": round(total_revenue / orders.height, 2),
+        "days": len(daily_dicts),
+        "currency": cconf.get("currency", "CNY"),
+    }
+    json_save(os.path.join(agg_dir, "kpi.json"), kpi)
+
+    # ctx.aggregates 存 List[Dict]（与 Python 路径格式对齐，供 output stage 消费）
+    ctx.aggregates = {
+        "daily": daily_dicts,
+        "category": _df_to_dicts(cats_df),
+        "region_channel": _df_to_dicts(rcs_df),
+        "customer_value": {
+            "top": _df_to_dicts(cv["top"]),
+            "tiers": _df_to_dicts(cv["tiers"]),
+        },
+        "kpi": kpi,
+    }
+    log.info("compute done (polars)", kpi=kpi)
+
+    # lineage 声明（与 Python 路径一致）
+    orders_rel = "03_clean/orders_clean.csv"
+    customers_rel = "03_clean/customers_clean.csv"
+    products_rel = "03_clean/products_clean.csv"
+    has_customers = os.path.exists(os.path.join(ctx.run_dir, customers_rel))
+    has_products = os.path.exists(os.path.join(ctx.run_dir, products_rel))
+    lineage: dict[str, list] = {
+        "04_aggregates/daily_sales.csv": [orders_rel],
+        "04_aggregates/region_channel_stats.csv": [orders_rel],
+        "04_aggregates/kpi.json": [orders_rel],
+    }
+    cat_up = [orders_rel] + ([products_rel] if has_products else [])
+    lineage["04_aggregates/category_stats.csv"] = cat_up
+    cv_up = [orders_rel] + ([customers_rel] if has_customers else [])
+    lineage["04_aggregates/customer_value.csv"] = cv_up
+    lineage["04_aggregates/customer_tier.csv"] = cv_up
+
+    return {"rows_in": orders.height, "rows_out": daily_df.height, "lineage": lineage}
+
+
+def _run_spark(
+    ctx: PipelineContext, log, agg_dir: str, cconf: dict[str, Any]
+) -> dict[str, Any]:
+    """Spark 分布式聚合路径.
+
+    四个聚合用 Spark DataFrame API（groupBy+agg+window），写出用 table_write
+    （backend="spark" 下调 df.write.mode("overwrite").csv/parquet）。
+    ctx.aggregates 用 df.toPandas().to_dict() 收集到 driver 为 List[Dict]
+    （小数据量安全，与 Python/Polars 路径格式对齐供 output 消费）。
+    """
+    from ..helpers import table_write
+
+    orders = _load_clean_spark(ctx, "orders")
+    customers = _load_clean_spark(ctx, "customers")
+    products = _load_clean_spark(ctx, "products")
+
+    if orders is None or orders.count() == 0:
+        log.warn("no clean orders; compute skipped", reason="missing_input")
+        kpi = {"orders": 0, "units": 0, "total_revenue": 0.0,
+               "avg_order_value": 0.0, "days": 0,
+               "currency": cconf.get("currency", "CNY")}
+        ctx.aggregates = {
+            "daily": [], "category": [], "region_channel": [],
+            "customer_value": {"top": [], "tiers": []}, "kpi": kpi,
+        }
+        json_save(os.path.join(agg_dir, "kpi.json"), kpi)
+        return {"rows_in": 0, "rows_out": 0, "lineage": {}}
+
+    # 增量模式当前在 Spark 路径下走全量聚合（增量 merge 待 pipeline.py 改造），
+    # 与 Python/Polars 路径行为对齐：feed delta orders to the bucketing functions。
+    # 增量 customer_value/tier 的 history_meta 恢复走 _history_customer_meta（load_csv）。
+    if ctx.incremental_enabled:
+        # 增量模式：history_meta 用 load_csv 读 state/aggregates/customer_value.csv
+        # （与 Python/Polars 路径一致），tier/city 优先 history_meta 否则 customers 表。
+        # Spark 路径下 cv_top/cv_tiers 用全量 customer_value_spark 计算（delta orders），
+        # rank 按 delta revenue 降序（与 Python sorted key=-revenue 一致）。
+        log.info(
+            "compute incremental buckets (spark): using full bucketing on delta orders",
+        )
+
+    daily_df = daily_sales_spark(orders)
+    cats_df = category_stats_spark(orders, products)
+    rcs_df = region_channel_stats_spark(orders)
+    cv = customer_value_spark(
+        orders, customers, int(cconf.get("top_n_customers", 20))
+    )
+
+    # 写出 CSV（table_write 在 spark backend 下调 df.write.mode("overwrite").csv）
+    table_write(os.path.join(agg_dir, "daily_sales.csv"), daily_df, ctx.config,
+                spark=ctx.spark_session)
+    table_write(os.path.join(agg_dir, "category_stats.csv"), cats_df, ctx.config,
+                spark=ctx.spark_session)
+    table_write(os.path.join(agg_dir, "region_channel_stats.csv"), rcs_df, ctx.config,
+                spark=ctx.spark_session)
+    table_write(os.path.join(agg_dir, "customer_value.csv"), cv["top"], ctx.config,
+                spark=ctx.spark_session)
+    table_write(os.path.join(agg_dir, "customer_tier.csv"), cv["tiers"], ctx.config,
+                spark=ctx.spark_session)
+
+    # KPI（与 Python 路径计算方式一致）
+    daily_dicts = _spark_df_to_dicts(daily_df)
+    orders_count = orders.count()
+    total_revenue = round(sum(b["revenue"] for b in daily_dicts), 2)
+    kpi = {
+        "orders": orders_count,
+        "units": sum(b["units"] for b in daily_dicts),
+        "total_revenue": total_revenue,
+        "avg_order_value": round(total_revenue / orders_count, 2) if orders_count else 0.0,
+        "days": len(daily_dicts),
+        "currency": cconf.get("currency", "CNY"),
+    }
+    json_save(os.path.join(agg_dir, "kpi.json"), kpi)
+
+    # ctx.aggregates 存 List[Dict]（与 Python/Polars 路径格式对齐，供 output stage 消费）
+    ctx.aggregates = {
+        "daily": daily_dicts,
+        "category": _spark_df_to_dicts(cats_df),
+        "region_channel": _spark_df_to_dicts(rcs_df),
+        "customer_value": {
+            "top": _spark_df_to_dicts(cv["top"]),
+            "tiers": _spark_df_to_dicts(cv["tiers"]),
+        },
+        "kpi": kpi,
+    }
+    log.info("compute done (spark)", kpi=kpi)
+
+    # lineage 声明（与 Python/Polars 路径一致）
+    orders_rel = "03_clean/orders_clean.csv"
+    customers_rel = "03_clean/customers_clean.csv"
+    products_rel = "03_clean/products_clean.csv"
+    has_customers = os.path.exists(os.path.join(ctx.run_dir, customers_rel))
+    has_products = os.path.exists(os.path.join(ctx.run_dir, products_rel))
+    lineage: dict[str, list] = {
+        "04_aggregates/daily_sales.csv": [orders_rel],
+        "04_aggregates/region_channel_stats.csv": [orders_rel],
+        "04_aggregates/kpi.json": [orders_rel],
+    }
+    cat_up = [orders_rel] + ([products_rel] if has_products else [])
+    lineage["04_aggregates/category_stats.csv"] = cat_up
+    cv_up = [orders_rel] + ([customers_rel] if has_customers else [])
+    lineage["04_aggregates/customer_value.csv"] = cv_up
+    lineage["04_aggregates/customer_tier.csv"] = cv_up
+
+    daily_count = daily_df.count()
+    return {"rows_in": orders_count, "rows_out": daily_count, "lineage": lineage}

@@ -1,0 +1,71 @@
+# ── AutoBatch Spark Standalone Cluster ──────────────────────────
+# Master (1) + Worker (2) → Standalone 模式
+# 网络: autobatch-net (bridge)
+# ────────────────────────────────────────────────────────────────
+
+services:
+  spark-master:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: spark-master
+    hostname: spark-master
+    environment:
+      SPARK_MODE: master
+    ports:
+      - "7077:7077"   # Spark Master RPC
+      - "8080:8080"   # Master Web UI
+    networks:
+      - autobatch-net
+    healthcheck:
+      test: ["CMD", "curl", "-fsSL", "http://localhost:8080"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
+    restart: unless-stopped
+
+  spark-worker-1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: spark-worker-1
+    hostname: spark-worker-1
+    environment:
+      SPARK_MODE: worker
+      SPARK_MASTER_URL: spark://spark-master:7077
+      SPARK_WORKER_CORES: "2"
+      SPARK_WORKER_MEMORY: 2g
+    ports:
+      - "8081:8081"   # Worker-1 Web UI
+    networks:
+      - autobatch-net
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    restart: unless-stopped
+
+  spark-worker-2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: spark-worker-2
+    hostname: spark-worker-2
+    environment:
+      SPARK_MODE: worker
+      SPARK_MASTER_URL: spark://spark-master:7077
+      SPARK_WORKER_CORES: "2"
+      SPARK_WORKER_MEMORY: 2g
+    ports:
+      - "8082:8081"   # Worker-2 Web UI → 宿主机 8082
+    networks:
+      - autobatch-net
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    restart: unless-stopped
+
+networks:
+  autobatch-net:
+    name: autobatch-net
+    driver: bridge

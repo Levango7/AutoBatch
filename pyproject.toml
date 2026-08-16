@@ -1,0 +1,94 @@
+# =============================================================================
+# AutoBatch 项目配置（ruff + mypy + pytest）
+# Phase 6 CI/CD 加固：统一 lint / type-check / 测试配置入口
+# =============================================================================
+
+[build-system]
+# 纯标准库项目，无需打包；保留占位以便 IDE / 工具识别
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+# -----------------------------------------------------------------------------
+# ruff：极速 lint + format checker（替代 flake8 + black + isort）
+# -----------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100                 # 单行最大宽度
+target-version = "py39"           # 最低支持 Python 3.9（与运行时零依赖声明一致）
+extend-exclude = [
+    ".pytest_cache",
+    "htmlcov",
+    "build",
+    "dist",
+]
+
+[tool.ruff.lint]
+# 选用规则集：
+#   E  - pycodestyle errors
+#   W  - pycodestyle warnings
+#   F  - pyflakes（未使用变量 / 未定义符号等）
+#   I  - isort（import 顺序）
+#   B  - bugbear（常见 bug 模式）
+#   UP - pyupgrade（语法现代化）
+#   N  - pep8-naming（命名规范）
+select = ["E", "W", "F", "I", "B", "UP", "N"]
+ignore = [
+    "E501",   # 行长由 line-length 控制，formatter 已处理；保留以避免与格式化冲突
+    "B008",   # 函数调用作为默认参数（pytest fixture 常见用法）
+    "N802",   # 函数名应为小写（pytest 测试函数 test_Xxx 风格保留）
+    "N803",   # 参数名应为小写（数学/科学命名习惯，如 X、Y）
+    "N806",   # 变量名应为小写（同上）
+    "N812",   # lowercase-imported-as-non-lowercase：pyspark `from pyspark.sql import functions as F` 是官方惯例
+    "UP007",  # Optional[X] vs X | None：保留 Optional 以兼容 py39
+    "UP045",  # 同上：Union 类型写法
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = [
+    "F401",   # 测试文件允许未使用 import（fixture / conftest 模式）
+    "F811",   # 允许重定义（pytest parametrize 重名）
+    "N802",   # 测试函数命名宽松
+]
+
+[tool.ruff.format]
+quote-style = "double"            # 双引号
+indent-style = "space"            # 空格缩进
+line-ending = "lf"                # 统一 LF 行尾
+
+# -----------------------------------------------------------------------------
+# mypy：静态类型检查
+# -----------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.9"            # 最低目标版本
+files = ["src"]                   # 仅检查 src/ 目录（业务代码）
+exclude = [
+    "tests/",
+    "build/",
+    "dist/",
+]
+# 不强制 strict（项目历史代码无类型注解）；渐进式启用
+strict = false
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unused_configs = true
+# 允许 Any 类型（pyspark / polars / pyarrow 等 SDK 类型不完整）
+disallow_any_generics = false
+disallow_any_explicit = false
+disallow_any_expr = false
+# 缺失类型注解时不报错（渐进式迁移）
+ignore_missing_imports = true
+check_untyped_defs = true         # 仍检查未注解函数体内的明显错误
+allow_redefinition = true         # 允许条件重定义（兼容运行时分支）
+
+# 第三方库无类型存根时静默（仅覆盖 src/ 中实际引用的库）
+[[tool.mypy.overrides]]
+module = [
+    "polars.*",
+    "pyspark.*",
+    "pyarrow.*",
+    "minio.*",
+]
+ignore_missing_imports = true
+
+# -----------------------------------------------------------------------------
+# pytest 配置：保留在 pytest.ini 中（已存在），此处不重复以避免配置冲突警告
+# -----------------------------------------------------------------------------

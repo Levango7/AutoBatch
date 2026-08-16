@@ -1,0 +1,15 @@
+{
+    "enabled": false,
+    "alerts": {
+        "dq_score_min": 80.0,
+        "stage_duration_max_seconds": 600,
+        "memory_usage_max_mb": 4096,
+        "failure_rate_max_percent": 20.0
+    },
+    "health_check": {
+        "enabled": false,
+        "port": 8086,
+        "host": "0.0.0.0"
+    },
+    "history_window": 10
+}

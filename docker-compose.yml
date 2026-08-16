@@ -1,0 +1,8 @@
+services:
+  pipeline:
+    build: .
+    volumes:
+      - ./run:/app/run
+      - ./data:/app/data
+      - ./config:/app/config
+    command: sh -c "python -m src.pipeline --config config/pipeline.json"

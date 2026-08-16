@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AutoBatch · 大数据批处理工作流 · 验收总览</title>
+<style>
+  :root { --ink:#1a1a1a; --muted:#6b6b6b; --line:#d9d9d9; --accent:#1a56db; --soft:#f7f7f7; --ok:#0f7b3d; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:#fff; color:var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+    line-height:1.65; }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 40px 28px 80px; }
+  header { border-bottom: 3px solid var(--ink); padding-bottom: 16px; margin-bottom: 28px; }
+  header h1 { font-size: 26px; margin: 0 0 6px; }
+  .meta { color: var(--muted); font-size: 14px; }
+  h2 { font-size: 20px; margin: 40px 0 12px; padding-top: 14px; border-top: 1px solid var(--line); }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 14px; }
+  th, td { border: 1px solid var(--line); padding: 8px 10px; text-align: left; vertical-align: top; }
+  th { background: var(--soft); }
+  .pass { color: var(--ok); font-weight: 700; }
+  .note { background: #eef4ff; border-left: 3px solid var(--accent); padding: 10px 14px; margin: 14px 0; font-size: 14px; }
+  code { background: var(--soft); padding: 1px 5px; border-radius: 3px; font-size: 13px; }
+  ol li, ul li { margin: 6px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>AutoBatch · 大数据批处理工作流 · 验收总览</h1>
+  <div class="meta">AutoBatch v1.0.0 ｜ 权威批次 B-20260815-134548-E85420 ｜ 2026-08-15 ｜ 依据目标验收标准逐条核验（复核置信度 High）</div>
+</header>
+
+<h2>一、验收结论</h2>
+<div class="note"><b>12 条验收标准全部通过。</b>端到端可运行、数据可追溯台账、阶段可监控可定位、内置数据质量校验、数据规模可配置、可视化交付物、完整文档、演示与交接、测试套件、CI 配置、指标导出、血缘自动推导——每条均以磁盘产物为证（数值见下表）。遗留 5 项 P3 级已知限制，不阻塞交付，见第四节。</div>
+
+<h2>二、逐条验收证据</h2>
+<table>
+  <tr><th>#</th><th>验收标准</th><th>结论</th><th>关键证据</th></tr>
+  <tr><td>1</td><td>工作流可端到端运行</td><td class="pass">通过</td><td>python main.py 一键运行；权威批次 B-20260815-134548-E85420 五阶段全 success：23,400 → 22,268 → 19,068 → 91 → 19,068 行；耗时 158 / 1,524 / 673 / 858 / 1,117 ms（总 4,400 ms）；5 个阶段日志齐全</td></tr>
+  <tr><td>2</td><td>数据有可追溯台账</td><td class="pass">通过</td><td>manifest.json 含批次号/时间戳/来源标记/sha256/行数/血缘；20 份产物、17 个产物登记血缘（lineage key 数）；config_digest 复算一致；report 已登记入台账</td></tr>
+  <tr><td>3</td><td>各阶段可监控可定位</td><td class="pass">通过</td><td>status.json 逐阶段状态；失败演示批次 B-20260815-075240-5A07CE 的 clean=failed + 错误信息 + clean.jsonl（injected=true）可精确定位</td></tr>
+  <tr><td>4</td><td>内置数据质量校验</td><td class="pass">通过</td><td>DQ Score 99.60% = 384,254/385,800 复算一致；隔离 1,132 行原因码全部在规则白名单；outlier 规则生效（最终 210 行 is_anomaly=1）；fill_missing 生效（region=unknown 79 + channel=unknown 83）</td></tr>
+  <tr><td>5</td><td>数据规模可配置</td><td class="pass">通过</td><td>5 千行配置批次 B-20260815-081049-8DA552：5,050 单 → 4,766 清洗订单（隔离 284）；20k/5k 行数比值 4.000×，线性缩放成立</td></tr>
+  <tr><td>6</td><td>提供可视化交付物</td><td class="pass">通过</td><td>dashboard.html 自包含（零外部依赖），KPI/趋势/品类/等级/Top10/区域渠道与 kpi.json 及聚合 CSV 逐值一致（趋势 91 项合计 = 162,608,282.19）；design.html 含架构图与流程阶段图（内联 SVG）</td></tr>
+  <tr><td>7</td><td>提供完整文档</td><td class="pass">通过</td><td>README（快速开始 + 测试 + CI）+ RUNBOOK（环境/启动/配置/接入新源/扩展逻辑/故障定位/测试/CI）+ design.html（设计）三件套，按文档可独立复现</td></tr>
+  <tr><td>8</td><td>完成演示与交接</td><td class="pass">通过</td><td>design.html 第 9 章七步演示脚本全部有磁盘实证；四份文档旧批次/旧数字零残留</td></tr>
+  <tr><td>9</td><td>提供测试套件</td><td class="pass">通过</td><td>tests/ 下 26 个 pytest 用例全部通过（2.16 秒）：test_quality.py 17 个（8 类规则正反例 + referential 性能回归）+ test_stages.py 5 个（stage 单测）+ test_pipeline_e2e.py 4 个（端到端冒烟）；pytest.ini 配置 testpaths/pythonpath</td></tr>
+  <tr><td>10</td><td>提供 CI 配置</td><td class="pass">通过</td><td>.github/workflows/ci.yml：push/PR 触发，ubuntu-latest × Python 3.11/3.13 矩阵，跑 pytest 全量 + pipeline_small 冒烟；fail-fast 关闭，两版本独立报告</td></tr>
+  <tr><td>11</td><td>提供指标导出</td><td class="pass">通过</td><td>每批次产出 metrics.json（src/metrics.py）：权威批次 total_duration_ms=4400、dq_score=0.996、quarantined_total=1132；含 labelled（stages 数组）+ flat（metrics 扁平 key 如 stage_validate_duration_ms）双视图，便于接 Prometheus</td></tr>
+  <tr><td>12</td><td>血缘自动推导</td><td class="pass">通过</td><td>各 stage 通过 ctx.lineage_decls 声明产物 ← 上游，output 阶段自动拼接写入 manifest.lineage；无硬编码字典；权威批次 17 个产物登记血缘（含 kpi.json、dashboard_data.json）；ctx 为 PipelineContext dataclass（替换原 Dict 弱类型包）</td></tr>
+</table>
+
+<h2>三、演示与交接速查</h2>
+<ol>
+  <li>运行：<code>run.bat</code> 或 <code>python main.py --config config\pipeline.json</code></li>
+  <li>看结果：<code>run\latest.json</code> → 批次目录（status.json / manifest.json / metrics.json / report\quality_report.md）</li>
+  <li>看板：打开 <code>dashboard\dashboard.html</code></li>
+  <li>设计文档：打开 <code>docs\design.html</code>；扩展手册：<code>docs\RUNBOOK.md</code></li>
+  <li>测试：<code>python -m pytest tests/ -v</code>（26 个用例）</li>
+  <li>失败定位演示：<code>python main.py --fail-at clean</code></li>
+  <li>规模演示：<code>python main.py --config config\pipeline_small.json</code></li>
+  <li>仅重生成数据：<code>python tools\gen_data.py --config config\pipeline.json</code></li>
+  <li>容器化：<code>docker compose up --build</code></li>
+</ol>
+
+<h2>四、已知限制（P3 级，不阻塞）</h2>
+<ul>
+  <li>失败/中断批次的台账只登记到失败阶段（原型定位；生产由 Airflow 类编排器补齐重试/告警）。</li>
+  <li>看板数据为权威批次快照；新批次数据在 run/&lt;batch&gt;/05_output/dashboard_data.json，可参照模板人工更新看板。</li>
+  <li>5 千行对照批次的 data/raw 源文件已被后续 2 万行生成覆盖（该批次 01_raw 快照不受影响，仍可追溯）。</li>
+  <li>血缘为表级（文件级），已由各 stage 声明式自动推导；字段级血缘需声明式映射，属生产化演进项。</li>
+  <li>仓库内存在调试期残留批次 B-20260815-075048-94ED13（导入别名修复前的中断运行，无台账），可安全删除。</li>
+</ul>
+
+<footer>本页自包含，可离线打开/打印 ｜ 数据与结论来自实际运行产物（run/ 目录），非估算</footer>
+</div>
+</body>
+</html>

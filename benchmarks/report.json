@@ -1,0 +1,65 @@
+{
+  "generated_at": "2026-08-16 11:09:42",
+  "started_at": "2026-08-16 11:09:39",
+  "base_config": "config/pipeline_small.json",
+  "rows_per_run": 5000,
+  "combinations": [
+    {
+      "engine": "python",
+      "storage": "local_csv",
+      "batch_id": "bench-python-local_csv-664d1a",
+      "wall_time_ms": 2353,
+      "peak_memory_mb": 12.527,
+      "run_dir": "F:\\Nexus\\Workflow\\AutoBatch\\run\\bench-python-local_csv-664d1a",
+      "status": "success",
+      "error": null,
+      "pipeline_duration_ms": 2270,
+      "dq_score": 0.9967,
+      "total_rows_in": 22599,
+      "total_rows_out": 29090,
+      "stages": [
+        {
+          "name": "ingest",
+          "status": "success",
+          "duration_ms": 91,
+          "rows_in": 0,
+          "rows_out": 8250,
+          "throughput_rows_per_sec": 90659.3
+        },
+        {
+          "name": "validate",
+          "status": "success",
+          "duration_ms": 1019,
+          "rows_in": 8250,
+          "rows_out": 7983,
+          "throughput_rows_per_sec": 7834.2
+        },
+        {
+          "name": "clean",
+          "status": "success",
+          "duration_ms": 346,
+          "rows_in": 4783,
+          "rows_out": 7983,
+          "throughput_rows_per_sec": 23072.3
+        },
+        {
+          "name": "compute",
+          "status": "success",
+          "duration_ms": 342,
+          "rows_in": 4783,
+          "rows_out": 91,
+          "throughput_rows_per_sec": 266.1
+        },
+        {
+          "name": "output",
+          "status": "success",
+          "duration_ms": 411,
+          "rows_in": 4783,
+          "rows_out": 4783,
+          "throughput_rows_per_sec": 11637.5
+        }
+      ],
+      "overall_throughput_rows_per_sec": 12362.9
+    }
+  ]
+}

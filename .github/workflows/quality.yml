@@ -1,0 +1,119 @@
+# =============================================================================
+# AutoBatch 代码质量工作流
+# Phase 6 CI/CD 加固：ruff lint + mypy type check + pytest-cov 覆盖率报告
+# 与 ci.yml 并行执行（push / pull_request 触发）
+# =============================================================================
+name: Quality / AutoBatch Code Quality
+
+on:
+  push:
+    branches:
+      - '*'
+  pull_request:
+
+# 同一分支并发时取消旧任务，节省 CI 资源
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Lint + Type Check + Coverage
+    runs-on: ubuntu-latest
+    # 质量门禁不阻塞其他矩阵任务（ci.yml 已并行跑测试）
+    continue-on-error: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+
+      - name: Install dependencies (runtime + dev)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          # 开发/质量检查工具
+          pip install ruff mypy pytest pytest-cov
+
+      # -------------------------------------------------------------------------
+      # 1. ruff lint（pyproject.toml 配置）
+      # -------------------------------------------------------------------------
+      - name: Ruff lint check
+        run: |
+          echo "::group::Ruff lint"
+          ruff check src/ tests/ --config pyproject.toml
+          echo "::endgroup::"
+
+      # -------------------------------------------------------------------------
+      # 2. ruff format check（不修改文件，仅校验）
+      # -------------------------------------------------------------------------
+      - name: Ruff format check
+        run: |
+          echo "::group::Ruff format"
+          ruff format --check src/ tests/ --config pyproject.toml
+          echo "::endgroup::"
+
+      # -------------------------------------------------------------------------
+      # 3. mypy 静态类型检查（仅 src/，渐进式启用）
+      # -------------------------------------------------------------------------
+      - name: Mypy type check
+        run: |
+          echo "::group::Mypy"
+          mypy src/ --config-file pyproject.toml
+          echo "::endgroup::"
+
+      # -------------------------------------------------------------------------
+      # 4. pytest + 覆盖率报告（term-missing + xml + html）
+      # -------------------------------------------------------------------------
+      - name: Run tests with coverage
+        run: |
+          python -m pytest tests/ -v \
+            --cov=src \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml \
+            --cov-report=html
+
+      # -------------------------------------------------------------------------
+      # 5. 上传覆盖率 artifacts（保留 14 天）
+      # -------------------------------------------------------------------------
+      - name: Upload coverage XML
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          retention-days: 14
+
+      - name: Upload coverage HTML
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: htmlcov/
+          retention-days: 14
+
+      # -------------------------------------------------------------------------
+      # 6. 覆盖率阈值门禁（低于 60% 标记失败；可后续调整）
+      # -------------------------------------------------------------------------
+      - name: Enforce coverage threshold (>= 60%)
+        run: |
+          python - <<'EOF'
+          import xml.etree.ElementTree as ET
+          import sys
+
+          tree = ET.parse("coverage.xml")
+          root = tree.getroot()
+          # JaCoCo/Coverage.py XML: <coverage line-rate="0.6423" ...>
+          line_rate = float(root.attrib.get("line-rate", "0"))
+          pct = line_rate * 100
+          print(f"Line coverage: {pct:.2f}%")
+          if pct < 60.0:
+              print(f"::error::Coverage {pct:.2f}% below threshold 60%")
+              sys.exit(1)
+          print("Coverage threshold satisfied.")
+          EOF

@@ -1,0 +1,38 @@
+# 运行产物（每批次独立目录）
+run/
+
+# 增量处理跨批次状态（Phase 1，见 docs/evolution.md §3.3.1）
+state/
+
+# 生成的原始数据
+data/raw/
+
+# Python 字节码与缓存
+__pycache__/
+*.pyc
+
+# pytest 缓存
+.pytest_cache/
+
+# 覆盖率报告产物（Phase 6 CI/CD 加固）
+coverage.xml
+htmlcov/
+.coverage
+
+# 分发构建产物
+*.egg-info/
+
+# 虚拟环境
+.venv/
+venv/
+
+# JVM crash 日志
+hs_err_pid*.log
+replay_pid*.log
+
+# 临时测试输出
+test_out.csv
+
+# mypy/ruff 缓存
+.mypy_cache/
+.ruff_cache/

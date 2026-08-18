@@ -408,7 +408,7 @@ def polars_env(_same_drive_tmp_root, request):
 # ----------------------------------------------------------------------
 # Spark 多机模式 fixture（cluster + S3 Parquet）
 # ----------------------------------------------------------------------
-def _spark_master_reachable(host: str = "localhost", port: int = 7077,
+def _spark_master_reachable(host: str = "localhost", port: int = 15077,
                             timeout: float = 3.0) -> bool:
     """检查 Spark Master 是否可达（socket 连接测试）."""
     import socket
@@ -429,11 +429,11 @@ SPARK_MASTER_REACHABLE = _spark_master_reachable()
 def spark_cluster_env(_same_drive_tmp_root, request):
     """Spark 多机模式 + S3 Parquet 测试环境.
 
-    前置条件：Docker Spark 集群已启动（spark://localhost:7077），
+    前置条件：Docker Spark 集群已启动（spark://localhost:15077），
     MinIO 在 localhost:9000 可用。
 
     配置要点：
-    - engine.backend="spark" + master="spark://localhost:7077"
+    - engine.backend="spark" + master="spark://localhost:15077"
     - engine.spark.cluster.enabled=true + driver_host="host.docker.internal"
     - engine.spark.cluster.s3_endpoint="localhost:9000"（Worker 通过容器内 socat 代理访问 MinIO）
     - storage.backend="parquet" + endpoint="localhost:9000"（Driver 端 pyarrow 用此地址）
@@ -453,7 +453,7 @@ def spark_cluster_env(_same_drive_tmp_root, request):
     cleanup: 测试结束后清理 test-cluster-* run_dir + MinIO 对应前缀数据 + 还原环境变量。
     """
     if not _spark_master_reachable():
-        pytest.skip("Spark Master not reachable at localhost:7077")
+        pytest.skip("Spark Master not reachable at localhost:15077")
 
     # 保存并设置环境变量（与 spark_env 一致）
     old_env = dict(os.environ)
@@ -474,7 +474,7 @@ def spark_cluster_env(_same_drive_tmp_root, request):
     # 关键：Spark backend + 多机模式
     cfg["engine"]["backend"] = "spark"
     cfg["engine"]["format"] = "csv"
-    cfg["engine"]["spark"]["master"] = "spark://localhost:7077"
+    cfg["engine"]["spark"]["master"] = "spark://localhost:15077"
     cfg["engine"]["spark"]["shuffle_partitions"] = 4
     cfg["engine"]["spark"]["executor_memory"] = "2g"
     cfg["engine"]["spark"]["executor_cores"] = 2

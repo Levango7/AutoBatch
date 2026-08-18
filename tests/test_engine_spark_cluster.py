@@ -38,7 +38,7 @@ from src.pipeline import run_pipeline
 # skipif 条件：Spark Master 不可达 或 pyspark 未安装
 # （多机模式 Worker 在 Docker Linux 容器中运行，不需要 Windows hadoop.dll）
 # ----------------------------------------------------------------------
-def _spark_master_reachable(host: str = "localhost", port: int = 7077,
+def _spark_master_reachable(host: str = "localhost", port: int = 15077,
                             timeout: float = 3.0) -> bool:
     try:
         s = socket.socket()

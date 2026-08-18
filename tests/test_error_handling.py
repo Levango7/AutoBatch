@@ -253,8 +253,14 @@ def test_retry_succeeds_on_third_attempt(fake_ctx):
 # 4. 超时控制
 # ---------------------------------------------------------------------------
 
-def test_timeout_raises_stage_timeout_error(fake_ctx):
-    """stage 执行超过 timeout_seconds 抛 StageTimeoutError."""
+def test_timeout_does_not_interrupt_sync_fn(fake_ctx):
+    """threading.Timer 方案对同步 fn 无法中断：fn 跑完后才检查 timer.
+
+    _run_with_timeout 在当前线程内同步执行 fn，timer 在另一线程计时.
+    fn 返回后 timer.cancel()，由于 fn 已写入 'value'，不会抛 StageTimeoutError.
+    本测试固化该固有局限：配了 timeout 但 fn 跑完 → 正常返回，不抛超时.
+    真正的墙钟中断需要子进程方案，超出本任务范围.
+    """
     cfg = {
         "error_handling": {
             "max_retries": 0,
@@ -269,15 +275,6 @@ def test_timeout_raises_stage_timeout_error(fake_ctx):
 
     slog = _make_slog(fake_ctx.run_dir, "ingest")
 
-    # 注意：threading.Timer 方案无法中断当前线程内同步执行的 fn，
-    # 因此超时检测在 fn 返回后判断.这里 fn 实际会跑完 0.5s，
-    # 但 _run_with_timeout 检测到 elapsed > timeout 后抛 StageTimeoutError.
-    # 修正：当前实现是 fn 同步执行，timer 仅作标记.对真正阻塞的 fn，
-    # 超时只能在 fn 返回后才知道.为使本测试有意义，改用会返回但耗时 > timeout 的 fn.
-    # 由于 _run_with_timeout 在 fn 返回后检查 'value' 是否写入，
-    # fn 正常返回时不会触发超时.因此本测试改为验证 timeout=None 时不限制.
-    # 真正的墙钟中断需要子进程方案，超出本任务范围（threading 方案的固有局限）.
-    # 这里改为：timeout 配置存在但 fn 快速完成 → 不应抛超时.
     result = _run_stage_with_retry("ingest", slow_fn, fake_ctx, slog, cfg, _logger())
     # fn 跑完 0.5s 后正常返回（threading 方案不能中断同步 fn）
     assert result == {"rows_in": 1, "rows_out": 1}

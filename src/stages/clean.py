@@ -12,9 +12,8 @@ Phase 2b 增加 Spark 分布式分支（``ctx.engine_backend == "spark"``）：
 - 补缺用 ``df.fillna(fill_missing)``（Spark 用 fillna，不是 fill_null）
 - ``total_amount`` 用 ``F.round(F.col("quantity") * F.col("unit_price") * (1 - F.col("discount")), 2)``；
   当前数据集无 ``discount`` 列时退化为 ``F.round(qty * price, 2)`` 与 Python/Polars 路径对齐
-- ``is_anomaly`` 用 ``F.when((qty > 100) | (total_amount > 10000), lit("1")).otherwise(lit("0"))``
-  条件表达式（与 Python/Polars 路径的 outlier_keys 集合标记语义不同，Spark 路径
-  采用规则表达式标记异常订单，参见 docs/evolution.md §4.3.2.2）
+- ``is_anomaly`` 用 ``F.when(col("order_id").isin(outlier_keys), lit("1")).otherwise(lit("0"))``
+  条件表达式（与 Python/Polars 路径的 outlier_keys 集合标记语义一致，参见 docs/evolution.md §4.3.2.2）
 - 读入用 ``table_read(path, cfg, spark=ctx.spark_session)``
 - 写出用 ``table_write(path, df, cfg, spark=ctx.spark_session)``
 
@@ -200,12 +199,12 @@ def _clean_orders_spark(
         amt_expr = F.round(qty * price, 2)
     df = df.withColumn("total_amount", amt_expr)
 
-    # is_anomaly：规则表达式标记（quantity > 100 或 total_amount > 10000）
-    # 与 Python/Polars 路径的 outlier_keys 集合标记语义不同；用 "1"/"0" 字符串
-    # 与 Python/Polars 路径写出格式对齐。
+    # is_anomaly：用 outlier_keys 集合标记（与 Python/Polars 路径语义一致）
+    # 用 "1"/"0" 字符串与 Python/Polars 路径写出格式对齐。
+    outlier_keys = list(ctx.outlier_keys)
     df = df.withColumn(
         flag_col,
-        F.when((qty > 100) | (F.col("total_amount") > 10000), F.lit("1"))
+        F.when(F.col("order_id").isin(outlier_keys), F.lit("1"))
         .otherwise(F.lit("0")),
     )
 

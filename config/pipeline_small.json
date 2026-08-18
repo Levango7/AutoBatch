@@ -1,7 +1,7 @@
 {
   "pipeline": {
     "name": "autobatch",
-    "version": "1.0.0",
+    "version": "1.5.0",
     "batch_id": "auto",
     "run_dir": "run",
     "data_dir": "data"
@@ -161,15 +161,13 @@
     "backend": "local_csv",
     "bucket": "autobatch",
     "endpoint": "localhost:9000",
-    "access_key": "minioadmin",
-    "secret_key": "minioadmin",
     "secure": false,
     "region": "us-east-1",
     "warehouse": "warehouse",
     "prefix": "",
     "compression": "zstd",
+    "_s3_creds_note": "local_csv 模式不需要 S3 凭证，已省略 access_key/secret_key；切换到 parquet/iceberg 后端时通过环境变量 MINIO_ROOT_USER/MINIO_ROOT_PASSWORD 注入（见 docker/iceberg/docker-compose.yml），源代码默认 minioadmin 仅开发用，切勿提交生产凭证到版本控制",
     "iceberg": {
-      "enabled": false,
       "catalog_name": "autobatch",
       "catalog_type": "sql",
       "catalog_uri": "sqlite:///state/iceberg_catalog.db",
@@ -181,7 +179,8 @@
         "pyiceberg": "0.12.0rc1",
         "iceberg_spark_runtime": "iceberg-spark-runtime-4.1_2.13-1.11.0.jar",
         "iceberg_aws_bundle": "iceberg-aws-bundle-1.11.0.jar",
-        "spark_compat": "spark-4.1.0+iceberg-1.11.0+scala-2.13"
+        "spark_compat": "spark-4.1.0+iceberg-1.11.0+scala-2.13",
+        "_jar_note": "JAR 包名为构建时常量，由 docker/spark-cluster/Dockerfile ARG 控制（ICEBERG_VERSION/ICEBERG_SPARK_MAJOR/ICEBERG_SCALA_VERSION）；此处仅记录兼容性信息，用户修改不生效，需通过 docker build --build-arg 覆盖"
       }
     }
   }

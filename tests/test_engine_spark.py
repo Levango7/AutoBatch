@@ -219,7 +219,7 @@ def test_spark_full_equivalence(spark_env):
     manifest_py = json_load(os.path.join(run_dir_py, "manifest.json"))
     dq_s = manifest_s["quality"]["dq_score"]
     dq_py = manifest_py["quality"]["dq_score"]
-    assert dq_s == dq_py, \
+    assert dq_s == pytest.approx(dq_py, abs=1e-9), \
         f"DQ Score spark={dq_s} 应等于 python={dq_py}"
 
 

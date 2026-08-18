@@ -1,4 +1,4 @@
-﻿# ── up.ps1 ─────────────────────────────────────────────────────
+# ── up.ps1 ─────────────────────────────────────────────────────
 # 一键启动 AutoBatch Spark 集群
 # 步骤: build → up → 等待 Master 就绪 → 连接 MinIO
 # ───────────────────────────────────────────────────────────────
@@ -51,6 +51,12 @@ Write-Host ""
 Write-Host "[Step 3/4] 连接 MinIO 到集群网络 ..." -ForegroundColor Cyan
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 & "$scriptDir\connect-minio.ps1"
+# 修复：检查 connect-minio 退出码，失败立即终止
+# 此前未检查 $LASTEXITCODE，connect-minio 失败时集群仍报"启动完成"
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[ERROR] connect-minio 失败！MinIO 未加入集群网络，Worker 无法访问 S3" -ForegroundColor Red
+    exit 1
+}
 Write-Host ""
 
 # Step 4: 验证集群状态
@@ -59,11 +65,15 @@ Start-Sleep -Seconds 5
 
 try {
     $workersJson = Invoke-RestMethod -Uri "http://localhost:8080/api/v1/workers" -TimeoutSec 5 -ErrorAction Stop
-    $workerCount = ($workersJson | Measure-Object).Count
+    # 修复：worker 计数逻辑
+    # 此前 $workerCount = ($workersJson | Measure-Object).Count 把整个响应对象计为 1
+    # 正确做法：取 workers 数组并用 @().Count 计数（@() 确保单元素也按数组处理）
+    $workers = @($workersJson.workers)
+    $workerCount = $workers.Count
     Write-Host "  Master:  http://localhost:8080  [OK]" -ForegroundColor Green
     Write-Host "  Workers: ${workerCount} 个在线" -ForegroundColor Green
 
-    foreach ($w in $workersJson) {
+    foreach ($w in $workers) {
         $status = if ($w.status -eq "ALIVE") { "ALIVE" } else { $w.status }
         $color = if ($status -eq "ALIVE") { "Green" } else { "Red" }
         Write-Host "    - $($w.id): cores=$($w.cores), memory=$($w.memory), status=$status" -ForegroundColor $color

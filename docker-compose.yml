@@ -1,8 +1,29 @@
+# ── AutoBatch Pipeline 编排 ─────────────────────────────────────
+# 单服务：pipeline（python:3.13-slim + 多阶段构建）
+# 挂载 run/data/config 卷，便于宿主机查看产物与切换配置
+# ────────────────────────────────────────────────────────────────
+
 services:
   pipeline:
     build: .
+    image: autobatch-pipeline:latest
+    container_name: autobatch-pipeline
     volumes:
       - ./run:/app/run
       - ./data:/app/data
       - ./config:/app/config
-    command: sh -c "python -m src.pipeline --config config/pipeline.json"
+    # 注：不重复 Dockerfile CMD；如需覆盖配置，用 command 指定
+    # command: ["python", "-m", "src.pipeline", "--config", "config/pipeline_small.json"]
+    restart: unless-stopped
+    healthcheck:
+      # 与 Dockerfile HEALTHCHECK 一致；compose 层显式声明便于编排查看
+      test: ["CMD", "python", "-c", "import src.pipeline; import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

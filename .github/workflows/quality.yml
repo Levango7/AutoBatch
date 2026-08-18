@@ -1,14 +1,20 @@
 # =============================================================================
 # AutoBatch 代码质量工作流
-# Phase 6 CI/CD 加固：ruff lint + mypy type check + pytest-cov 覆盖率报告
-# 与 ci.yml 并行执行（push / pull_request 触发）
+# Phase 6 CI/CD 加固 + 任务61 修复：
+#   - 与 ci.yml 分工：ci.yml 跑测试矩阵 + smoke test；quality.yml 跑 lint + type-check + coverage 门禁
+#   - mypy 用 Python 3.9（匹配 pyproject.toml 的 python_version="3.9"，最低支持版本）
+#   - 覆盖率阈值门禁用 `coverage report --fail-under=60` 替代手写 XML 解析（更稳健）
+#   - coverage 数据收集合并为单一步骤（目的是门禁数据来源，非重复测试）
+#   - 顶层 concurrency 取消同分支旧任务，节省 CI 资源
 # =============================================================================
 name: Quality / AutoBatch Code Quality
 
 on:
   push:
     branches:
-      - '*'
+      - 'main'
+      - 'master'
+      - 'release/*'
   pull_request:
 
 # 同一分支并发时取消旧任务，节省 CI 资源
@@ -18,7 +24,7 @@ concurrency:
 
 jobs:
   quality:
-    name: Lint + Type Check + Coverage
+    name: Lint + Type Check + Coverage Gate
     runs-on: ubuntu-latest
     # 质量门禁不阻塞其他矩阵任务（ci.yml 已并行跑测试）
     continue-on-error: false
@@ -27,18 +33,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.13
+      # -------------------------------------------------------------------------
+      # 用 Python 3.9（最低支持版本，匹配 pyproject.toml 的 mypy python_version="3.9"）
+      # 在最低版本下做 lint + type-check + coverage，能发现兼容性问题
+      # -------------------------------------------------------------------------
+      - name: Set up Python 3.9
         uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
+          python-version: '3.9'
           cache: pip
 
       - name: Install dependencies (runtime + dev)
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          # 开发/质量检查工具
-          pip install ruff mypy pytest pytest-cov
+          pip install -r requirements-dev.txt
 
       # -------------------------------------------------------------------------
       # 1. ruff lint（pyproject.toml 配置）
@@ -60,6 +69,7 @@ jobs:
 
       # -------------------------------------------------------------------------
       # 3. mypy 静态类型检查（仅 src/，渐进式启用）
+      #    Python 版本与 pyproject.toml 的 python_version="3.9" 对齐
       # -------------------------------------------------------------------------
       - name: Mypy type check
         run: |
@@ -68,15 +78,17 @@ jobs:
           echo "::endgroup::"
 
       # -------------------------------------------------------------------------
-      # 4. pytest + 覆盖率报告（term-missing + xml + html）
+      # 4. 收集覆盖率数据（pytest --cov，唯一目的是为阈值门禁提供数据）
+      #    注意：此处不重复跑测试逻辑，测试矩阵由 ci.yml 负责
+      #    此步骤仅生成 .coverage + coverage.xml 供下一步门禁使用
       # -------------------------------------------------------------------------
-      - name: Run tests with coverage
+      - name: Collect coverage data
         run: |
-          python -m pytest tests/ -v \
+          python -m pytest tests/ \
             --cov=src \
-            --cov-report=term-missing \
             --cov-report=xml:coverage.xml \
-            --cov-report=html
+            --cov-report=html \
+            -q
 
       # -------------------------------------------------------------------------
       # 5. 上传覆盖率 artifacts（保留 14 天）
@@ -98,22 +110,11 @@ jobs:
           retention-days: 14
 
       # -------------------------------------------------------------------------
-      # 6. 覆盖率阈值门禁（低于 60% 标记失败；可后续调整）
+      # 6. 覆盖率阈值门禁（用 coverage report --fail-under 替代手写 XML 解析）
+      #    coverage report 直接读取 .coverage 数据文件，低于 60% 时非零退出
       # -------------------------------------------------------------------------
       - name: Enforce coverage threshold (>= 60%)
         run: |
-          python - <<'EOF'
-          import xml.etree.ElementTree as ET
-          import sys
-
-          tree = ET.parse("coverage.xml")
-          root = tree.getroot()
-          # JaCoCo/Coverage.py XML: <coverage line-rate="0.6423" ...>
-          line_rate = float(root.attrib.get("line-rate", "0"))
-          pct = line_rate * 100
-          print(f"Line coverage: {pct:.2f}%")
-          if pct < 60.0:
-              print(f"::error::Coverage {pct:.2f}% below threshold 60%")
-              sys.exit(1)
-          print("Coverage threshold satisfied.")
-          EOF
+          echo "::group::Coverage threshold"
+          coverage report --fail-under=60
+          echo "::endgroup::"

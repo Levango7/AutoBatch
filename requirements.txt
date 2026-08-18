@@ -1,23 +1,16 @@
 # =============================================================================
-# AutoBatch 依赖清单
-# 运行时零依赖：仅需 Python 3.9+ 标准库
+# AutoBatch 运行时依赖清单
+# 任务61 修复：
+#   - 仅保留运行时可选依赖（按 engine / storage backend 按需启用）
+#   - 加兼容性上界，避免主版本升级引入 breaking change
+#   - dev / CI 依赖拆分到 requirements-dev.txt
 # =============================================================================
 
 # -----------------------------------------------------------------------------
 # 运行时可选依赖（按 engine / storage backend 按需启用）
 # -----------------------------------------------------------------------------
-polars>=1.0          # Phase 2a 列式加速（engine.backend="polars" 时需要）
-pyspark>=4.0         # Phase 2b Spark 分布式加速（engine.backend="spark" 时需要；需 JDK17+）
-pyarrow>=14.0        # Phase 3 湖存储（storage.backend="parquet" 时需要；Parquet 读写 + S3/MinIO 客户端）
-minio>=7.0           # Phase 3 湖存储（MinIO SDK；bucket 初始化与迁移脚本用）
-psutil>=5.9          # 任务41 监控告警（monitoring.enabled=true 时可选；不可用则降级返回 None）
-
-# =============================================================================
-# 开发 / CI 依赖（Phase 6 CI/CD 加固）
-# 安装方式：pip install -r requirements.txt --extra-index-url ... 或手动 pip install
-# 也可拆分到 requirements-dev.txt；此处保留单一文件以便 CI 一键安装
-# =============================================================================
-pytest>=7.0          # 测试框架
-pytest-cov>=4.0      # 覆盖率插件（生成 coverage.xml + htmlcov/）
-ruff>=0.6.0          # 极速 lint + format checker（替代 flake8 + black + isort）
-mypy>=1.10.0         # 静态类型检查（渐进式启用，不强制 strict）
+polars>=1.0,<2.0       # Phase 2a 列式加速（engine.backend="polars" 时需要）
+pyspark>=4.0,<5.0      # Phase 2b Spark 分布式加速（engine.backend="spark" 时需要；需 JDK17+）
+pyarrow>=14.0,<20.0    # Phase 3 湖存储（storage.backend="parquet" 时需要；Parquet 读写 + S3/MinIO 客户端）
+minio>=7.0,<8.0        # Phase 3 湖存储（MinIO SDK；bucket 初始化与迁移脚本用）
+psutil>=5.9,<7.0       # 任务41 监控告警（monitoring.enabled=true 时可选；不可用则降级返回 None）

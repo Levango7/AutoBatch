@@ -18,7 +18,7 @@ with ``"mode": "incremental"``. See docs/evolution.md §3.3.3.
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, Callable
 
 from ..helpers import (
     PipelineContext,
@@ -64,6 +64,40 @@ def _select_source_path(ctx: PipelineContext, raw_dir: str,
     return abs_path(finfo["copied_to"])
 
 
+def _emit_valid_quarantine(
+    ctx: PipelineContext, name: str, good_count: int, bad_count: int,
+    log, write_valid: Callable[..., Any], write_quarantine: Callable[..., Any],
+) -> tuple[bool, bool]:
+    """三引擎共用：处理 valid / quarantine 文件写出决策 + log warn.
+
+    全量模式：仅当 good_count > 0 时写 valid_<name>.csv（保留原 skip-when-empty 行为）；
+    增量模式：总是写 valid 文件（即使 0 行 good），保证下游 stage 可依赖文件存在.
+    quarantine_<name>.csv 仅在 bad_count > 0 时写，并 log.warn.
+
+    Args:
+        ctx:              PipelineContext（用 ctx.incremental_enabled 判断模式）.
+        name:             数据集名（log.warn 用）.
+        good_count:       good 行数（spark=df.count(), polars=df.height, python=len(good)）.
+        bad_count:        bad 行数.
+        log:              StageLog.
+        write_valid:      无参 callable，写出 valid 文件（各引擎封装自己的 table_write 调用）.
+        write_quarantine: 无参 callable，写出 quarantine 文件.
+
+    Returns:
+        (emitted_valid, emitted_quarantine) 是否写出了 valid / quarantine.
+    """
+    emitted_valid = False
+    if good_count > 0 or ctx.incremental_enabled:
+        write_valid()
+        emitted_valid = True
+    emitted_quarantine = False
+    if bad_count > 0:
+        write_quarantine()
+        emitted_quarantine = True
+        log.warn("quarantined", dataset=name, count=bad_count)
+    return emitted_valid, emitted_quarantine
+
+
 def run(ctx: PipelineContext, log) -> dict[str, Any]:
     cfg = ctx.config
     rules = cfg.get("quality", {}).get("rules", {})
@@ -76,7 +110,7 @@ def run(ctx: PipelineContext, log) -> dict[str, Any]:
     # Reference tables are always loaded fully: they are small and stable,
     # and referential-integrity checks need the complete key space. This is
     # unchanged from the full-mode behaviour (docs/evolution.md §3.3.3).
-    # ref_data 始终为 List[Dict] 格式（RuleEngine._ref_keys / _check_polars
+    # ref_data 始终为 List[Dict] 格式（RuleEngine._ref_keys / check_polars
     # 的 referential 均以此格式提取 key 集合），与 engine.backend 无关。
     # Phase 4: storage.backend="iceberg" 时源参考表仍是 CSV（generator 生成），
     # 用 load_csv 读；中间产物通过 table_read 自动路由（path 是文件路径时
@@ -147,23 +181,19 @@ def run(ctx: PipelineContext, log) -> dict[str, Any]:
                     oid = order_ids[i] if i < len(order_ids) else None
                     if oid:
                         outlier_keys.add(oid)
-            if good_count > 0:
-                table_write(os.path.join(val_dir, "valid_" + name + ".csv"),
-                            good_df, cfg, spark=spark)
+            emitted_v, emitted_q = _emit_valid_quarantine(
+                ctx, name, good_count, bad_count, log,
+                write_valid=lambda name=name, good_df=good_df, spark=spark: table_write(
+                    os.path.join(val_dir, "valid_" + name + ".csv"),
+                    good_df, cfg, spark=spark),
+                write_quarantine=lambda name=name, bad_df=bad_df, spark=spark: table_write(
+                    os.path.join(qu_dir, "quarantine_" + name + ".csv"),
+                    bad_df, cfg, spark=spark),
+            )
+            if emitted_v:
                 produced_valid.append(name)
-            elif ctx.incremental_enabled:
-                # Incremental mode: always emit a valid file (even when this batch
-                # produced zero good rows) so downstream stages can rely on its
-                # presence. Full mode preserves the existing skip-when-empty
-                # behaviour exactly.
-                table_write(os.path.join(val_dir, "valid_" + name + ".csv"),
-                            good_df, cfg, spark=spark)
-                produced_valid.append(name)
-            if bad_count > 0:
-                table_write(os.path.join(qu_dir, "quarantine_" + name + ".csv"),
-                            bad_df, cfg, spark=spark)
+            if emitted_q:
                 produced_quarantine.append(name)
-                log.warn("quarantined", dataset=name, count=bad_count)
         elif is_polars:
             import polars as pl
             df = table_read(path, cfg)
@@ -188,21 +218,17 @@ def run(ctx: PipelineContext, log) -> dict[str, Any]:
                     oid = order_ids[i] if i < len(order_ids) else None
                     if oid:
                         outlier_keys.add(oid)
-            fields = df.columns
-            if good_df.height > 0:
-                table_write(os.path.join(val_dir, "valid_" + name + ".csv"), good_df, cfg)
+            emitted_v, emitted_q = _emit_valid_quarantine(
+                ctx, name, good_df.height, bad_df.height, log,
+                write_valid=lambda name=name, good_df=good_df: table_write(
+                    os.path.join(val_dir, "valid_" + name + ".csv"), good_df, cfg),
+                write_quarantine=lambda name=name, bad_df=bad_df: table_write(
+                    os.path.join(qu_dir, "quarantine_" + name + ".csv"), bad_df, cfg),
+            )
+            if emitted_v:
                 produced_valid.append(name)
-            elif ctx.incremental_enabled:
-                # Incremental mode: always emit a valid file (even when this batch
-                # produced zero good rows) so downstream stages can rely on its
-                # presence. Full mode preserves the existing skip-when-empty
-                # behaviour exactly.
-                table_write(os.path.join(val_dir, "valid_" + name + ".csv"), good_df, cfg)
-                produced_valid.append(name)
-            if bad_df.height > 0:
-                table_write(os.path.join(qu_dir, "quarantine_" + name + ".csv"), bad_df, cfg)
+            if emitted_q:
                 produced_quarantine.append(name)
-                log.warn("quarantined", dataset=name, count=bad_df.height)
         else:
             rows, fields = table_read(path, cfg)
             total_in += len(rows)
@@ -218,24 +244,20 @@ def run(ctx: PipelineContext, log) -> dict[str, Any]:
                 oid = rows[i].get("order_id")
                 if oid:
                     outlier_keys.add(oid)
-            if good:
-                table_write(os.path.join(val_dir, "valid_" + name + ".csv"),
-                            good, cfg, fields=fields)
+            bad_fields = fields + ["_line", "_reasons"]
+            emitted_v, emitted_q = _emit_valid_quarantine(
+                ctx, name, len(good), len(bad), log,
+                write_valid=lambda name=name, good=good, fields=fields: table_write(
+                    os.path.join(val_dir, "valid_" + name + ".csv"),
+                    good, cfg, fields=fields),
+                write_quarantine=lambda name=name, bad=bad, bad_fields=bad_fields: table_write(
+                    os.path.join(qu_dir, "quarantine_" + name + ".csv"),
+                    bad, cfg, fields=bad_fields),
+            )
+            if emitted_v:
                 produced_valid.append(name)
-            elif ctx.incremental_enabled:
-                # Incremental mode: always emit a valid file (even when this batch
-                # produced zero good rows) so downstream stages can rely on its
-                # presence. Full mode preserves the existing skip-when-empty
-                # behaviour exactly.
-                table_write(os.path.join(val_dir, "valid_" + name + ".csv"),
-                            [], cfg, fields=fields)
-                produced_valid.append(name)
-            if bad:
-                bad_fields = fields + ["_line", "_reasons"]
-                table_write(os.path.join(qu_dir, "quarantine_" + name + ".csv"),
-                            bad, cfg, fields=bad_fields)
+            if emitted_q:
                 produced_quarantine.append(name)
-                log.warn("quarantined", dataset=name, count=len(bad))
 
     summary = quality_summary(stats_by_dataset, quarantined)
     # Tag the run mode so consumers can distinguish full vs incremental DQ

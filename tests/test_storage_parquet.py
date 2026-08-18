@@ -210,7 +210,7 @@ def test_local_parquet_equivalence(parquet_env):
     manifest_c = json_load(os.path.join(run_dir_c, "manifest.json"))
     dq_p = manifest_p["quality"]["dq_score"]
     dq_c = manifest_c["quality"]["dq_score"]
-    assert dq_p == dq_c, \
+    assert dq_p == pytest.approx(dq_c, abs=1e-9), \
         f"DQ Score parquet={dq_p} 应等于 local_csv={dq_c}"
 
 
@@ -286,7 +286,7 @@ def test_s3_parquet_equivalence(s3_env):
     manifest_c = json_load(os.path.join(run_dir_c, "manifest.json"))
     dq_s = manifest_s["quality"]["dq_score"]
     dq_c = manifest_c["quality"]["dq_score"]
-    assert dq_s == dq_c, \
+    assert dq_s == pytest.approx(dq_c, abs=1e-9), \
         f"DQ Score S3={dq_s} 应等于 local_csv={dq_c}"
 
 

@@ -1,5 +1,41 @@
-FROM python:3.13-slim
+# ── AutoBatch Pipeline 多阶段构建 ──────────────────────────────
+# Stage 1: builder  — 安装 Python 依赖到独立目录
+# Stage 2: runtime  — 仅拷贝必要文件 + 依赖，非 root 运行
+# 设计参见 docs/evolution.md §6.x（Docker 化部署）
+# ────────────────────────────────────────────────────────────────
+
+# ── Stage 1: builder ────────────────────────────────────────────
+FROM python:3.13-slim AS builder
+WORKDIR /build
+COPY requirements.txt .
+# 装到 /install（便于 runtime 阶段精确拷贝，不含 pip/setuptools 等工具）
+RUN pip install --no-cache-dir --target=/install -r requirements.txt
+
+# ── Stage 2: runtime ────────────────────────────────────────────
+FROM python:3.13-slim AS runtime
 WORKDIR /app
-COPY . .
-RUN mkdir -p run data/raw
+
+# 拷贝 builder 阶段安装的依赖
+COPY --from=builder /install /app/vendor
+ENV PYTHONPATH="/app/vendor"
+ENV PATH="/app/vendor/bin:${PATH}"
+
+# 创建非 root 用户（UID/GID 1000，与 K8s/securityContext 约定一致）
+RUN useradd -m -u 1000 autobatch
+
+# 拷贝应用代码（仅 src + config + 入口，排除 tests/benchmarks/docs 等）
+COPY --chown=autobatch:autobatch src/ ./src/
+COPY --chown=autobatch:autobatch config/ ./config/
+COPY --chown=autobatch:autobatch main.py ./
+COPY --chown=autobatch:autobatch requirements.txt ./
+
+# 创建运行时目录并赋属主
+RUN mkdir -p run data/raw && chown -R autobatch:autobatch run data
+
+USER autobatch
+
+# 健康检查：验证入口模块可导入（轻量，无副作用）
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD python -c "import src.pipeline; import sys; sys.exit(0)"
+
 CMD ["python", "-m", "src.pipeline", "--config", "config/pipeline.json"]

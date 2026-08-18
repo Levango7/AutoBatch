@@ -175,6 +175,47 @@ class StateStore:
         state["last_batch_id"] = batch_id
         self.save(state)
 
+    def commit_all(self, state: dict[str, Any], batch_id: str) -> None:
+        """Atomically promote staged watermarks **and** Iceberg snapshot ids.
+
+        把 ``commit_watermark`` 与 ``commit_snapshot_id`` 合并为单次 ``state.save``
+        调用，避免原两步提交中间失败导致 watermark 已提升但 snapshot id 未提升
+        （或反之）的不一致。下游增量读以 (watermark, snapshot_id) 联合定位，
+        任一者领先另一者都会导致漏读或重读。
+
+        行为等价于 ``commit_snapshot_id(state, batch_id)`` +
+        ``commit_watermark(state, batch_id)``，但只持久化一次。
+
+        Args:
+            state:    in-memory state dict（由调用方持有，本方法就地修改）。
+            batch_id: 当前批次 ID，写入 ``last_batch_id`` /
+                      ``last_processed_at`` 用于追溯。
+        """
+        now = utc_ts()
+        # 1. 提升 Iceberg snapshot id（若有 staged）
+        for _name, info in state.get("iceberg_snapshots", {}).items():
+            if "new_snapshot_id" in info:
+                info["snapshot_id"] = info.pop("new_snapshot_id")
+                info.pop("new_batch_id", None)
+                info["last_batch_id"] = batch_id
+                info["last_processed_at"] = now
+        # 2. 提升 watermark（若有 staged）
+        for _name, info in state.get("tables", {}).items():
+            if "new_watermark" in info:
+                info["watermark_value"] = info.pop("new_watermark")
+                seen = info.pop("new_seen_row_count", 0)
+                info["last_seen_row_count"] = seen
+                info["cumulative_row_count"] = (
+                    info.get("cumulative_row_count", 0) + seen
+                )
+                info.pop("new_batch_id", None)
+                info["last_batch_id"] = batch_id
+                info["last_processed_at"] = now
+        state["updated_at"] = now
+        state["last_batch_id"] = batch_id
+        # 3. 单次原子持久化
+        self.save(state)
+
     # ------------------------------------------------------------------
     # aggregate persistence
     # ------------------------------------------------------------------

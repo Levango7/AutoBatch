@@ -19,6 +19,56 @@ from src.helpers import ROOT, PipelineContext, StageLog, abs_path, csv_write, js
 from src.lineage import Manifest
 from src.pipeline import config_digest, run_pipeline
 
+# ----------------------------------------------------------------------
+# 精确 batch_id cleanup 机制
+# ----------------------------------------------------------------------
+# 设计：每个 env fixture 维护一个 created_batch_ids 列表，通过包装 run_pipeline
+# 自动捕获测试创建的 batch_id。cleanup 优先按精确列表清理，列表为空时 fallback
+# 到 prefix 过滤（向后兼容，避免遗漏未捕获的批次）.
+#
+# 与原 prefix 过滤（name.startswith("test-xxx-")）的区别：
+# - 原方案会清理所有以 prefix 开头的目录，包括其他并发 pytest 进程的同 prefix 目录
+# - 新方案只清理本 fixture 实际创建的 batch_id，不误删其他进程的临时目录
+# - fallback 仅在列表为空时启用（向后兼容，不应在正常路径触发）
+_BATCH_ID_PREFIXES = (
+    "test-inc-", "test-polars-", "test-cluster-", "test-parquet-",
+    "test-s3-", "test-iceberg-", "test-spark-", "test-spark-iceberg-",
+    "test-e2e-", "test-errhand-",
+)
+
+
+def _cleanup_run_dir(run_root: str, created_batch_ids: list[str],
+                     prefix: str | None = None) -> None:
+    """按精确 batch_id 列表清理 run_dir.
+
+    优先清理 created_batch_ids 中的批次（精确清理，不误删其他进程目录）.
+    若列表为空且 prefix 提供，fallback 到 prefix 过滤（向后兼容）.
+    """
+    if not os.path.isdir(run_root):
+        return
+    if created_batch_ids:
+        # 精确清理：只删列表中的 batch_id
+        for bid in created_batch_ids:
+            shutil.rmtree(os.path.join(run_root, bid), ignore_errors=True)
+        return
+    # fallback：prefix 过滤（向后兼容，仅在未捕获到 batch_id 时启用）
+    if prefix:
+        for name in os.listdir(run_root):
+            if name.startswith(prefix):
+                shutil.rmtree(os.path.join(run_root, name), ignore_errors=True)
+
+
+def _make_run_wrapper(real_run_pipeline, created_batch_ids: list[str]):
+    """包装 run_pipeline，自动捕获 batch_id 到 created_batch_ids 列表.
+
+    返回的 wrapper 签名与 run_pipeline 完全一致，仅在调用前把 batch_id
+    append 到列表.测试通过 env["run"] 调用即可享受精确清理.
+    """
+    def _wrapped(cfg, batch_id, fail_at="", **kwargs):
+        created_batch_ids.append(batch_id)
+        return real_run_pipeline(cfg, batch_id, fail_at, **kwargs)
+    return _wrapped
+
 SAMPLE_ORDERS: list[dict[str, str]] = [
     {"order_id": "ORD-00000001", "customer_id": "CUS-000001", "product_id": "PRD-000001",
      "order_date": "2026-01-15", "created_ts": "2026-01-15T10:00:00", "region": "华东",

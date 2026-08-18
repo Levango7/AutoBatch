@@ -18,6 +18,7 @@ from .exceptions import StageExecutionError, StageTimeoutError
 from .helpers import (
     PipelineContext,
     StageLog,
+    _apply_spark_base_config,
     _get_engine_backend,
     _table_exists,
     abs_path,
@@ -39,12 +40,15 @@ STAGES = ["ingest", "validate", "clean", "compute", "output"]
 # 每个 stage 把产物写到 run/<batch>/<NN>_<name>/ 下；重试前清理这些目录
 # 确保不残留部分产物.**注意**：state/ 目录由 incremental 模式管理，
 # 永远不在此清理（水位文件必须跨批次保留）.
-_STAGE_OUTPUT_DIRS: dict[str, str] = {
-    "ingest": "01_raw",
-    "validate": "02_valid",
-    "clean": "03_clean",
-    "compute": "04_aggregates",
-    "output": "05_output",
+# validate stage 除 02_valid/ 外还写 quarantine/（隔离坏行）与 report/
+# （质量报告），重试前必须一并清理，否则上次失败的坏行/报告残留会污染
+# 本次结果。其他 stage 仅写单一目录，list 仅含一项。
+_STAGE_OUTPUT_DIRS: dict[str, list[str]] = {
+    "ingest": ["01_raw"],
+    "validate": ["02_valid", "quarantine", "report"],
+    "clean": ["03_clean"],
+    "compute": ["04_aggregates"],
+    "output": ["05_output"],
 }
 
 # Aggregate merge spec: (name, fields, key_cols) for each aggregate product
@@ -109,26 +113,10 @@ def _init_spark_session(cfg: dict[str, Any], logger) -> Any:
     from pyspark.sql import SparkSession  # lazy import：仅 spark 路径需要
 
     scfg = cfg.get("engine", {}).get("spark", {}) or {}
-    builder = (
-        SparkSession.builder
-        .appName(scfg.get("app_name", "autobatch"))
-        .master(scfg.get("master", "local[*]"))
-    )
-    if scfg.get("executor_memory"):
-        builder = builder.config("spark.executor.memory", scfg["executor_memory"])
-    if scfg.get("executor_cores") is not None:
-        builder = builder.config("spark.executor.cores", scfg["executor_cores"])
-    if scfg.get("num_executors") is not None:
-        builder = builder.config("spark.executor.instances", scfg["num_executors"])
-    if scfg.get("driver_memory"):
-        builder = builder.config("spark.driver.memory", scfg["driver_memory"])
-    if scfg.get("shuffle_partitions") is not None:
-        builder = builder.config(
-            "spark.sql.shuffle.partitions", scfg["shuffle_partitions"]
-        )
-    # AQE 缺省开启，自动合并小分区、处理倾斜
-    aqe = scfg.get("adaptive_query_execution", True)
-    builder = builder.config("spark.sql.adaptiveQueryExecution", "true" if aqe else "false")
+    builder = SparkSession.builder
+    # 基础配置（appName/master/资源/AQE）抽到 helpers._apply_spark_base_config，
+    # 与 helpers._get_spark_session 共享同一份配置项，避免两处重复维护。
+    builder = _apply_spark_base_config(builder, scfg)
     # 尝试绕过 Windows NativeIO（缺 hadoop.dll 时写文件仍会失败，但内存操作可进行）
     builder = builder.config("spark.hadoop.io.nativeio", "false")
 
@@ -291,29 +279,31 @@ def _cleanup_stage_output(stage_name: str, run_dir: str, logger) -> None:
     """删除指定 stage 的输出目录（幂等性保证）.
 
     清理 run/<batch>/<NN>_<stage>/ 目录（见 _STAGE_OUTPUT_DIRS 映射）.
-    **永不清理** state/ 目录（增量模式水位文件必须保留）.
-    缺省 stage 不在映射中时静默跳过（向后兼容自定义 stage）.
+    一个 stage 可能写多个目录（如 validate 写 02_valid/ + quarantine/ +
+    report/），全部清理确保重试幂等。**永不清理** state/ 目录（增量模式
+    水位文件必须保留）. 缺省 stage 不在映射中时静默跳过（向后兼容自定义 stage）.
 
     Args:
         stage_name:  stage 名（ingest/validate/clean/compute/output）.
         run_dir:     批次运行目录绝对路径.
         logger:      logging.Logger，用于记录清理动作.
     """
-    sub = _STAGE_OUTPUT_DIRS.get(stage_name)
-    if not sub:
+    subs = _STAGE_OUTPUT_DIRS.get(stage_name)
+    if not subs:
         return
-    target = os.path.join(run_dir, sub)
-    if not os.path.exists(target):
-        return
-    try:
-        shutil.rmtree(target)
-        logger.info("stage output cleaned for retry",
-                    extra={"stage": stage_name, "cleaned_dir": sub})
-    except Exception as exc:  # noqa: BLE001
-        # 清理失败不应阻塞重试；记录 warning 后继续.
-        logger.warning("stage output cleanup failed, continuing retry",
-                       extra={"stage": stage_name, "cleaned_dir": sub,
-                              "error": f"{type(exc).__name__}: {exc}"})
+    for sub in subs:
+        target = os.path.join(run_dir, sub)
+        if not os.path.exists(target):
+            continue
+        try:
+            shutil.rmtree(target)
+            logger.info("stage output cleaned for retry",
+                        extra={"stage": stage_name, "cleaned_dir": sub})
+        except Exception as exc:  # noqa: BLE001
+            # 清理失败不应阻塞重试；记录 warning 后继续.
+            logger.warning("stage output cleanup failed, continuing retry",
+                           extra={"stage": stage_name, "cleaned_dir": sub,
+                                  "error": f"{type(exc).__name__}: {exc}"})
 
 
 def _run_with_timeout(
@@ -358,7 +348,10 @@ def _run_with_timeout(
     def _runner():
         try:
             result_holder["value"] = fn()
-        except BaseException as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            # 仅捕获 Exception，让 KeyboardInterrupt/SystemExit 直接传播
+            # （由 finally 块的 done_event.set() 通知外层，但异常本身从
+            # _runner 同步向上抛出，不被 result_holder 吞掉）。
             result_holder["error"] = exc
         finally:
             done_event.set()
@@ -434,7 +427,7 @@ def _run_stage_with_retry(
             timeout_s = None
 
     batch_id = ctx.batch_id
-    last_exc: Optional[BaseException] = None
+    last_exc: Optional[Exception] = None
     last_tb = ""
 
     for attempt in range(max_retries + 1):
@@ -454,7 +447,9 @@ def _run_stage_with_retry(
                                    "attempt": attempt})
                 slog.info("stage succeeded after retry", attempt=attempt)
             return summary
-        except BaseException as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            # 仅捕获 Exception，让 KeyboardInterrupt/SystemExit 正常传播
+            # （重试逻辑不应吞掉用户主动中断信号）。
             last_exc = exc
             last_tb = traceback.format_exc()
             err_msg = f"{type(exc).__name__}: {exc}"
@@ -752,21 +747,29 @@ def _advance_and_merge(ctx: PipelineContext, store: StateStore, logger) -> None:
     Iceberg 表的 merge 由 pyiceberg table.append/overwrite 在 stage 内完成，
     此处不重复 merge 数据，只持久化 snapshot id 用于下次增量.
     """
-    # Phase 4: Iceberg snapshot id 提交（与 watermark commit 并存）
+    # Phase 4: Iceberg snapshot id 提交与 watermark 提交合并为单次原子
+    # commit_all，避免原两步提交中间失败导致 (watermark, snapshot_id)
+    # 不一致。仅在 incremental.mode="iceberg_snapshot_diff" 且有 staged
+    # snapshot id 时才同时提交两者；否则 commit_all 退化为仅提升 watermark
+    # （snapshot 段无 new_snapshot_id 时跳过，行为与 commit_watermark 等价）。
     inc_mode = ctx.config.get("incremental", {}).get("mode", "high_watermark")
     has_iceberg_snaps = bool(ctx.state.get("iceberg_snapshots"))
-    if inc_mode == "iceberg_snapshot_diff" and has_iceberg_snaps:
+    use_commit_all = (
+        inc_mode == "iceberg_snapshot_diff" and has_iceberg_snaps
+    )
+
+    if use_commit_all:
         try:
-            store.commit_snapshot_id(ctx.state, ctx.batch_id)
-            logger.info("iceberg snapshot id committed",
+            store.commit_all(ctx.state, ctx.batch_id)
+            logger.info("watermark + iceberg snapshot id committed atomically",
                         extra={"stage": "pipeline", "batch": ctx.batch_id})
         except Exception:  # noqa: BLE001
-            logger.warning("iceberg snapshot id commit failed, ignoring",
+            logger.warning("commit_all failed, ignoring",
                            extra={"stage": "pipeline"}, exc_info=True)
-
-    store.commit_watermark(ctx.state, ctx.batch_id)
-    logger.info("watermark committed",
-                extra={"stage": "pipeline", "batch": ctx.batch_id})
+    else:
+        store.commit_watermark(ctx.state, ctx.batch_id)
+        logger.info("watermark committed",
+                    extra={"stage": "pipeline", "batch": ctx.batch_id})
 
     agg_dir = os.path.join(ctx.run_dir, "04_aggregates")
     if not os.path.isdir(agg_dir):

@@ -5,9 +5,9 @@
 - Python 3.9+（Windows / Linux / macOS 均可）
 - 零第三方依赖（仅标准库），无需安装任何包
 - 可选：Polars 1.43+（`pip install polars`，启用 `engine.backend="polars"` 列式加速路径）
-- 可选：PySpark 4.x + JDK 11+ 或 17（`pip install pyspark`，启用 `engine.backend="spark"` 分布式加速路径；Windows 额外需 `winutils.exe` + `hadoop.dll` 并设 `HADOOP_HOME`，详见第 22 节；多机模式需 Docker Desktop + MinIO，详见第 22.3 节）
-- 可选：pyarrow 14+ + minio 7+（`pip install pyarrow minio`，启用 `storage.backend="parquet"` 湖存储路径，详见第 23 节）
-- 可选：pyiceberg 0.12.0rc1+（`pip install pyiceberg>=0.12.0rc1`，启用 `storage.backend="iceberg"` 湖表路径，详见第 24 节）
+- 可选：PySpark 4.x + JDK 11+ 或 17（`pip install pyspark`，启用 `engine.backend="spark"` 分布式加速路径；Windows 额外需 `winutils.exe` + `hadoop.dll` 并设 `HADOOP_HOME`，详见第 21 节；多机模式需 Docker Desktop + MinIO，详见第 21.3 节）
+- 可选：pyarrow 14+ + minio 7+（`pip install pyarrow minio`，启用 `storage.backend="parquet"` 湖存储路径，详见第 22 节）
+- 可选：pyiceberg 0.12.0rc1+（`pip install pyiceberg>=0.12.0rc1`，启用 `storage.backend="iceberg"` 湖表路径，详见第 23 节）
 - 可选：Docker 20+（容器化运行）
 - 磁盘：每批 2 万行订单约占用 15~20 MB（含全部中间产物；`storage.backend="parquet"` 时因列式压缩降至 3~6 MB）
 
@@ -19,18 +19,18 @@
 | Linux / macOS | `./run.sh` 或 `python main.py --config config/pipeline.json` | 同上 |
 | Docker | `docker compose up --build` | 容器内运行，结果经 volume 持久化到宿主机 |
 | 指定配置 | `python main.py --config config\pipeline_small.json` | 用 5000 行小规模配置 |
-| 增量模式 | 把 `incremental.enabled` 改为 `true` 后 `python main.py --config config\pipeline_small.json` | 首次=全量 + 建水位；后续只处理水位后新增行，详见第 14 节 |
-| Polars 列式加速 | 把 `engine.backend` 改为 `"polars"` 后 `python main.py --config config\pipeline_small.json` | 五阶段走 Polars 列式路径，产物与 python 一致，详见第 19 节 |
+| 增量模式 | 把 `incremental.enabled` 改为 `true` 后 `python main.py --config config\pipeline_small.json` | 首次=全量 + 建水位；后续只处理水位后新增行，详见第 13 节 |
+| Polars 列式加速 | 把 `engine.backend` 改为 `"polars"` 后 `python main.py --config config\pipeline_small.json` | 五阶段走 Polars 列式路径，产物与 python 一致，详见第 18 节 |
 | 增量 + Polars | 同时设 `incremental.enabled=true` 与 `engine.backend="polars"` | 两能力正交叠加，ingest 流式过滤 + compute 列式 merge |
-| Spark 分布式加速 | 把 `engine.backend` 改为 `"spark"` 后 `python main.py --config config\pipeline_small.json` | 五阶段走 Spark DataFrame API 路径，产物与 python 一致，详见第 22 节 |
+| Spark 分布式加速 | 把 `engine.backend` 改为 `"spark"` 后 `python main.py --config config\pipeline_small.json` | 五阶段走 Spark DataFrame API 路径，产物与 python 一致，详见第 21 节 |
 | 增量 + Spark | 同时设 `incremental.enabled=true` 与 `engine.backend="spark"` | 两能力正交叠加，ingest 分区并行过滤 + compute 分布式 merge |
-| Spark 多机分布式 | 启动集群 `pwsh docker/spark-cluster/up.ps1` + `engine.spark.master="spark://localhost:7077"` + `engine.spark.cluster.enabled=true` + `storage.backend="parquet"` | Docker Compose Standalone 集群（Master + 2 Worker）+ MinIO 共享存储，详见第 22.3 节 |
-| 本地 Parquet 湖存储 | 把 `storage.backend` 改为 `"parquet"`（不配 bucket/endpoint）后 `python main.py --config config\pipeline_small.json` | 五阶段产物改写本地 `.parquet`，列式压缩 3-6 倍，产物与 local_csv 一致，详见第 23 节 |
-| S3/MinIO Parquet 湖存储 | 把 `storage.backend` 改为 `"parquet"` + 配 `bucket`/`endpoint` 后 `python main.py --config config\pipeline_small.json` | 产物写到 `s3://bucket/warehouse/.../*.parquet`，远端共享存储，详见第 23 节 |
+| Spark 多机分布式 | 启动集群 `pwsh docker/spark-cluster/up.ps1` + `engine.spark.master="spark://localhost:7077"` + `engine.spark.cluster.enabled=true` + `storage.backend="parquet"` | Docker Compose Standalone 集群（Master + 2 Worker）+ MinIO 共享存储，详见第 21.3 节 |
+| 本地 Parquet 湖存储 | 把 `storage.backend` 改为 `"parquet"`（不配 bucket/endpoint）后 `python main.py --config config\pipeline_small.json` | 五阶段产物改写本地 `.parquet`，列式压缩 3-6 倍，产物与 local_csv 一致，详见第 22 节 |
+| S3/MinIO Parquet 湖存储 | 把 `storage.backend` 改为 `"parquet"` + 配 `bucket`/`endpoint` 后 `python main.py --config config\pipeline_small.json` | 产物写到 `s3://bucket/warehouse/.../*.parquet`，远端共享存储，详见第 22 节 |
 | 增量 + Parquet | 同时设 `incremental.enabled=true` 与 `storage.backend="parquet"` | 两能力正交叠加，ingest 增量过滤 + Parquet 谓词下推，compute 增量 merge + 列式聚合 |
-| Iceberg 湖表模式 | 把 `storage.backend` 改为 `"iceberg"` + 配 `iceberg` 子段后 `python main.py --config config\pipeline_small.json` | 五阶段产物改写 Iceberg 表，获得 ACID + time travel + snapshot diff，详见第 24 节 |
-| 增量 + Iceberg snapshot diff | 同时设 `incremental.mode="iceberg_snapshot_diff"` 与 `storage.backend="iceberg"` | 用 Iceberg 原生 snapshot diff 替代自建水位，详见第 24 节 |
-| Spark + Iceberg 三合一 | 同时设 `engine.backend="spark"` 与 `storage.backend="iceberg"` | Spark 原生读写 Iceberg 表，分布式 + 湖表终态，详见第 24 节 |
+| Iceberg 湖表模式 | 把 `storage.backend` 改为 `"iceberg"` + 配 `iceberg` 子段后 `python main.py --config config\pipeline_small.json` | 五阶段产物改写 Iceberg 表，获得 ACID + time travel + snapshot diff，详见第 23 节 |
+| 增量 + Iceberg snapshot diff | 同时设 `incremental.mode="iceberg_snapshot_diff"` 与 `storage.backend="iceberg"` | 用 Iceberg 原生 snapshot diff 替代自建水位，详见第 23 节 |
+| Spark + Iceberg 三合一 | 同时设 `engine.backend="spark"` 与 `storage.backend="iceberg"` | Spark 原生读写 Iceberg 表，分布式 + 湖表终态，详见第 23 节 |
 | 指定批次号 | `python main.py --batch-id B-MY-001` | 批次号可固定，便于对照 |
 | 失败演示 | `python main.py --fail-at clean` | 在指定阶段注入失败，验证失败定位 |
 
@@ -63,7 +63,7 @@
 | output.formats / aggregates_dir / report_dir | 输出格式与目录 | csv |
 | monitoring.log_level | 日志级别 | INFO |
 | demo.fail_at | 演示用失败阶段（null=关闭） | null 或 ingest/validate/clean/compute/output |
-| engine.backend | 执行引擎后端 | `python`（缺省，零依赖）/ `polars`（列式加速，需 `pip install polars`）/ `spark`（分布式加速，需 `pip install pyspark` + JDK 11+/17，Windows 额外需 `hadoop.dll`，详见第 22 节） |
+| engine.backend | 执行引擎后端 | `python`（缺省，零依赖）/ `polars`（列式加速，需 `pip install polars`）/ `spark`（分布式加速，需 `pip install pyspark` + JDK 11+/17，Windows 额外需 `hadoop.dll`，详见第 21 节） |
 | engine.format | 产物存储格式 | `csv`（缺省）/ `parquet`（列式压缩，配合 polars/spark 后端） |
 | engine.polars.streaming | Polars streaming 模式（spill 到磁盘） | true / false（缺省） |
 | engine.polars.parquet_compression | Parquet 压缩算法 | `zstd`（缺省）/ `snappy` / `gzip` |
@@ -78,7 +78,7 @@
 | engine.spark.adaptive_query_execution | AQE 开关（自动合并小分区、处理倾斜） | true（缺省）/ false |
 | engine.spark.write_single_file | 写出时合并为单文件（coalesce(1)） | false（缺省）/ true |
 | engine.spark.read_options | 传给 `spark.read.csv` 的参数 | `{}`（缺省） |
-| storage.backend | 存储介质后端 | `local_csv`（缺省，本地 CSV，向后兼容）/ `parquet`（Parquet 列式存储，本地或 S3/MinIO，需 `pip install pyarrow minio`，详见第 23 节）/ `iceberg`（Iceberg 湖表，ACID + time travel + snapshot diff，需 `pip install pyiceberg>=0.12.0rc1`，详见第 24 节） |
+| storage.backend | 存储介质后端 | `local_csv`（缺省，本地 CSV，向后兼容）/ `parquet`（Parquet 列式存储，本地或 S3/MinIO，需 `pip install pyarrow minio`，详见第 22 节）/ `iceberg`（Iceberg 湖表，ACID + time travel + snapshot diff，需 `pip install pyiceberg>=0.12.0rc1`，详见第 23 节） |
 | storage.bucket | S3/MinIO bucket 名 | `autobatch`（缺省） |
 | storage.endpoint | S3/MinIO endpoint（host:port） | `localhost:9000`（缺省，本地 MinIO） |
 | storage.access_key / secret_key | S3 凭证 | `minioadmin` / `minioadmin`（缺省，MinIO 默认凭证） |
@@ -88,9 +88,9 @@
 | storage.prefix | bucket 下额外前缀（多租户隔离用） | `""`（缺省） |
 | storage.compression | Parquet 压缩算法 | `zstd`（缺省）/ `snappy` / `gzip` / `none` |
 | storage.iceberg.catalog_type | Iceberg catalog 类型 | `sql`（开发/测试，SQLite 零额外服务）/ `rest`（生产，REST catalog 服务） |
-| storage.iceberg.uri | catalog URI | `sqlite:///autobatch.db`（SQL catalog，开发）/ `http://localhost:8181`（REST catalog，生产） |
-| storage.iceberg.warehouse | Iceberg warehouse 路径 | `s3://autobatch/warehouse`（与 `storage.warehouse` 解耦，Iceberg catalog 独立寻址） |
-| incremental.mode | 增量模式 | `high_watermark`（缺省，Phase 1 自建水位）/ `iceberg_snapshot_diff`（Phase 4，Iceberg 原生 snapshot diff，详见第 24 节） |
+| storage.iceberg.catalog_uri | catalog URI（与 config 实际字段名对齐） | `sqlite:///state/iceberg_catalog.db`（SQL catalog，开发）/ `http://localhost:8181`（REST catalog，生产） |
+| storage.iceberg.warehouse | Iceberg warehouse 路径（与 `storage.warehouse` 解耦，Iceberg catalog 独立寻址） | `state/warehouse`（缺省，本地路径）/ `s3://autobatch/warehouse`（S3/MinIO 生产） |
+| incremental.mode | 增量模式 | `high_watermark`（缺省，Phase 1 自建水位）/ `iceberg_snapshot_diff`（Phase 4，Iceberg 原生 snapshot diff，详见第 23 节） |
 
 ## 4. 调整数据规模
 
@@ -139,22 +139,28 @@
 
 ## 9. 测试运行方式
 
-项目内置 pytest 测试套件（46 个用例），位于 `tests/`：
+项目内置 pytest 测试套件（112 个用例），位于 `tests/`：
 
 ```
 python -m pytest tests/ -v
 ```
 
-测试覆盖范围：
+测试覆盖范围（13 个文件）：
 
 | 文件 | 覆盖内容 | 用例数 |
 |---|---|---|
-| tests/test_quality.py | 8 类质量规则的正例与反例（completeness / uniqueness / range / allowed_values / format / date_valid / referential / outlier）+ referential 性能回归（2 万行外键检查秒级完成） | 17 |
-| tests/test_stages.py | ingest / validate / clean / compute / output 五个 stage 单测 | 5 |
-| tests/test_pipeline_e2e.py | 端到端冒烟：pipeline success、DQ Score 落在合理区间、manifest 血缘非空、metrics.json 存在 | 4 |
-| tests/test_incremental.py | 5 个增量场景：首次增量=全量 + 建水位、无新数据二跑零增量、追加新数据后只处理新增行且聚合 merge 正确、失败重跑幂等水位不推进、`enabled:false` 全量回归行为不变 | 5 |
+| tests/test_benchmark.py | 基准测试：4 个 engine × storage 组合完整 pipeline 耗时对比，默认 skip 需 `--runslow` 启用 | 6 |
 | tests/test_engine_polars.py | 4 个 Polars 等价性场景：全量产物与 python 路径一致、DQ Score in [0.95, 1.0] 且 lineage/metrics 正确、增量 + Polars 组合、Parquet 格式条件 skip | 4 |
-| tests/test_engine_spark.py | 4 个 Spark 等价性场景：全量产物与 python 路径一致、DQ Score in [0.95, 1.0] 且 lineage/metrics 正确、增量 + Spark 组合、多机模式 S3 等价性（`test_cluster_spark_s3_equivalence`，Docker Compose Standalone 集群 + MinIO）；Windows 缺 `hadoop.dll` 时 `skipif` 跳过本地模式，多机模式 Docker/MinIO 不可用时跳过 | 4 |
+| tests/test_engine_spark.py | 3 个 Spark 等价性场景：全量产物与 python 路径一致、DQ Score in [0.95, 1.0] 且 lineage/metrics 正确、增量 + Spark 组合；Windows 缺 `hadoop.dll` 时 `skipif` 跳过本地模式 | 3 |
+| tests/test_engine_spark_cluster.py | 4 个 Spark 多机模式场景：多机+S3 全量产物与 local_csv 一致、增量+多机+S3 组合；Docker/MinIO 不可用时跳过 | 4 |
+| tests/test_error_handling.py | 27 个错误处理加固场景：正常执行不受影响、可配置重试次数、重试成功、超时控制、幂等性、StageExecutionError/StageTimeoutError 上下文、幂等清理不触碰 state/ | 27 |
+| tests/test_incremental.py | 5 个增量场景：首次增量=全量 + 建水位、无新数据二跑零增量、追加新数据后只处理新增行且聚合 merge 正确、失败重跑幂等水位不推进、`enabled:false` 全量回归行为不变 | 5 |
+| tests/test_monitoring.py | 28 个监控告警场景：MetricsSampler.sample()、AlertChecker.check() DQ Score 低于阈值、stage duration 超阈值、无超阈值返回空、check_alerts() 多批次、HealthServer start/stop、monitoring.enabled=false 不启用 | 28 |
+| tests/test_pipeline_e2e.py | 端到端冒烟：pipeline success、DQ Score 落在合理区间、manifest 血缘非空、metrics.json 存在 | 4 |
+| tests/test_quality.py | 8 类质量规则的正例与反例（completeness / uniqueness / range / allowed_values / format / date_valid / referential / outlier）+ referential 性能回归（2 万行外键检查秒级完成） | 17 |
+| tests/test_spark_iceberg.py | 10 个 Spark+Iceberg 三合一场景：8 个 `skipif` 环境守护（pyiceberg/pyspark/Docker/MinIO/Iceberg JAR 不可用）+ 2 个 config 验证 Spark Iceberg connector 注入 | 10 |
+| tests/test_stages.py | ingest / validate / clean / compute / output 五个 stage 单测 | 5 |
+| tests/test_storage_iceberg.py | 13 个 Iceberg 湖表场景：等价性 / ACID / time travel / schema evolution / snapshot diff 增量 / 增量+Iceberg / SQL catalog / REST catalog；pyiceberg 未安装时 `skipif` 跳过 | 13 |
 | tests/test_storage_parquet.py | 4 个 Parquet 湖存储场景：本地 Parquet 全量产物与 local_csv 一致、S3 MinIO Parquet 全量产物与 local_csv 一致、Parquet 压缩比基准、增量 + Parquet 组合；MinIO 不可用时 `skipif` 跳过 | 4 |
 
 `pytest.ini` 已配置 `testpaths = tests` 与 `pythonpath = .`，从项目根直接运行即可，无需额外参数。增量测试用 `conftest.py` 的 `inc_env` 夹具隔离 state 目录与数据目录，互不污染。Spark 本地模式测试用 `pytest.mark.skipif` 在 Windows 缺 `hadoop.dll` 或未装 `pyspark` 时跳过，代码逻辑完整，装齐环境后可直接运行。Spark 多机模式测试在 Docker Desktop / MinIO 不可用时跳过。Parquet S3 测试用 `pytest.mark.skipif` 在 MinIO 不可达时跳过，本地 Parquet 测试无需 MinIO 即可运行。
@@ -192,7 +198,7 @@ docker compose up --build
 
 仅在集群阶段可获得的能力：分布式调度与并行、ACID 湖表语义、集群资源管理、平台级血缘/元数据、高可用容错、指标集中采集与告警。详见 docs/design.html 第 6 章。
 
-## 14. 增量配置（incremental 段）
+## 13. 增量配置（incremental 段）
 
 Phase 1 增量处理通过 `config/pipeline.json` 的 `incremental` 段开启，零新增依赖。`config/pipeline_small.json` 提供完整示例。各字段说明如下：
 
@@ -201,7 +207,7 @@ Phase 1 增量处理通过 `config/pipeline.json` 的 `incremental` 段开启，
 | 字段 | 取值 | 含义 |
 |---|---|---|
 | `enabled` | `true` / `false`（缺省） | 增量模式开关。`false` 时走全量路径，行为与 Phase 0 完全一致（向后兼容） |
-| `mode` | `high_watermark` / `iceberg_snapshot_diff` | 增量模式类型。`high_watermark` 为 Phase 1 自建水位模式；`iceberg_snapshot_diff` 已支持，详见第 24 节 |
+| `mode` | `high_watermark` / `iceberg_snapshot_diff` | 增量模式类型。`high_watermark` 为 Phase 1 自建水位模式；`iceberg_snapshot_diff` 已支持，详见第 23 节 |
 | `state_dir` | 路径（缺省 `state`） | 跨批次状态目录，与 `run/`、`data/` 平级。`state/state.json` 存水位，`state/aggregates/` 存历史聚合 |
 | `tables.<表>.watermark_column` | 列名或 `null` | 水位列。`orders` 用 `order_date`，`customers` 用 `join_date`，`products` 设 `null` 表示无递增列 |
 | `tables.<表>.watermark_type` | `date` / `timestamp` / `int_offset` / `full_load` | 水位列类型。`full_load` 表示该表每次全量加载（适用于 products 这种小静态表） |
@@ -228,7 +234,7 @@ Phase 1 增量处理通过 `config/pipeline.json` 的 `incremental` 段开启，
 
 开启增量模式：把 `enabled` 改为 `true` 即可，其余字段保持默认。首次运行等价于全量（`init_mode=full_load`）并建立水位，后续运行只处理水位后新增行。
 
-## 15. 水位管理
+## 14. 水位管理
 
 ### 15.1 state.json 结构
 
@@ -274,7 +280,7 @@ Phase 1 增量处理通过 `config/pipeline.json` 的 `incremental` 段开启，
 
 重跑场景：失败后 state.json 未推进，下次运行 ingest 重读同一水位后的新增行，validate / clean / compute 重新处理同一批增量，**幂等**。`tests/test_incremental.py::test_incremental_failure_idempotent` 覆盖此场景。
 
-## 16. 聚合 merge
+## 15. 聚合 merge
 
 ### 16.1 state/aggregates/ 目录
 
@@ -311,17 +317,17 @@ state/aggregates/
 
 `tests/test_incremental.py::test_incremental_append_new_data` 验证：追加 10 个高金额新订单后，目标 `customer_id` 的 `orders` 累加正确且进入 `customer_value` top。
 
-## 17. 增量故障排查
+## 16. 增量故障排查
 
 | 现象 | 原因与处理 |
 |---|---|
 | 水位被脏值污染（如 `bad_date` 缺陷注入的非法日期） | `generator.defect_rates.bad_date` 会注入格式错误的 `order_date`。ingest 计算 `max(order_date)` 时若遇到脏值，水位可能错误推进。处理：① 脏行在 validate 阶段会被隔离（`invalid_date` 原因码），不影响下游；② 若怀疑水位污染，检查 `state/state.json` 的 `watermark_value` 是否在合理区间（如 `2020-01-01 ~ 2026-12-31`）；③ 必要时删除 `state/` 目录，下次运行重新全量建水位 |
 | 零增量（二跑无新数据，`orders_incremental.csv` 行数为 0） | 这是正常现象。ingest 过滤 `order_date > watermark_value` 无新行，产出 0 行增量。validate / clean / compute 处理空集，DQ Score=1.0（无新增检查项），水位不变。`test_incremental_no_new_data_second_run` 覆盖此场景。若业务上期望有新数据却零增量，检查源文件是否真的追加了 `order_date > 水位` 的行 |
-| 聚合不一致（`state/aggregates/` 数值与全量重算不符） | 可能原因：① 源数据有更新/删除（高水位模式只捕获 append，不捕获 update/delete）；② 水位曾被污染导致漏处理某批数据；③ 手动修改过 `state/aggregates/` 文件。处理：删除 `state/` 目录，下次运行全量重建水位与聚合，对比数值。若源数据存在 update/delete，已支持，切换 `incremental.mode="iceberg_snapshot_diff"`（详见第 24 节） |
+| 聚合不一致（`state/aggregates/` 数值与全量重算不符） | 可能原因：① 源数据有更新/删除（高水位模式只捕获 append，不捕获 update/delete）；② 水位曾被污染导致漏处理某批数据；③ 手动修改过 `state/aggregates/` 文件。处理：删除 `state/` 目录，下次运行全量重建水位与聚合，对比数值。若源数据存在 update/delete，已支持，切换 `incremental.mode="iceberg_snapshot_diff"`（详见第 23 节） |
 | 失败重跑后聚合重复累加 | 不应发生。当前实现 compute 只写批次目录 `04_aggregates/`，pipeline 在全部成功后才 merge 到 `state/aggregates/`。失败时 `04_aggregates/` 在批次目录中隔离，不污染 state。`test_incremental_failure_idempotent` 验证此幂等性。若观察到重复累加，检查是否手动执行了 merge 或 `aggregates_persist` 配置错误 |
 | `state.json` 不生成 | 检查 `incremental.enabled` 是否为 `true`。`false` 时 pipeline 不构造 `StateStore`，不碰 state 目录（`test_full_mode_regression` 验证全量模式不生成 state.json） |
 
-## 18. FAQ
+## 17. FAQ
 
 - **为什么零依赖？** 保证一键复现；引擎层已抽象为五阶段接口，替换 pandas/Spark 不影响流水线骨架。
 - **数据每次运行都重新生成？** 是（seed 固定可复现）；关闭 generator.enabled 即可改用自有数据。
@@ -329,7 +335,7 @@ state/aggregates/
 - **异常值为什么只标记不拒收？** 设计为 action=flag（可改 reject）；统计方法只适合标记，硬性拒收应由业务规则承担。
 - **DQ Score 口径？** 全部规则检查项的简单平均通过率（checks_passed / checks_total），口径写死在质量报告里。
 
-## 19. engine 配置（engine 段）
+## 18. engine 配置（engine 段）
 
 Phase 2a 列式加速 + Phase 2b 分布式加速能力通过 `config/pipeline.json` 的 `engine` 段开启，与 `incremental` 段平级。`config/pipeline_small.json` 提供完整示例。各字段说明如下：
 
@@ -337,12 +343,12 @@ Phase 2a 列式加速 + Phase 2b 分布式加速能力通过 `config/pipeline.js
 
 | 字段 | 取值 | 含义 |
 |---|---|---|
-| `backend` | `python`（缺省）/ `polars` / `spark` | 执行引擎后端。`python` 走现有 `csv_read` / `csv_write` 路径，零依赖；`polars` 走 `table_read` / `table_write` 统一 IO 接口的列式路径，需 `pip install polars`；`spark` 走 Spark DataFrame API 分布式路径，需 `pip install pyspark` + JDK 11+/17（详见第 22 节） |
+| `backend` | `python`（缺省）/ `polars` / `spark` | 执行引擎后端。`python` 走现有 `csv_read` / `csv_write` 路径，零依赖；`polars` 走 `table_read` / `table_write` 统一 IO 接口的列式路径，需 `pip install polars`；`spark` 走 Spark DataFrame API 分布式路径，需 `pip install pyspark` + JDK 11+/17（详见第 21 节） |
 | `format` | `csv`（缺省）/ `parquet` | 产物存储格式。`csv` 与现有行为一致；`parquet` 列式压缩，配合 `backend="polars"` / `"spark"` 获得 3-6 倍压缩 + 谓词下推 |
 | `polars.streaming` | `true` / `false`（缺省） | Polars streaming 模式。`true` 时允许超内存数据集 spill 到磁盘，支持千万行以上 |
 | `polars.parquet_compression` | `zstd`（缺省）/ `snappy` / `gzip` | Parquet 压缩算法。`zstd` 压缩比与速度综合最优 |
 | `polars.read_options` | dict | 传给 `pl.read_csv` 的参数。`try_parse_dates=true` 自动把日期列解析为 Date/Datetime 类型 |
-| `spark.master` | URL | Spark 集群 master。`local[*]`（本地模式，缺省）/ `spark://localhost:7077`（Docker Compose Standalone 集群，多机模式已实现）/ `k8s://https://...`（K8s）。详见第 22 节 |
+| `spark.master` | URL | Spark 集群 master。`local[*]`（本地模式，缺省）/ `spark://localhost:7077`（Docker Compose Standalone 集群，多机模式已实现）/ `k8s://https://...`（K8s）。详见第 21 节 |
 | `spark.app_name` | str | Spark 应用名（Spark UI 显示） |
 | `spark.executor_memory` | str | 每个 executor 内存，如 `1g` / `4g` |
 | `spark.executor_cores` | int | 每个 executor CPU 核数 |
@@ -419,7 +425,7 @@ Phase 2a 列式加速 + Phase 2b 分布式加速能力通过 `config/pipeline.js
 - **compute**：增量分桶用 `df.groupBy(key).agg(...)` 生成 delta；`pipeline._advance_and_merge` 调用 `_merge_aggregate_spark`，用 `history_df.unionByName(delta_df).groupBy(key).agg(...)` 分布式合并
 - **state 持久化**：`state/aggregates/*.csv` 由 Spark 读写，merge 用 union + groupBy，跨机分布式合并；多机模式待 Phase 3 MinIO 共享存储就位后推进
 
-## 20. Python vs Polars vs Spark 路径选择建议
+## 19. Python vs Polars vs Spark 路径选择建议
 
 ### 20.1 按数据量选择
 
@@ -441,7 +447,7 @@ Phase 2a 列式加速 + Phase 2b 分布式加速能力通过 `config/pipeline.js
 | 生产单机批处理 | `polars` | 单机加速，零运维，pip 安装即可 |
 | 容器化部署 | `polars` | Dockerfile 加 `pip install polars` 一行，镜像增约 30MB |
 | 已部署 Spark 集群 | `spark` | 复用现有集群资源，分布式 shuffle 突破单机上限 |
-| 超大数据 + 多机需求 | `spark` | 千万行以上或超内存，需多 executor 并行；配合 Phase 3 MinIO 共享存储（多机模式已实现，见第 22.3 节） |
+| 超大数据 + 多机需求 | `spark` | 千万行以上或超内存，需多 executor 并行；配合 Phase 3 MinIO 共享存储（多机模式已实现，见第 21.3 节） |
 | 无外网隔离环境 | `python` | 无法 pip 安装时退回零依赖路径 |
 
 ### 20.3 切换步骤
@@ -457,7 +463,7 @@ Phase 2a 列式加速 + Phase 2b 分布式加速能力通过 `config/pipeline.js
 **切换到 Spark**：
 
 1. 安装依赖：`pip install pyspark`（一次性，PySpark 4.x）+ JDK 11+ 或 17
-2. Windows 额外配置：下载 `winutils.exe` + `hadoop.dll` 放到 `%HADOOP_HOME%\bin\`，设环境变量 `HADOOP_HOME`（详见第 22.4 节）。**多机模式不需要 hadoop.dll**（Worker 在 Linux 容器内执行写文件，driver 不直接写）
+2. Windows 额外配置：下载 `winutils.exe` + `hadoop.dll` 放到 `%HADOOP_HOME%\bin\`，设环境变量 `HADOOP_HOME`（详见第 21.4 节）。**多机模式不需要 hadoop.dll**（Worker 在 Linux 容器内执行写文件，driver 不直接写）
 3. 修改配置：`config/pipeline.json` 或 `pipeline_small.json` 的 `engine.backend` 改为 `"spark"`，按需调 `engine.spark.master` / `executor_memory` / `shuffle_partitions`
 4. 运行：`python main.py --config config/pipeline_small.json`
 5. 验证产物：与 `backend="python"` 路径产物完全一致（行数、聚合值、DQ Score、manifest lineage、metrics）。`tests/test_engine_spark.py::test_spark_full_equivalence` 自动覆盖此等价性（Windows 需装齐 `hadoop.dll` 才不 skip）
@@ -466,7 +472,7 @@ Phase 2a 列式加速 + Phase 2b 分布式加速能力通过 `config/pipeline.js
 **切换到 Spark 多机模式**：
 
 1. 安装 driver 端依赖：`pip install pyspark==4.2.0` + JDK 17（建议 junction 路径 `F:\jdk17` / `F:\spark_home` / `F:\Py314` 避免空格）
-2. 启动 MinIO + 创建 bucket `autobatch`（见第 23.2 节）
+2. 启动 MinIO + 创建 bucket `autobatch`（见第 22.2 节）
 3. 启动 Spark 集群：`pwsh docker/spark-cluster/up.ps1`（自动 build 镜像 + 启动 Master/Worker + 连接 MinIO 网络）
 4. 修改配置：`engine.backend="spark"` + `engine.spark.master="spark://localhost:7077"` + `engine.spark.cluster.enabled=true` + `storage.backend="parquet"` + `storage.endpoint="localhost:9000"`
 5. 运行：`python main.py --config config/pipeline_small.json`
@@ -474,7 +480,7 @@ Phase 2a 列式加速 + Phase 2b 分布式加速能力通过 `config/pipeline.js
 7. 停止集群：`pwsh docker/spark-cluster/down.ps1`
 8. 回退：`engine.spark.master` 改回 `"local[*]"` + `engine.spark.cluster.enabled=false` 即回退本地模式
 
-## 21. Polars 故障排查
+## 20. Polars 故障排查
 
 表：Polars 路径常见问题与处理
 
@@ -489,7 +495,7 @@ Phase 2a 列式加速 + Phase 2b 分布式加速能力通过 `config/pipeline.js
 | `engine.backend="polars"` + `incremental.enabled=true` 行为异常 | 两能力正交叠加，`tests/test_engine_polars.py::test_polars_incremental_combination` 覆盖。若观察到异常，检查 state 目录是否被污染（删除 `state/` 重建），或 polars 版本是否 1.43+ |
 | Parquet 写出报 `ComputeError` 类型推断失败 | 某列含混合类型或全 null。处理：在 `engine.polars.read_options` 加 `infer_schema_length=10000` 增加推断样本，或显式声明 schema（当前未暴露 schema 配置，可临时改 `backend="python"` 跑通后对账） |
 
-## 22. Spark 配置与运行（Phase 2b）
+## 21. Spark 配置与运行（Phase 2b）
 
 Phase 2b 分布式加速能力通过 `config/pipeline.json` 的 `engine.spark` 段开启，`engine.backend="spark"` 时生效。本地模式 `master="local[*]"` 与多机模式 `master="spark://localhost:7077"`（Docker Compose Standalone 集群）均已实现并上线（2026-08-16）。多机模式通过 S3A connector 连接 MinIO 共享存储、Worker 内 socat 代理解决 `localhost:9000` → `minio:9000` 网络寻址问题。
 
@@ -576,10 +582,10 @@ Phase 2b 分布式加速能力通过 `config/pipeline.json` 的 `engine.spark` �
 **前置条件**：
 
 - Docker Desktop 4.x+（Windows 下建议 WSL2 后端，分配 ≥ 4 GB 内存给 Docker）
-- MinIO 容器已启动（见第 23.2 节），bucket `autobatch` 已创建
+- MinIO 容器已启动（见第 22.2 节），bucket `autobatch` 已创建
 - JDK 17（driver 端，宿主机；Worker 内容器自带 JRE 17）
 - PySpark 4.2.0（driver 端，宿主机 `pip install pyspark==4.2.0`）
-- Windows junction 路径建议：`F:\spark_home` → Spark 安装目录、`F:\jdk17` → JDK 17、`F:\Py314` → Python 3.14（避免路径含空格，见第 22.5 节故障排查）
+- Windows junction 路径建议：`F:\spark_home` → Spark 安装目录、`F:\jdk17` → JDK 17、`F:\Py314` → Python 3.14（避免路径含空格，见第 21.5 节故障排查）
 
 **步骤 1：启动 Spark 集群**
 
@@ -750,7 +756,7 @@ pwsh docker/spark-cluster/down.ps1
 | Python | 3.9+ | driver / executor Python 进程 | 系统自带或 pyenv |
 | winutils.exe + hadoop.dll | 对应 Hadoop 3.x | **仅 Windows**：Spark 写文件需 Hadoop Native IO | 下载放到 `%HADOOP_HOME%\bin\`，设 `HADOOP_HOME` 环境变量 |
 | Spark 集群 | 4.2.0 | **仅多机模式**：分布式调度 | Standalone（`docker/spark-cluster/up.ps1` 一键部署）/ YARN / K8s |
-| 共享存储 | MinIO / HDFS / S3 | **仅多机模式**：executor 共享数据 | MinIO Docker 启动（见第 23.2 节），多机模式已实现 |
+| 共享存储 | MinIO / HDFS / S3 | **仅多机模式**：executor 共享数据 | MinIO Docker 启动（见第 22.2 节），多机模式已实现 |
 
 **Windows 额外配置（重要）**：
 
@@ -759,7 +765,7 @@ Spark 在 Windows 上写文件（`df.write.csv` / `df.write.parquet`）需要 Ha
 1. 下载 `winutils.exe` + `hadoop.dll`（对应 Hadoop 3.x，可从 https://github.com/cdarlint/winutils 获取）
 2. 创建目录如 `F:\hadoop\bin\`，把两个文件放进去
 3. 设环境变量 `HADOOP_HOME=F:\hadoop`（`PATH` 会自动含 `%HADOOP_HOME%\bin`）
-4. 确认 `JAVA_HOME` 已设且指向 JDK 11+ 或 17（路径不含空格，见第 22.5 节故障排查）
+4. 确认 `JAVA_HOME` 已设且指向 JDK 11+ 或 17（路径不含空格，见第 21.5 节故障排查）
 
 缺 `hadoop.dll` 时，`tests/test_engine_spark.py` 的 3 个用例会通过 `pytest.mark.skipif` 跳过（不是失败），代码逻辑完整正确，装齐后可直接运行。
 
@@ -770,7 +776,7 @@ Spark 在 Windows 上写文件（`df.write.csv` / `df.write.parquet`）需要 Ha
 | 现象 | 原因与处理 |
 |---|---|
 | `ModuleNotFoundError: No module named 'pyspark'` | 未安装 pyspark。处理：`pip install pyspark`（4.x）。`backend="python"` / `"polars"` 路径不受影响，无需安装 |
-| `Py4JJavaError: ... Hadoop NativeIO$Windows.access0` | **Windows 缺 hadoop.dll**。Spark 写文件需 Hadoop Native IO 库。处理：下载 `winutils.exe` + `hadoop.dll` 放到 `%HADOOP_HOME%\bin\`，设 `HADOOP_HOME` 环境变量。详见第 22.4 节。`tests/test_engine_spark.py` 在此场景下 `skipif` 跳过 |
+| `Py4JJavaError: ... Hadoop NativeIO$Windows.access0` | **Windows 缺 hadoop.dll**。Spark 写文件需 Hadoop Native IO 库。处理：下载 `winutils.exe` + `hadoop.dll` 放到 `%HADOOP_HOME%\bin\`，设 `HADOOP_HOME` 环境变量。详见第 21.4 节。`tests/test_engine_spark.py` 在此场景下 `skipif` 跳过 |
 | `Java Home not set` 或 `JAVA_HOME is not set` | 未设 `JAVA_HOME` 环境变量。处理：设 `JAVA_HOME` 指向 JDK 11+ 或 17 安装目录（如 `C:\Program Files\Java\jdk-17`，但路径含空格可能有问题，见下条） |
 | `JAVA_HOME` 路径含空格导致 Spark 启动失败 | Spark 内部用 `JAVA_HOME` 拼命令行，路径含空格（如 `C:\Program Files\Java\...`）可能被错误分词。处理：把 JDK 装到无空格路径（如 `C:\jdk-17\`），或用 `Progra~1` 短路径名（`C:\Progra~1\Java\...`） |
 | `UnsupportedClassVersionError` 或 `Java version mismatch` | JDK 版本与 Spark 不兼容。Spark 4.x 要求 JDK 11 或 17，不支持 JDK 8。处理：升级 JDK 到 11+ 或 17，确认 `java -version` 与 `JAVA_HOME` 一致 |
@@ -779,10 +785,10 @@ Spark 在 Windows 上写文件（`df.write.csv` / `df.write.parquet`）需要 Ha
 | Spark 路径比 python / polars 路径慢 | 小数据量（< 10 万行）Spark 启动 + JVM 预热开销大于并行收益。处理：小数据量用 `backend="python"` 或 `"polars"`，Spark 适合千万行以上或超内存场景 |
 | `engine.backend="spark"` + `incremental.enabled=true` 行为异常 | 两能力正交叠加，`tests/test_engine_spark.py::test_spark_incremental` 覆盖。若观察到异常，检查 state 目录是否被污染（删除 `state/` 重建），或 pyspark 版本是否 4.x |
 | Spark 写出产物是目录而非单文件 | 设计如此。`df.write.csv(path)` 写出 `path/` 目录下多个分区文件（part-00000-...csv 等）。如需单文件，设 `engine.spark.write_single_file=true`（触发 `coalesce(1)`，性能下降）。`table_read` 自动识别目录并读取所有分区文件 |
-| 多机模式 executor 报 `FileNotFoundException` | executor 无法访问 driver 本地路径。多机模式必须用共享存储（MinIO/HDFS/S3），所有路径指向共享存储 URL。Phase 3 MinIO 已就位，多机模式已实现（见第 22.3 节） |
+| 多机模式 executor 报 `FileNotFoundException` | executor 无法访问 driver 本地路径。多机模式必须用共享存储（MinIO/HDFS/S3），所有路径指向共享存储 URL。Phase 3 MinIO 已就位，多机模式已实现（见第 21.3 节） |
 | `OutOfMemoryError: Java heap space` | executor 内存不足。处理：调大 `engine.spark.executor_memory`（如 `4g` → `8g`），或减小 `shuffle_partitions` 减少 shuffle 缓存压力 |
 
-## 23. storage 配置与运行（Phase 3）
+## 22. storage 配置与运行（Phase 3）
 
 Phase 3 湖存储能力通过 `config/pipeline.json` 的 `storage` 段开启，与 `engine` 段平级正交。`storage.backend` 决定**存储介质**，`engine.backend` 决定**计算引擎**，两者解耦任意组合。`config/pipeline.json` + `pipeline_small.json` 已包含完整 `storage` 段示例。
 
@@ -915,7 +921,7 @@ s3://<bucket>/<prefix>/<warehouse>/<path>.parquet
 }
 ```
 
-运行：先启动 MinIO + 创建 bucket（见第 23.2 节），再 `python main.py --config config/pipeline_small.json`。`tests/test_storage_parquet.py::test_s3_parquet_equivalence` 自动覆盖此等价性（MinIO 不可用时 `skipif` 跳过）。
+运行：先启动 MinIO + 创建 bucket（见第 22.2 节），再 `python main.py --config config/pipeline_small.json`。`tests/test_storage_parquet.py::test_s3_parquet_equivalence` 自动覆盖此等价性（MinIO 不可用时 `skipif` 跳过）。
 
 ### 23.6 与 Phase 1 增量的集成
 
@@ -930,7 +936,7 @@ s3://<bucket>/<prefix>/<warehouse>/<path>.parquet
 `storage.backend` 与 `engine.backend` 正交组合形成多种执行路径：
 
 - **Polars + S3 Parquet**（`engine.backend="polars"` + `storage.backend="parquet"`）：Polars 原生支持 S3 协议，`pl.read_parquet("s3://bucket/...", storage_options=...)` 直接读 S3 Parquet 到 Arrow 列式内存，零拷贝。`pl.scan_parquet` 谓词下推到 S3 IO 层。**这是 Phase 3 的推荐组合**——单机列式加速 + 对象存储压缩 + 谓词下推，无需 Spark
-- **Spark + S3 Parquet**（`engine.backend="spark"` + `storage.backend="parquet"`）：Spark 通过 `s3a://` connector 读写 S3 Parquet，`spark.read.parquet("s3a://bucket/...")` 分布式跨 executor 扫描。**这解锁 Phase 2b 多机模式**——多 executor 通过 S3 共享存储，本地 FS 不再是瓶颈。多机模式已实现（2026-08-16），通过 Docker Compose Standalone 集群 + S3A connector + socat 代理部署，详见第 22.3 节。需配置 `engine.spark.cluster.enabled=true` + `engine.spark.cluster.driver_host="host.docker.internal"` + S3A endpoint/凭证（自动从 `storage` 段注入 Spark conf）
+- **Spark + S3 Parquet**（`engine.backend="spark"` + `storage.backend="parquet"`）：Spark 通过 `s3a://` connector 读写 S3 Parquet，`spark.read.parquet("s3a://bucket/...")` 分布式跨 executor 扫描。**这解锁 Phase 2b 多机模式**——多 executor 通过 S3 共享存储，本地 FS 不再是瓶颈。多机模式已实现（2026-08-16），通过 Docker Compose Standalone 集群 + S3A connector + socat 代理部署，详见第 21.3 节。需配置 `engine.spark.cluster.enabled=true` + `engine.spark.cluster.driver_host="host.docker.internal"` + S3A endpoint/凭证（自动从 `storage` 段注入 Spark conf）
 
 ### 23.8 storage 故障排查
 
@@ -941,16 +947,16 @@ s3://<bucket>/<prefix>/<warehouse>/<path>.parquet
 | `ModuleNotFoundError: No module named 'pyarrow'` | 未安装 pyarrow。处理：`pip install pyarrow`（14+）。`storage.backend="local_csv"` 路径不受影响，无需安装 |
 | `ModuleNotFoundError: No module named 'minio'` | 未安装 minio SDK。处理：`pip install minio`（7+）。仅 S3 模式 bucket 初始化与迁移脚本需要，本地 Parquet 模式不需要 |
 | MinIO 连接失败（`ConnectionRefusedError` / `EndpointConnectionError`） | MinIO 未启动或 endpoint 配置错误。处理：① 确认 MinIO 已启动（`docker ps` 看容器状态）；② 确认 `storage.endpoint` 正确（本地 `localhost:9000`，Docker 内 `minio:9000`）；③ 确认端口未被占用（`netstat -an \| findstr 9000`） |
-| `S3Error: The specified bucket does not exist` | bucket 未创建。处理：在 MinIO 控制台或用 mc / minio SDK 创建 bucket（见第 23.2 节）。`tests/test_storage_parquet.py` 的 `_minio_available` 会自动尝试 `make_bucket`，但生产环境应预先创建 |
+| `S3Error: The specified bucket does not exist` | bucket 未创建。处理：在 MinIO 控制台或用 mc / minio SDK 创建 bucket（见第 22.2 节）。`tests/test_storage_parquet.py` 的 `_minio_available` 会自动尝试 `make_bucket`，但生产环境应预先创建 |
 | `S3Error: Access Denied` / `InvalidAccessKeyId` | 凭证错误。处理：确认 `storage.access_key` / `secret_key` 与 MinIO 实例配置一致。MinIO 默认 `minioadmin` / `minioadmin`，生产环境可能已修改 |
 | `OSError: [WinError 123]` 路径含非法字符 | Windows 下 S3 URI 被误当本地路径。处理：确认 `storage.backend="parquet"` 已生效（`_get_storage_backend` 读 `cfg["storage"]["backend"]`），且 `bucket` + `endpoint` 已配（否则 `_is_s3_target` 可能误判为本地） |
-| `ArrowIOError: Failed to open Parquet file` | S3 上文件不存在或路径解析错误。处理：① 用 MinIO 控制台或 mc 检查 `s3://bucket/warehouse/...` 路径是否存在；② 确认 `storage.warehouse` / `prefix` 配置与产物路径拼接一致（见第 23.3 节） |
+| `ArrowIOError: Failed to open Parquet file` | S3 上文件不存在或路径解析错误。处理：① 用 MinIO 控制台或 mc 检查 `s3://bucket/warehouse/...` 路径是否存在；② 确认 `storage.warehouse` / `prefix` 配置与产物路径拼接一致（见第 22.3 节） |
 | `pyarrow.lib.ArrowInvalid: Unsupported compression type` | pyarrow 版本过旧，不支持 `zstd`。处理：升级 pyarrow 到 14+（`pip install --upgrade pyarrow`）。或改用 `snappy` / `gzip`（`storage.compression="snappy"`） |
 | Parquet 路径产物与 local_csv 路径不一致 | 不应发生。`tests/test_storage_parquet.py::test_local_parquet_equivalence` + `test_s3_parquet_equivalence` 覆盖此等价性。若观察到差异，检查：① pyarrow 版本是否 14+；② config 是否还残留其他改动；③ 上游数据是否在运行间被修改 |
 | `storage.backend="parquet"` + `incremental.enabled=true` 行为异常 | 两能力正交叠加，`tests/test_storage_parquet.py::test_incremental_parquet` 覆盖。若观察到异常，检查 state 目录是否被污染（删除 `state/` 重建），或 pyarrow 版本是否 14+ |
 | Parquet 文件比 CSV 还大 | 不应发生（除非数据量极小或列过多）。处理：① 确认 `storage.compression` 不是 `none`；② 极小数据集（< 100 行）Parquet 元数据开销可能超过压缩收益，改用 `local_csv`；③ 检查数据是否已高度压缩（如全是重复值），此时列式压缩收益有限 |
 
-## 24. Iceberg 湖表运维（Phase 4）
+## 23. Iceberg 湖表运维（Phase 4）
 
 Phase 4 引入 Apache Iceberg 湖表格式，通过 `config/pipeline.json` 的 `storage.backend="iceberg"` 开启，与 `engine` 段、`incremental` 段平级正交。Iceberg 在 Parquet 列式存储之上提供 ACID 事务语义、time travel（快照回溯）、snapshot diff（增量原生 diff）与 schema evolution（schema 演化不重写数据）。底层 catalog 由 `storage.iceberg` 子段配置，`config/pipeline.json` + `pipeline_small.json` 已包含完整 `iceberg` 子段示例。
 
@@ -1186,7 +1192,7 @@ rows = list(new_scan.to_arrow().to_pylist())
 
 #### 24.4.4 从 high_watermark 切换到 iceberg_snapshot_diff
 
-1. 确认 `storage.backend="iceberg"` 已生效（见第 24.1 节部署 catalog）
+1. 确认 `storage.backend="iceberg"` 已生效（见第 23.1 节部署 catalog）
 2. 把 `incremental.mode` 从 `"high_watermark"` 改为 `"iceberg_snapshot_diff"`
 3. 删除 `state/state.json`（旧 `watermark_value` 字段不再用，需重建 `last_snapshot_id`）
 4. 运行 `python main.py --config config/pipeline_small.json`：首次等价全量（`init_mode=full_load`），建立 `last_snapshot_id` 为当前 snapshot
@@ -1305,7 +1311,7 @@ WHEN NOT MATCHED THEN INSERT *
 | snapshot diff 漏处理 update / delete | 不应发生。`incremental_append_scan` 捕获 append，update/delete 用 `incremental_changelog_scan`（如需 CDC 语义）。当前 Phase 4 ingest 用 `incremental_append_scan`，若源数据有 update/delete 需切到 changelog scan（后续扩展） |
 | `pyiceberg.catalog.load_catalog` 报 `TypeError` 参数不匹配 | pyiceberg API 在 0.11 → 0.12 有 breaking change。处理：确认用 0.12.0rc1+ 的 API（`load_catalog(name, **kwargs)`），参考 `src/storage_iceberg.py` 的调用方式 |
 
-## 25. 路径选择指南
+## 24. 路径选择指南
 
 ### 25.1 何时用 local_csv / parquet(本地) / parquet(S3)
 
@@ -1327,7 +1333,7 @@ WHEN NOT MATCHED THEN INSERT *
 |---|---|---|
 | 单机加速 + 远端存储 | `engine.backend="polars"` + `storage.backend="parquet"`（S3） | Polars 原生读 S3 Parquet 零拷贝 + 谓词下推，单机列式加速 + 对象存储压缩，无需 Spark |
 | 单机加速 + 本地压缩 | `engine.backend="polars"` + `storage.backend="parquet"`（本地） | Polars 原生读写本地 Parquet，列式 + 压缩 + 谓词下推，零运维 |
-| 分布式 + 共享存储 | `engine.backend="spark"` + `storage.backend="parquet"`（S3） | Spark + S3A connector + Docker Compose Standalone 集群，多 executor 分布式 + MinIO 共享存储，突破单机内存上限（多机模式已实现，见第 22.3 节） |
+| 分布式 + 共享存储 | `engine.backend="spark"` + `storage.backend="parquet"`（S3） | Spark + S3A connector + Docker Compose Standalone 集群，多 executor 分布式 + MinIO 共享存储，突破单机内存上限（多机模式已实现，见第 21.3 节） |
 | 分布式 + 本地（仅本地模式） | `engine.backend="spark"` + `storage.backend="local_csv"` | Spark 本地模式 `master="local[*]"`，单机模拟分布式，无需 MinIO |
 | 零依赖 / CI 轻量 | `engine.backend="python"` + `storage.backend="local_csv"` | 零第三方依赖，一键复现 |
 
@@ -1344,7 +1350,7 @@ WHEN NOT MATCHED THEN INSERT *
 **切换到 S3/MinIO Parquet**：
 
 1. 安装依赖：`pip install pyarrow minio`（一次性，pyarrow 14+ + minio 7+）
-2. 启动 MinIO + 创建 bucket（见第 23.2 节）
+2. 启动 MinIO + 创建 bucket（见第 22.2 节）
 3. 修改配置：`config/pipeline.json` 或 `pipeline_small.json` 的 `storage.backend` 改为 `"parquet"`，配 `bucket="autobatch"` + `endpoint="localhost:9000"` + 凭证
 4. 运行：`python main.py --config config/pipeline_small.json`
 5. 验证产物：与 `storage.backend="local_csv"` 路径产物内容完全一致。`tests/test_storage_parquet.py::test_s3_parquet_equivalence` 自动覆盖此等价性（MinIO 不可用时 `skipif` 跳过）

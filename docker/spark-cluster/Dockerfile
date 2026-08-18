@@ -34,9 +34,10 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # ── Spark 下载（含版本回退 + 国内镜像） ─────────────────────────
-# 优先 Spark 4.2.0，若不可用则回退 3.5.5
+# 优先 ${SPARK_VERSION}（ARG，缺省 4.2.0），若不可用则回退 3.5.5
 # 使用清华镜像加速，回退到 Apache 官方
-ENV SPARK_VERSION_PRIMARY=4.2.0
+# 注意：ENV 引用 ARG 必须在 ARG 声明之后（已在 line 20 声明）
+ENV SPARK_VERSION_PRIMARY=${SPARK_VERSION}
 ENV SPARK_VERSION_FALLBACK=3.5.5
 
 RUN set -eux; \
@@ -168,8 +169,10 @@ RUN set -eux; \
 
 # ── PySpark 安装（Worker Python 需要） ──────────────────────────
 # 容器内 python3 用于 Worker 端执行 Python 任务（UDF 等）
+# 注意：移除 `|| true`，让 PySpark 安装失败立即暴露构建问题
+# （此前 `|| true` 会掩盖 pip 安装失败，导致 Worker 启动后才报错）
 RUN python3 -m pip install --break-system-packages pyspark==${SPARK_VERSION} || \
-    pip3 install pyspark==${SPARK_VERSION} || true
+    pip3 install pyspark==${SPARK_VERSION}
 
 # ── Phase 5: Iceberg Spark extensions（可选） ──────────────────
 # 当 ENABLE_ICEBERG=true 时下载 iceberg-spark-runtime + iceberg-aws-bundle JAR
@@ -228,9 +231,17 @@ RUN if [ "${ENABLE_ICEBERG}" = "true" ]; then \
         echo ">>> Phase 5: ENABLE_ICEBERG=false，跳过 Iceberg JAR 安装（保持 Spark ${SPARK_VERSION} 兼容）"; \
     fi
 
+# ── 非 root 用户（UID/GID 1000，与 K8s/securityContext 约定一致） ─
+# Spark Master/Worker 日志写到 ${SPARK_HOME}/logs/，需对 spark 用户可写
+RUN useradd -m -u 1000 spark && \
+    mkdir -p /opt/spark/logs /opt/spark/work && \
+    chown -R spark:spark /opt/spark
+
 # ── 入口脚本 ────────────────────────────────────────────────────
-COPY entrypoint.sh /opt/entrypoint.sh
+COPY --chown=spark:spark entrypoint.sh /opt/entrypoint.sh
 RUN chmod +x /opt/entrypoint.sh
+
+USER spark
 
 # ── 端口 ────────────────────────────────────────────────────────
 # 7077 = Spark Master RPC

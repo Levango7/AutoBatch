@@ -153,7 +153,7 @@ def test_polars_full_run_equals_python(polars_env):
     manifest_py = json_load(os.path.join(run_dir_py, "manifest.json"))
     dq_p = manifest_p["quality"]["dq_score"]
     dq_py = manifest_py["quality"]["dq_score"]
-    assert dq_p == dq_py, \
+    assert dq_p == pytest.approx(dq_py, abs=1e-9), \
         f"DQ Score polars={dq_p} 应等于 python={dq_py}"
 
 

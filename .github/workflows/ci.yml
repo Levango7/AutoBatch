@@ -1,10 +1,27 @@
+# =============================================================================
+# AutoBatch CI 流水线
+# Phase 6 CI/CD 加固 + 任务61 修复：
+#   - Python 矩阵覆盖 3.9 / 3.10 / 3.11 / 3.13 / 3.14（与 pyproject.toml target-version="py39" 对齐）
+#   - 3.14 标 continue-on-error（实验性，不阻塞流水线）
+#   - push 限定 main / master / release/* 分支；pull_request 不限分支
+#   - 顶层 concurrency 取消同分支旧任务，节省 CI 资源
+#   - 新增 pip-audit 依赖安全扫描步骤
+#   - smoke test 失败时上传 run/ 目录 artifact 便于诊断
+# =============================================================================
 name: CI / AutoBatch Pipeline CI
 
 on:
   push:
     branches:
-      - '*'
+      - 'main'
+      - 'master'
+      - 'release/*'
   pull_request:
+
+# 同一分支并发时取消旧任务，节省 CI 资源
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -13,9 +30,15 @@ jobs:
       fail-fast: false
       matrix:
         python-version:
+          - '3.9'        # 最低支持版本（与 pyproject.toml target-version 一致）
+          - '3.10'
           - '3.11'
           - '3.13'
-          - '3.14'      # Phase 6 CI/CD 加固：新增 Python 3.14 矩阵验证
+          - '3.14'      # 实验性：不阻塞流水线
+        include:
+          - python-version: '3.14'
+            experimental: true
+    continue-on-error: ${{ matrix.experimental == true }}
 
     steps:
       - name: Checkout
@@ -31,7 +54,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest pytest-cov
+          pip install -r requirements-dev.txt
 
       - name: Run pytest full suite (with coverage)
         run: |
@@ -51,5 +74,65 @@ jobs:
             htmlcov/
           retention-days: 14
 
+      # -------------------------------------------------------------------------
+      # 可选：上传覆盖率到 Codecov（需在仓库 Secrets 配置 CODECOV_TOKEN）
+      # 仅在 main / master 分支推送时执行，避免 PR 泄漏
+      # -------------------------------------------------------------------------
+      - name: Upload coverage to Codecov
+        if: github.event_name == 'push' && github.ref_protected
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.xml
+          fail_ci_if_error: false   # 缺 token 不阻塞流水线
+
       - name: Pipeline smoke test
+        id: smoke
         run: python main.py --config config/pipeline_small.json
+
+      # -------------------------------------------------------------------------
+      # smoke test 失败诊断：上传 run/ 目录 artifact 便于排查
+      # -------------------------------------------------------------------------
+      - name: Upload run/ artifact on smoke failure
+        if: failure() && steps.smoke.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-run-py${{ matrix.python-version }}
+          path: run/
+          if-no-files-found: warn
+          retention-days: 7
+
+  # ===========================================================================
+  # 依赖安全扫描（pip-audit）—— 独立 job，与测试矩阵并行
+  # ===========================================================================
+  security-audit:
+    name: Dependency Security Audit (pip-audit)
+    runs-on: ubuntu-latest
+    continue-on-error: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install pip-audit
+        run: |
+          python -m pip install --upgrade pip
+          pip install pip-audit
+
+      - name: Audit runtime dependencies
+        run: |
+          echo "::group::pip-audit runtime"
+          pip-audit -r requirements.txt --strict
+          echo "::endgroup::"
+
+      - name: Audit dev dependencies
+        run: |
+          echo "::group::pip-audit dev"
+          pip-audit -r requirements-dev.txt --strict
+          echo "::endgroup::"

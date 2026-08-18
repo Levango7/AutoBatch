@@ -497,16 +497,14 @@ def _copy_incremental_iceberg(ctx: PipelineContext, name: str,
     table_name = _iceberg_table_name(ctx, name, table_cfg)
 
     # 1. 读已提交的 from_snapshot_id
+    #    优先用 ctx.state_path（外部显式指定的 state 文件路径），
+    #    否则用 cfg.incremental.state_dir（缺省 "state"）。
     state_dir = cfg.get("incremental", {}).get("state_dir", "state")
-    store = StateStore(abs_path(state_dir)) if not ctx.state_path else None
-    if store is not None:
-        from_snapshot = store.get_snapshot_id(name)
+    if ctx.state_path:
+        store = StateStore(os.path.dirname(ctx.state_path))
     else:
-        # 通过 ctx.state_path 构造 store 读已提交 snapshot id
-        from_snapshot = None
-        if ctx.state_path:
-            tmp_store = StateStore(os.path.dirname(ctx.state_path))
-            from_snapshot = tmp_store.get_snapshot_id(name)
+        store = StateStore(abs_path(state_dir))
+    from_snapshot = store.get_snapshot_id(name)
 
     # 2. 调用 iceberg_snapshot_diff 获取增量
     diff = iceberg_snapshot_diff(table_name, cfg, from_snapshot)

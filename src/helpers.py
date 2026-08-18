@@ -121,32 +121,60 @@ def _get_spark_session(cfg: dict[str, Any]) -> Any:
         adaptive_query_execution:  AQE 开关（缺省 True）
 
     Args:
-        cfg: Pipeline 配置 dict。
+        cfg: Pipeline 配置 dict.
 
     Returns:
-        pyspark.sql.SparkSession。
+        pyspark.sql.SparkSession.
     """
     from pyspark.sql import SparkSession  # lazy import：仅 spark 路径需要
 
     spark_cfg = cfg.get("engine", {}).get("spark", {}) or {}
-    builder = SparkSession.builder.appName(spark_cfg.get("app_name", "autobatch"))
-    builder = builder.master(spark_cfg.get("master", "local[*]"))
-    if spark_cfg.get("executor_memory"):
-        builder = builder.config("spark.executor.memory", spark_cfg["executor_memory"])
-    if spark_cfg.get("executor_cores") is not None:
-        builder = builder.config("spark.executor.cores", spark_cfg["executor_cores"])
-    if spark_cfg.get("num_executors") is not None:
-        builder = builder.config("spark.executor.instances", spark_cfg["num_executors"])
-    if spark_cfg.get("driver_memory"):
-        builder = builder.config("spark.driver.memory", spark_cfg["driver_memory"])
-    if spark_cfg.get("shuffle_partitions") is not None:
+    builder = SparkSession.builder
+    builder = _apply_spark_base_config(builder, spark_cfg)
+    return builder.getOrCreate()
+
+
+def _apply_spark_base_config(builder: Any, scfg: dict[str, Any]) -> Any:
+    """把 Spark 基础配置（appName/master/资源/AQE）应用到 builder 并返回。
+
+    抽自 ``_get_spark_session`` 与 ``pipeline._init_spark_session`` 的公共部分，
+    避免两处重复维护同一组配置项。调用方在调用本函数后仍可继续追加 S3/Iceberg/
+    cluster 等场景化配置（``builder.config(...)``），最后 ``builder.getOrCreate()``。
+
+    读取的配置项（参见 docs/evolution.md §4.3.2.3）：
+        app_name:                  "autobatch" 缺省
+        master:                    "local[*]" 缺省
+        executor_memory / cores:   executor 资源
+        num_executors:             executor 实例数（spark.executor.instances）
+        driver_memory:             driver 堆内存
+        shuffle_partitions:        spark.sql.shuffle.partitions
+        adaptive_query_execution:  AQE 开关（缺省 True）
+
+    Args:
+        builder: ``SparkSession.Builder`` 实例（已由调用方创建）。
+        scfg:    ``cfg["engine"]["spark"]`` 子段（缺省空 dict 走全部缺省值）。
+
+    Returns:
+        应用了基础配置的 builder（链式 API 同一实例）。
+    """
+    builder = builder.appName(scfg.get("app_name", "autobatch"))
+    builder = builder.master(scfg.get("master", "local[*]"))
+    if scfg.get("executor_memory"):
+        builder = builder.config("spark.executor.memory", scfg["executor_memory"])
+    if scfg.get("executor_cores") is not None:
+        builder = builder.config("spark.executor.cores", scfg["executor_cores"])
+    if scfg.get("num_executors") is not None:
+        builder = builder.config("spark.executor.instances", scfg["num_executors"])
+    if scfg.get("driver_memory"):
+        builder = builder.config("spark.driver.memory", scfg["driver_memory"])
+    if scfg.get("shuffle_partitions") is not None:
         builder = builder.config(
-            "spark.sql.shuffle.partitions", spark_cfg["shuffle_partitions"]
+            "spark.sql.shuffle.partitions", scfg["shuffle_partitions"]
         )
     # AQE 缺省开启，自动合并小分区、处理倾斜
-    aqe = spark_cfg.get("adaptive_query_execution", True)
+    aqe = scfg.get("adaptive_query_execution", True)
     builder = builder.config("spark.sql.adaptiveQueryExecution", "true" if aqe else "false")
-    return builder.getOrCreate()
+    return builder
 
 
 # ---------------------------------------------------------------------------
@@ -372,16 +400,19 @@ def _table_exists(path: str, cfg: dict[str, Any]) -> bool:
         return os.path.exists(path)
     # parquet 模式
     if _is_s3_target(path, cfg):
+        import pyarrow.fs as fs  # lazy import
+        target = _resolve_s3_path(path, cfg)
+        s3fs = _get_s3_filesystem(cfg)
         try:
-            import pyarrow.fs as fs  # lazy import
-            target = _resolve_s3_path(path, cfg)
-            s3fs = _get_s3_filesystem(cfg)
             info = s3fs.get_file_info(_s3_uri_to_bucket_key(target))
-            # Spark write.parquet 写出目录（含 part-00000-*.parquet），
-            # pyarrow write_table 写单个 .parquet 文件，两者都应识别为存在。
-            return info.type in (fs.FileType.File, fs.FileType.Directory)
-        except Exception:  # noqa: BLE001
+        except (FileNotFoundError, OSError):
+            # S3 NoSuchKey / NoSuchBucket / 本地文件不存在 → 视为表不存在
             return False
+        # 其他异常（S3 权限错误、网络错误、凭证失效等）向上传播，避免
+        # 把"无法访问"误判为"表不存在"导致后续写入覆盖远端数据。
+        # Spark write.parquet 写出目录（含 part-00000-*.parquet），
+        # pyarrow write_table 写单个 .parquet 文件，两者都应识别为存在。
+        return info.type in (fs.FileType.File, fs.FileType.Directory)
     # 本地 parquet：path 可能是 .csv（不带 .parquet 后缀），实际文件是 .csv.parquet
     return os.path.exists(path) or os.path.exists(path + ".parquet")
 
@@ -1088,6 +1119,20 @@ def _iceberg_path_is_table_name(path: str) -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# table_read / table_write 类型标注
+# ---------------------------------------------------------------------------
+# engine.backend 在运行时由 cfg 决定，无法静态区分；主签名返回 Any，
+# 调用方据 cfg["engine"]["backend"] 自行 narrow 类型。
+#   python  → (List[Dict[str, Any]], List[str])
+#   polars  → polars.DataFrame
+#   spark   → pyspark.sql.DataFrame
+# polars / pyspark 仅在 TYPE_CHECKING 下导入（避免运行时强依赖）。
+if TYPE_CHECKING:
+    import polars as pl  # noqa: F401  type-only
+    from pyspark.sql import DataFrame as SparkDataFrame  # noqa: F401  type-only
+
+
 def table_read(
     path: str,
     cfg: dict[str, Any],
@@ -1167,6 +1212,7 @@ def table_read(
     else:
         # python backend：与 csv_read 行为完全一致
         return csv_read(path)
+
 
 
 def table_write(

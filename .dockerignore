@@ -1,4 +1,94 @@
+# =============================================================================
+# AutoBatch Docker 构建上下文排除清单（任务61 修复）
+# 减小镜像构建上下文体积，避免敏感文件与无关目录进入 Docker daemon
+# =============================================================================
+
+# 运行产物与状态
 run/
+state/
 data/raw/
 .cluster/
+
+# 版本控制
 .git/
+.gitignore
+.gitattributes
+
+# CI / CD 配置
+.github/
+
+# 测试与开发资源（运行时不需要）
+tests/
+docs/
+benchmarks/
+tools/
+dashboard/
+
+# Python 缓存与字节码
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 覆盖率报告
+coverage.xml
+htmlcov/
+.coverage
+
+# 分发构建产物
+*.egg-info/
+build/
+dist/
+
+# JVM crash 与重放日志
+hs_err_pid*.log
+replay_pid*.log
+
+# 临时测试输出
+test_out.csv
+
+# Docker 自身文件（避免递归 COPY）
+Dockerfile
+docker-compose.yml
+docker/
+.dockerignore
+
+# 项目配置（运行时由环境变量 / 挂载卷提供，不 baked-in 镜像）
+pyproject.toml
+pytest.ini
+
+# 敏感文件与密钥
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.pfx
+credentials.json
+secrets/
+.aws/
+.gnupg/
+
+# IDE 配置
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 操作系统生成文件
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# README 与脚本（镜像内不需要）
+readme.md
+run.bat
+run.sh

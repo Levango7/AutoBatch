@@ -710,6 +710,116 @@ def _spark_df_to_dicts(df):
     return pdf.to_dict(orient="records")
 
 
+# ---------------------------------------------------------------------------
+# 三引擎公共逻辑：skip KPI / KPI 计算 / lineage 声明
+# ---------------------------------------------------------------------------
+# _run_python / _run_polars / _run_spark 在以下三处逻辑完全相同：
+#   1. orders 为空时构造 skip KPI + 空 aggregates + 写 kpi.json + 返回
+#   2. 从 daily buckets 计算 KPI dict
+#   3. 声明 lineage 边（04_aggregates/* ← 03_clean/*）
+# 抽取为公共函数避免重复代码（本次语义统一，策略模式留待后续重构）。
+
+
+def _skip_kpi(cconf: dict[str, Any]) -> dict[str, Any]:
+    """构造 compute skip 时的 kpi dict（无 orders 输入，全 0）."""
+    return {
+        "orders": 0, "units": 0, "total_revenue": 0.0,
+        "avg_order_value": 0.0, "days": 0,
+        "currency": cconf.get("currency", "CNY"),
+    }
+
+
+def _skip_result(
+    ctx: PipelineContext, agg_dir: str, cconf: dict[str, Any], log
+) -> dict[str, Any]:
+    """构造 compute skip 时的 ctx.aggregates / kpi.json / return dict.
+
+    三引擎 ``_run_*`` 在 orders 为空时调用，行为一致：
+      - 写 kpi.json（全 0 KPI）
+      - 设置 ctx.aggregates 为空 buckets
+      - 返回 ``{"rows_in": 0, "rows_out": 0, "lineage": {}}``
+
+    Args:
+        ctx:     PipelineContext.
+        agg_dir: 04_aggregates 目录.
+        cconf:   cfg["compute"] 配置 dict.
+        log:     StageLog（用于 warn）.
+
+    Returns:
+        skip 时的 stage result dict（无 lineage 边）.
+    """
+    log.warn("no clean orders; compute skipped", reason="missing_input")
+    kpi = _skip_kpi(cconf)
+    ctx.aggregates = {
+        "daily": [], "category": [], "region_channel": [],
+        "customer_value": {"top": [], "tiers": []}, "kpi": kpi,
+    }
+    json_save(os.path.join(agg_dir, "kpi.json"), kpi)
+    # No lineage edges: kpi.json has no upstream products when skipped.
+    return {"rows_in": 0, "rows_out": 0, "lineage": {}}
+
+
+def _compute_kpi(
+    orders_count: int, daily_dicts: list[dict[str, Any]], currency: str
+) -> dict[str, Any]:
+    """从 daily buckets 计算 KPI dict（三引擎共用）.
+
+    与原 ``_run_python`` / ``_run_polars`` / ``_run_spark`` 中 KPI 计算逻辑一致：
+      - total_revenue = round(sum(daily.revenue), 2)
+      - avg_order_value = round(total_revenue / orders_count, 2) if orders_count else 0.0
+
+    Args:
+        orders_count: orders 行数（Python=len(orders), Polars=df.height, Spark=df.count()）.
+        daily_dicts:  daily_sales buckets 转成的 List[Dict].
+        currency:     币种字符串（cconf.get("currency", "CNY")）.
+
+    Returns:
+        KPI dict（orders/units/total_revenue/avg_order_value/days/currency）.
+    """
+    total_revenue = round(sum(b["revenue"] for b in daily_dicts), 2)
+    return {
+        "orders": orders_count,
+        "units": sum(b["units"] for b in daily_dicts),
+        "total_revenue": total_revenue,
+        "avg_order_value": round(total_revenue / orders_count, 2) if orders_count else 0.0,
+        "days": len(daily_dicts),
+        "currency": currency,
+    }
+
+
+def _compute_lineage(ctx: PipelineContext, cfg: dict[str, Any]) -> dict[str, list]:
+    """构造 compute stage 的 lineage dict（三引擎共用）.
+
+    lineage 边以 ``03_clean/*.csv`` 为上游，``04_aggregates/*.csv/json`` 为下游：
+      - daily_sales / region_channel_stats / kpi.json 仅依赖 orders
+      - category_stats 依赖 orders + products（若 products 存在）
+      - customer_value / customer_tier 依赖 orders + customers（若 customers 存在）
+
+    Args:
+        ctx: PipelineContext.
+        cfg: Pipeline 配置 dict（用于 _table_exists 检查 parquet/S3 backend）.
+
+    Returns:
+        lineage dict（key=下游相对路径，value=上游相对路径列表）.
+    """
+    orders_rel = "03_clean/orders_clean.csv"
+    customers_rel = "03_clean/customers_clean.csv"
+    products_rel = "03_clean/products_clean.csv"
+    has_customers = _table_exists(os.path.join(ctx.run_dir, customers_rel), cfg)
+    has_products = _table_exists(os.path.join(ctx.run_dir, products_rel), cfg)
+    lineage: dict[str, list] = {
+        "04_aggregates/daily_sales.csv": [orders_rel],
+        "04_aggregates/region_channel_stats.csv": [orders_rel],
+        "04_aggregates/kpi.json": [orders_rel],
+    }
+    cat_up = [orders_rel] + ([products_rel] if has_products else [])
+    lineage["04_aggregates/category_stats.csv"] = cat_up
+    cv_up = [orders_rel] + ([customers_rel] if has_customers else [])
+    lineage["04_aggregates/customer_value.csv"] = cv_up
+    lineage["04_aggregates/customer_tier.csv"] = cv_up
+    return lineage
+
+
 def run(ctx: PipelineContext, log) -> dict[str, Any]:
     cfg = ctx.config
     cconf = cfg.get("compute", {})
@@ -732,17 +842,7 @@ def _run_python(
     products = _load_clean(ctx, "products")
 
     if not orders:
-        log.warn("no clean orders; compute skipped", reason="missing_input")
-        kpi = {"orders": 0, "units": 0, "total_revenue": 0.0,
-               "avg_order_value": 0.0, "days": 0,
-               "currency": cconf.get("currency", "CNY")}
-        ctx.aggregates = {
-            "daily": [], "category": [], "region_channel": [],
-            "customer_value": {"top": [], "tiers": []}, "kpi": kpi,
-        }
-        json_save(os.path.join(agg_dir, "kpi.json"), kpi)
-        # No lineage edges: kpi.json has no upstream products when skipped.
-        return {"rows_in": 0, "rows_out": 0, "lineage": {}}
+        return _skip_result(ctx, agg_dir, cconf, log)
 
     if ctx.incremental_enabled:
         # Incremental: feed delta orders to the bucketing functions → delta
@@ -776,15 +876,7 @@ def _run_python(
     table_write(os.path.join(agg_dir, "customer_tier.csv"),
                 cv["tiers"], cfg, fields=["tier", "customers", "revenue"])
 
-    total_revenue = round(sum(b["revenue"] for b in daily), 2)
-    kpi = {
-        "orders": len(orders),
-        "units": sum(b["units"] for b in daily),
-        "total_revenue": total_revenue,
-        "avg_order_value": round(total_revenue / len(orders), 2) if orders else 0.0,
-        "days": len(daily),
-        "currency": cconf.get("currency", "CNY"),
-    }
+    kpi = _compute_kpi(len(orders), daily, cconf.get("currency", "CNY"))
     json_save(os.path.join(agg_dir, "kpi.json"), kpi)
     ctx.aggregates = {
         "daily": daily, "category": cats, "region_channel": rcs,
@@ -792,23 +884,7 @@ def _run_python(
     }
     log.info("compute done", kpi=kpi)
 
-    # Declare lineage for aggregate products (paths relative to run_dir).
-    orders_rel = "03_clean/orders_clean.csv"
-    customers_rel = "03_clean/customers_clean.csv"
-    products_rel = "03_clean/products_clean.csv"
-    has_customers = _table_exists(os.path.join(ctx.run_dir, customers_rel), cfg)
-    has_products = _table_exists(os.path.join(ctx.run_dir, products_rel), cfg)
-    lineage: dict[str, list] = {
-        "04_aggregates/daily_sales.csv": [orders_rel],
-        "04_aggregates/region_channel_stats.csv": [orders_rel],
-        "04_aggregates/kpi.json": [orders_rel],
-    }
-    cat_up = [orders_rel] + ([products_rel] if has_products else [])
-    lineage["04_aggregates/category_stats.csv"] = cat_up
-    cv_up = [orders_rel] + ([customers_rel] if has_customers else [])
-    lineage["04_aggregates/customer_value.csv"] = cv_up
-    lineage["04_aggregates/customer_tier.csv"] = cv_up
-
+    lineage = _compute_lineage(ctx, cfg)
     return {"rows_in": len(orders), "rows_out": len(daily), "lineage": lineage}
 
 
@@ -825,16 +901,7 @@ def _run_polars(
     products = _load_clean_polars(ctx, "products")
 
     if orders is None or orders.height == 0:
-        log.warn("no clean orders; compute skipped", reason="missing_input")
-        kpi = {"orders": 0, "units": 0, "total_revenue": 0.0,
-               "avg_order_value": 0.0, "days": 0,
-               "currency": cconf.get("currency", "CNY")}
-        ctx.aggregates = {
-            "daily": [], "category": [], "region_channel": [],
-            "customer_value": {"top": [], "tiers": []}, "kpi": kpi,
-        }
-        json_save(os.path.join(agg_dir, "kpi.json"), kpi)
-        return {"rows_in": 0, "rows_out": 0, "lineage": {}}
+        return _skip_result(ctx, agg_dir, cconf, log)
 
     if ctx.incremental_enabled:
         daily_df = daily_sales_polars(orders)
@@ -864,20 +931,10 @@ def _run_polars(
     table_write(os.path.join(agg_dir, "customer_value.csv"), cv["top"], ctx.config)
     table_write(os.path.join(agg_dir, "customer_tier.csv"), cv["tiers"], ctx.config)
 
-    # KPI（与 Python 路径计算方式一致）
-    daily_dicts = _df_to_dicts(daily_df)
-    total_revenue = round(sum(b["revenue"] for b in daily_dicts), 2)
-    kpi = {
-        "orders": orders.height,
-        "units": sum(b["units"] for b in daily_dicts),
-        "total_revenue": total_revenue,
-        "avg_order_value": round(total_revenue / orders.height, 2),
-        "days": len(daily_dicts),
-        "currency": cconf.get("currency", "CNY"),
-    }
-    json_save(os.path.join(agg_dir, "kpi.json"), kpi)
-
     # ctx.aggregates 存 List[Dict]（与 Python 路径格式对齐，供 output stage 消费）
+    daily_dicts = _df_to_dicts(daily_df)
+    kpi = _compute_kpi(orders.height, daily_dicts, cconf.get("currency", "CNY"))
+    json_save(os.path.join(agg_dir, "kpi.json"), kpi)
     ctx.aggregates = {
         "daily": daily_dicts,
         "category": _df_to_dicts(cats_df),
@@ -890,23 +947,7 @@ def _run_polars(
     }
     log.info("compute done (polars)", kpi=kpi)
 
-    # lineage 声明（与 Python 路径一致）
-    orders_rel = "03_clean/orders_clean.csv"
-    customers_rel = "03_clean/customers_clean.csv"
-    products_rel = "03_clean/products_clean.csv"
-    has_customers = os.path.exists(os.path.join(ctx.run_dir, customers_rel))
-    has_products = os.path.exists(os.path.join(ctx.run_dir, products_rel))
-    lineage: dict[str, list] = {
-        "04_aggregates/daily_sales.csv": [orders_rel],
-        "04_aggregates/region_channel_stats.csv": [orders_rel],
-        "04_aggregates/kpi.json": [orders_rel],
-    }
-    cat_up = [orders_rel] + ([products_rel] if has_products else [])
-    lineage["04_aggregates/category_stats.csv"] = cat_up
-    cv_up = [orders_rel] + ([customers_rel] if has_customers else [])
-    lineage["04_aggregates/customer_value.csv"] = cv_up
-    lineage["04_aggregates/customer_tier.csv"] = cv_up
-
+    lineage = _compute_lineage(ctx, ctx.config)
     return {"rows_in": orders.height, "rows_out": daily_df.height, "lineage": lineage}
 
 
@@ -927,16 +968,7 @@ def _run_spark(
     products = _load_clean_spark(ctx, "products")
 
     if orders is None or orders.count() == 0:
-        log.warn("no clean orders; compute skipped", reason="missing_input")
-        kpi = {"orders": 0, "units": 0, "total_revenue": 0.0,
-               "avg_order_value": 0.0, "days": 0,
-               "currency": cconf.get("currency", "CNY")}
-        ctx.aggregates = {
-            "daily": [], "category": [], "region_channel": [],
-            "customer_value": {"top": [], "tiers": []}, "kpi": kpi,
-        }
-        json_save(os.path.join(agg_dir, "kpi.json"), kpi)
-        return {"rows_in": 0, "rows_out": 0, "lineage": {}}
+        return _skip_result(ctx, agg_dir, cconf, log)
 
     # 增量模式当前在 Spark 路径下走全量聚合（增量 merge 待 pipeline.py 改造），
     # 与 Python/Polars 路径行为对齐：feed delta orders to the bucketing functions。
@@ -969,21 +1001,11 @@ def _run_spark(
     table_write(os.path.join(agg_dir, "customer_tier.csv"), cv["tiers"], ctx.config,
                 spark=ctx.spark_session)
 
-    # KPI（与 Python 路径计算方式一致）
+    # ctx.aggregates 存 List[Dict]（与 Python/Polars 路径格式对齐，供 output stage 消费）
     daily_dicts = _spark_df_to_dicts(daily_df)
     orders_count = orders.count()
-    total_revenue = round(sum(b["revenue"] for b in daily_dicts), 2)
-    kpi = {
-        "orders": orders_count,
-        "units": sum(b["units"] for b in daily_dicts),
-        "total_revenue": total_revenue,
-        "avg_order_value": round(total_revenue / orders_count, 2) if orders_count else 0.0,
-        "days": len(daily_dicts),
-        "currency": cconf.get("currency", "CNY"),
-    }
+    kpi = _compute_kpi(orders_count, daily_dicts, cconf.get("currency", "CNY"))
     json_save(os.path.join(agg_dir, "kpi.json"), kpi)
-
-    # ctx.aggregates 存 List[Dict]（与 Python/Polars 路径格式对齐，供 output stage 消费）
     ctx.aggregates = {
         "daily": daily_dicts,
         "category": _spark_df_to_dicts(cats_df),
@@ -996,22 +1018,6 @@ def _run_spark(
     }
     log.info("compute done (spark)", kpi=kpi)
 
-    # lineage 声明（与 Python/Polars 路径一致）
-    orders_rel = "03_clean/orders_clean.csv"
-    customers_rel = "03_clean/customers_clean.csv"
-    products_rel = "03_clean/products_clean.csv"
-    has_customers = os.path.exists(os.path.join(ctx.run_dir, customers_rel))
-    has_products = os.path.exists(os.path.join(ctx.run_dir, products_rel))
-    lineage: dict[str, list] = {
-        "04_aggregates/daily_sales.csv": [orders_rel],
-        "04_aggregates/region_channel_stats.csv": [orders_rel],
-        "04_aggregates/kpi.json": [orders_rel],
-    }
-    cat_up = [orders_rel] + ([products_rel] if has_products else [])
-    lineage["04_aggregates/category_stats.csv"] = cat_up
-    cv_up = [orders_rel] + ([customers_rel] if has_customers else [])
-    lineage["04_aggregates/customer_value.csv"] = cv_up
-    lineage["04_aggregates/customer_tier.csv"] = cv_up
-
+    lineage = _compute_lineage(ctx, ctx.config)
     daily_count = daily_df.count()
     return {"rows_in": orders_count, "rows_out": daily_count, "lineage": lineage}

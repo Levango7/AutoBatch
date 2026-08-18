@@ -8,6 +8,76 @@
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
+# =============================================================================
+# [project] 元数据（任务61 修复）
+# PEP 621 标准：声明项目名称、版本、Python 版本要求、依赖
+# 运行时零依赖（仅标准库），可选依赖在 [project.optional-dependencies] 中分组
+# =============================================================================
+[project]
+name = "autobatch"
+version = "1.5.0"
+description = "AutoBatch：可扩展批处理流水线框架（零运行时依赖，按需启用 polars/spark/iceberg 后端）"
+readme = "readme.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "AutoBatch Team" },
+]
+keywords = ["batch", "pipeline", "etl", "polars", "spark", "iceberg"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+]
+# 运行时零依赖：仅依赖 Python 3.9+ 标准库
+dependencies = []
+
+# -----------------------------------------------------------------------------
+# [project.optional-dependencies]：按功能分组的可选依赖
+# 安装方式：pip install autobatch[polars,storage] 或 pip install autobatch[dev]
+# 版本上界与 requirements.txt 保持一致，避免主版本升级引入 breaking change
+# -----------------------------------------------------------------------------
+[project.optional-dependencies]
+# 列式加速后端（engine.backend="polars"）
+polars = [
+    "polars>=1.0,<2.0",
+]
+# Spark 分布式加速后端（engine.backend="spark"，需 JDK17+）
+spark = [
+    "pyspark>=4.0,<5.0",
+]
+# 湖存储后端（storage.backend="parquet" / minio）
+storage = [
+    "pyarrow>=14.0,<20.0",
+    "minio>=7.0,<8.0",
+]
+# 监控告警（monitoring.enabled=true）
+monitoring = [
+    "psutil>=5.9,<7.0",
+]
+# 全部运行时可选依赖（polars + spark + storage + monitoring）
+all = [
+    "polars>=1.0,<2.0",
+    "pyspark>=4.0,<5.0",
+    "pyarrow>=14.0,<20.0",
+    "minio>=7.0,<8.0",
+    "psutil>=5.9,<7.0",
+]
+# 开发 / CI 依赖（与 requirements-dev.txt 同步）
+dev = [
+    "pytest>=7.0,<9.0",
+    "pytest-cov>=4.0,<6.0",
+    "ruff>=0.6.0,<1.0",
+    "mypy>=1.10.0,<2.0",
+    "pip-audit>=2.7.0,<3.0",
+]
+
 # -----------------------------------------------------------------------------
 # ruff：极速 lint + format checker（替代 flake8 + black + isort）
 # -----------------------------------------------------------------------------

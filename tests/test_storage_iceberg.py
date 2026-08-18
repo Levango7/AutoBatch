@@ -312,7 +312,12 @@ def test_iceberg_back_compat_parquet(iceberg_env):
 def test_iceberg_incremental_mode_switch(iceberg_env):
     """增量模式 high_watermark ↔ iceberg_snapshot_diff 配置切换.
 
-    验证 cfg["incremental"]["mode"] 可正确切换，且 ingest 路由到不同分支.
+    验证：
+      1. cfg["incremental"]["mode"] 可正确切换
+      2. _ingest_incremental 在 mode="iceberg_snapshot_diff" 时调
+         _copy_incremental_iceberg；mode="high_watermark" 时走水位分支
+         （不调 _copy_incremental_iceberg）.
+    用 monkeypatch 替换 _copy_incremental_iceberg 验证路由命中.
     不跑完整 pipeline（需要先把源数据注册为 Iceberg 表），只验证配置路由.
     """
     cfg = _make_iceberg_cfg(iceberg_env)
@@ -322,12 +327,53 @@ def test_iceberg_incremental_mode_switch(iceberg_env):
     cfg["incremental"]["mode"] = "iceberg_snapshot_diff"
     cfg["incremental"]["enabled"] = True
     assert cfg["incremental"]["mode"] == "iceberg_snapshot_diff"
-    # 验证 ingest 模块能识别 mode
+
+    # 验证 _ingest_incremental 路由：mode="iceberg_snapshot_diff" → 调 _copy_incremental_iceberg
     import sys
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from src.stages import ingest as ingest_mod
     from src.stages.ingest import _ingest_incremental
-    # _ingest_incremental 在 mode="iceberg_snapshot_diff" 时应调 _copy_incremental_iceberg
-    # 这里只验证配置正确传递，不实际执行（需要 Iceberg 表存在）
+
+    # 构造一个最小 ctx（仅需要 config + state + engine_backend 属性）
+    class _Ctx:
+        def __init__(self, c):
+            self.config = c
+            self.state = {"tables": {}, "iceberg_snapshots": {}}
+            self.engine_backend = "python"
+            self.spark_session = None
+
+    calls = {"iceberg": 0}
+
+    def _fake_copy_incremental_iceberg(ctx, name, raw_dir, table_cfg, log):
+        calls["iceberg"] += 1
+        return {"name": name, "rows": 0, "incremental_mode": "iceberg_snapshot_diff"}
+
+    # monkeypatch _copy_incremental_iceberg
+    original = ingest_mod._copy_incremental_iceberg
+    ingest_mod._copy_incremental_iceberg = _fake_copy_incremental_iceberg
+    try:
+        ctx = _Ctx(cfg)
+        # mode="iceberg_snapshot_diff" → 应调 _copy_incremental_iceberg
+        result = _ingest_incremental(ctx, "orders", "orders", "src.csv",
+                                     "/tmp/raw", {"watermark_column": "order_date"},
+                                     log=None)
+        assert calls["iceberg"] == 1, "mode=iceberg_snapshot_diff 应调 _copy_incremental_iceberg"
+        assert result["incremental_mode"] == "iceberg_snapshot_diff"
+
+        # 切回 high_watermark → 不应再调 _copy_incremental_iceberg
+        cfg["incremental"]["mode"] = "high_watermark"
+        calls["iceberg"] = 0
+        # high_watermark 分支会调 _ingest_full 或 _copy_incremental（依赖真实数据），
+        # 这里只验证不调 _copy_incremental_iceberg：用 try/except 捕获后续分支的异常
+        try:
+            _ingest_incremental(ctx, "orders", "orders", "src.csv",
+                                "/tmp/raw", {"watermark_column": "order_date"},
+                                log=None)
+        except Exception:
+            pass  # 后续分支可能因数据不存在抛异常，不影响断言
+        assert calls["iceberg"] == 0, "mode=high_watermark 不应调 _copy_incremental_iceberg"
+    finally:
+        ingest_mod._copy_incremental_iceberg = original
 
 
 # ----------------------------------------------------------------------

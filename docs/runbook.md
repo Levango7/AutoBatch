@@ -139,13 +139,13 @@
 
 ## 9. 测试运行方式
 
-项目内置 pytest 测试套件（298 个用例），位于 `tests/`：
+项目内置 pytest 测试套件（336 个用例），位于 `tests/`：
 
 ```
 python -m pytest tests/ -v
 ```
 
-测试覆盖范围（20 个测试模块，Windows 本地 Python 3.14 基线：275 passed + 23 skipped——skip 为环境相关用例）：
+测试覆盖范围（22 个测试模块，Windows 本地 Python 3.14 基线：313 passed + 23 skipped——skip 为环境相关用例）：
 
 | 文件 | 覆盖内容 | 用例数 |
 |---|---|---|
@@ -169,10 +169,12 @@ python -m pytest tests/ -v
 | tests/test_state.py | StateStore：水位/snapshot id 两阶段提交、失败不推进、聚合 merge 累加与派生列重算、原子写等 26 个场景 | 26 |
 | tests/test_storage_iceberg.py | 13 个 Iceberg 湖表场景：等价性 / ACID / time travel / schema evolution / snapshot diff 增量 / 增量+Iceberg / SQL catalog / REST catalog；pyiceberg 未安装时 `skipif` 跳过 | 13 |
 | tests/test_storage_parquet.py | 4 个 Parquet 湖存储场景：本地 Parquet 全量产物与 local_csv 一致、S3 MinIO Parquet 全量产物与 local_csv 一致、Parquet 压缩比基准、增量 + Parquet 组合；MinIO 不可用时 `skipif` 跳过 | 4 |
+| tests/test_openlineage.py | 20 个 OpenLineage 血缘事件测试：event 结构 / parent facet / NDJSON 写出 / HTTP 上报容错 / 确定性 runId；纯单元级，零外部依赖 | 20 |
+| tests/test_resume.py          | 18 个断点续跑测试：resume 触发条件（disabled/auto batch/no manifest/success status/version drift/digest drift）/ 产物完整性检查（各 stage 目录非空 + validate 需 quality_summary.json）/ lineage_decl 持久化；纯单元级，零外部依赖 | 18 |
 
-合计 298 个用例。
+合计 336 个用例。
 
-`pytest.ini` 已配置 `testpaths = tests` 与 `pythonpath = .`，从项目根直接运行即可，无需额外参数。增量测试用 `conftest.py` 的 `inc_env` 夹具隔离 state 目录与数据目录，互不污染。Spark 本地模式测试用 `pytest.mark.skipif` 在 Windows 缺 `hadoop.dll` 或未装 `pyspark` 时跳过，代码逻辑完整，装齐环境后可直接运行。Spark 多机模式测试在 Docker Desktop / MinIO 不可用时跳过。Parquet S3 测试用 `pytest.mark.skipif` 在 MinIO 不可达时跳过，本地 Parquet 测试无需 MinIO 即可运行。
+`pytest.ini` 已配置 `testpaths = tests` 与 `pythonpath = .`，从项目根直接运行即可，无需额外参数。增量测试用 `conftest.py` 的 `inc_env` 夹具隔离 state 目录与数据目录，互不污染。Spark 本地模式测试用 `pytest.mark.skipif` 在 Windows 缺 `hadoop.dll` 或未装 `pyspark` 时跳过，代码逻辑完整，装齐环境后可直接运行。Spark 多机模式测试在 Docker Desktop / MinIO 不可用时跳过。Parquet S3 测试用 `pytest.mark.skipif` 在 MinIO 不可达时跳过，本地 Parquet 测试无需 MinIO 即可运行。OpenLineage 与断点续跑测试为纯单元级，不依赖任何外部服务。
 
 ## 10. CI（GitHub Actions）
 

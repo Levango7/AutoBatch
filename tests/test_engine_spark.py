@@ -79,8 +79,8 @@ def _pyspark_jvm_exists() -> bool:
         # 若 JAVA_HOME / spark_home 未设置，直接假设为无环境
         if not _os.environ.get("JAVA_HOME") and not _os.environ.get("SPARK_HOME"):
             return False
-        from pyspark.context import SparkContext  # noqa: N814 使用 CamelCase 原名
         from pyspark.conf import SparkConf  # noqa: N814
+        from pyspark.context import SparkContext  # noqa: N814 使用 CamelCase 原名
 
         conf = SparkConf().setMaster("local[1]")
         sc = SparkContext.getOrCreate(conf=conf)

@@ -242,7 +242,9 @@ def run(ctx: PipelineContext, log) -> dict[str, Any]:
                     .cast(pl.Float64, strict=False)
                 )
                 pl_amt = pl_qty * pl_price
-                df = df.with_columns(pl_amt.round(2).cast(pl.Utf8).fill_null("").alias("total_amount"))
+                df = df.with_columns(
+                    pl_amt.round(2).cast(pl.Utf8).fill_null("").alias("total_amount")
+                )
             else:
                 df = df.with_columns(pl.lit("").alias("total_amount"))
             engine = RuleEngine(name, rules[name], ref_data)

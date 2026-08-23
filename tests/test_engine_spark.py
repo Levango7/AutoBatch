@@ -73,6 +73,7 @@ _HADOOP_HOME_CANDIDATES = [
     r"F:\hadoop",
 ]
 _HADOOP_DLL_EXISTS = any(_hadoop_native_exists(h) for h in _HADOOP_HOME_CANDIDATES if h)
+PYSPARK_JVM_OK = _pyspark_jvm_exists()
 # 同时要求 pyspark 可 import（未安装时也跳过）
 try:
     import pyspark  # noqa: F401
@@ -81,7 +82,7 @@ try:
 except ImportError:
     _PYSPARK_AVAILABLE = False
 
-SPARK_WRITE_DISABLED = not _HADOOP_DLL_EXISTS or not _PYSPARK_AVAILABLE
+SPARK_WRITE_DISABLED = not _HADOOP_DLL_EXISTS or not _PYSPARK_AVAILABLE or not PYSPARK_JVM_OK
 
 _SKIP_REASON = (
     "hadoop native IO library not found or pyspark not installed - "
@@ -89,6 +90,29 @@ _SKIP_REASON = (
 )
 
 spark_skip = pytest.mark.skipif(SPARK_WRITE_DISABLED, reason=_SKIP_REASON)
+
+
+def _pyspark_jvm_exists() -> bool:
+    """检验 pyspark 能否启动 JVM（即 Hadoop native lib 实际上已就位）。
+
+    本地测试 fixture 会尝试 spark_env 预置 Java/Home 环境变量，
+    但 CI 可能未提供 native lib，此时 Spark 会抛 Py4JJavaError。
+    这里用轻量 SparkContext.getOrCreate 探测（超时 2s 视为不可用）。
+    """
+    try:
+        import os as _os
+        # 若 JAVA_HOME / spark_home 未设置，直接假设为无环境
+        if not _os.environ.get("JAVA_HOME") and not _os.environ.get("SPARK_HOME"):
+            return False
+        from pyspark import SparkContext as _SC
+        sc = _SC.getOrCreate(
+            master="local[1]",
+            conf=_SC._conf.newSession(),
+        )
+        sc.stop()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
 
 
 # ----------------------------------------------------------------------

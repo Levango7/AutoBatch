@@ -59,18 +59,36 @@ def _load_daily_sales(path: Path) -> list[dict[str, Any]]:
             reader = csv.DictReader(f)
             for row in reader:
                 try:
-                    out.append({
-                        "date": row.get("order_date", ""),
-                        "orders": int(row.get("orders", 0) or 0),
-                        "units": int(row.get("units", 0) or 0),
-                        "revenue": float(row.get("revenue", 0.0) or 0.0),
-                        "avgOrderValue": float(row.get("avg_order_value", 0.0) or 0.0),
-                    })
+                    out.append(
+                        {
+                            "date": row.get("order_date", ""),
+                            "orders": int(row.get("orders", 0) or 0),
+                            "units": int(row.get("units", 0) or 0),
+                            "revenue": float(row.get("revenue", 0.0) or 0.0),
+                            "avgOrderValue": float(row.get("avg_order_value", 0.0) or 0.0),
+                        }
+                    )
                 except (ValueError, TypeError):
                     continue
     except OSError:
         return []
     return out
+
+
+def _to_int(v: Any, default: int = 0) -> int:
+    """宽松转 int：脏数据（字符串/None/浮点串）返回 default 而非抛 ValueError."""
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_float(v: Any, default: float = 0.0) -> float:
+    """宽松转 float：脏数据返回 default 而非抛 ValueError."""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
 
 
 def _extract_batch(batch_dir: Path) -> Optional[dict[str, Any]]:
@@ -88,13 +106,15 @@ def _extract_batch(batch_dir: Path) -> Optional[dict[str, Any]]:
     stages_raw = (status or {}).get("stages") or []
     stages = []
     for s in stages_raw:
-        stages.append({
-            "name": s.get("name", ""),
-            "status": s.get("status", ""),
-            "durationMs": int(s.get("duration_ms", 0) or 0),
-            "rowsIn": int(s.get("rows_in", 0) or 0),
-            "rowsOut": int(s.get("rows_out", 0) or 0),
-        })
+        stages.append(
+            {
+                "name": s.get("name", ""),
+                "status": s.get("status", ""),
+                "durationMs": int(s.get("duration_ms", 0) or 0),
+                "rowsIn": int(s.get("rows_in", 0) or 0),
+                "rowsOut": int(s.get("rows_out", 0) or 0),
+            }
+        )
 
     # 总耗时：优先用 finished - started，否则累加 stage duration
     duration_ms = 0
@@ -109,11 +129,11 @@ def _extract_batch(batch_dir: Path) -> Optional[dict[str, Any]]:
     q: dict[str, Any] = {}
     if quality:
         q = {
-            "dqScore": float(quality.get("dq_score", 0.0) or 0.0),
-            "rulesTotal": int(quality.get("rules_total", 0) or 0),
-            "checksTotal": int(quality.get("checks_total", 0) or 0),
-            "checksPassed": int(quality.get("checks_passed", 0) or 0),
-            "checksFailed": int(quality.get("checks_failed", 0) or 0),
+            "dqScore": _to_float(quality.get("dq_score")),
+            "rulesTotal": _to_int(quality.get("rules_total")),
+            "checksTotal": _to_int(quality.get("checks_total")),
+            "checksPassed": _to_int(quality.get("checks_passed")),
+            "checksFailed": _to_int(quality.get("checks_failed")),
             "quarantinedRows": quality.get("quarantined_rows", {}) or {},
         }
 
@@ -122,11 +142,11 @@ def _extract_batch(batch_dir: Path) -> Optional[dict[str, Any]]:
     kpi: dict[str, Any] = {}
     if kpi_raw:
         kpi = {
-            "orders": int(kpi_raw.get("orders", 0) or 0),
-            "units": int(kpi_raw.get("units", 0) or 0),
-            "totalRevenue": float(kpi_raw.get("total_revenue", 0.0) or 0.0),
-            "avgOrderValue": float(kpi_raw.get("avg_order_value", 0.0) or 0.0),
-            "days": int(kpi_raw.get("days", 0) or 0),
+            "orders": _to_int(kpi_raw.get("orders")),
+            "units": _to_int(kpi_raw.get("units")),
+            "totalRevenue": _to_float(kpi_raw.get("total_revenue")),
+            "avgOrderValue": _to_float(kpi_raw.get("avg_order_value")),
+            "days": _to_int(kpi_raw.get("days")),
             "currency": kpi_raw.get("currency", "CNY"),
         }
 
@@ -177,12 +197,16 @@ def build_data_object(run_dir: Path) -> dict[str, Any]:
     total = len(batches)
     success = sum(1 for b in batches if b.get("status") == "success")
     failed = sum(1 for b in batches if b.get("status") not in ("success", "unknown"))
-    dq_scores = [b["quality"]["dqScore"] for b in batches
-                 if b.get("quality") and b["quality"].get("dqScore") is not None]
+    dq_scores = [
+        b["quality"]["dqScore"]
+        for b in batches
+        if b.get("quality") and b["quality"].get("dqScore") is not None
+    ]
     dq_avg = sum(dq_scores) / len(dq_scores) if dq_scores else 0.0
     return {
         "generatedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "runDir": str(run_dir),
+        # 相对路径：避免把本机绝对路径写进对外分发的 data.js（信息泄漏）
+        "runDir": "run",
         "summary": {
             "totalBatches": total,
             "successBatches": success,
@@ -199,6 +223,10 @@ def write_data_js(data: dict[str, Any], out_path: Path) -> None:
     """写入 data.js：window.AutoBatchData = {...};"""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    # 防 </script> 提前终止 <script> 块（存储型 XSS 通道）：
+    # batchId 等字段来自目录名/JSON，未做格式校验，含 "</script>" 时会
+    # 截断 JS 解析并注入任意 HTML。"<\/" 在 JS 字符串里等价于 "</"。
+    payload = payload.replace("</", "<\\/")
     header = (
         "// 自动生成，请勿手工编辑。\n"
         "// 由 dashboard/build_data.py 扫描 run/ 目录生成。\n"
@@ -214,10 +242,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     default_run = here.parent / "run"
     default_out = here / "data.js"
     parser = argparse.ArgumentParser(description="生成 dashboard/data.js")
-    parser.add_argument("--run-dir", default=str(default_run),
-                        help=f"run 目录路径（默认 {default_run}）")
-    parser.add_argument("--out", default=str(default_out),
-                        help=f"输出 data.js 路径（默认 {default_out}）")
+    parser.add_argument(
+        "--run-dir", default=str(default_run), help=f"run 目录路径（默认 {default_run}）"
+    )
+    parser.add_argument(
+        "--out", default=str(default_out), help=f"输出 data.js 路径（默认 {default_out}）"
+    )
     args = parser.parse_args(argv)
 
     run_dir = Path(args.run_dir).resolve()

@@ -14,6 +14,12 @@ import time
 import traceback
 from typing import Any, Callable, Optional
 
+try:
+    # 配置校验是可选增强：pydantic 未安装时跳过校验，保持核心路径零第三方依赖
+    from .config_schema import ConfigValidationError, validate_config
+except ImportError:  # pragma: no cover - 仅在无 pydantic 的最小环境触发
+    ConfigValidationError = None  # type: ignore[assignment,misc]
+    validate_config = None  # type: ignore[assignment]
 from .exceptions import StageExecutionError, StageTimeoutError
 from .helpers import (
     PipelineContext,
@@ -56,21 +62,19 @@ _STAGE_OUTPUT_DIRS: dict[str, list[str]] = {
 # pipeline merges these into state/aggregates/ so the next incremental run has
 # the full historical view. See docs/evolution.md §3.3.4 / §3.3.5.
 _AGGREGATE_SPECS = [
-    ("daily_sales",
-     ["order_date", "orders", "units", "revenue", "avg_order_value"],
-     ["order_date"]),
-    ("category_stats",
-     ["category", "orders", "units", "revenue", "revenue_share"],
-     ["category"]),
-    ("region_channel_stats",
-     ["region", "channel", "orders", "revenue"],
-     ["region", "channel"]),
-    ("customer_value",
-     ["customer_id", "tier", "city", "orders", "revenue", "rank"],
-     ["customer_id"]),
-    ("customer_tier",
-     ["tier", "customers", "revenue"],
-     ["tier"]),
+    (
+        "daily_sales",
+        ["order_date", "orders", "units", "revenue", "avg_order_value"],
+        ["order_date"],
+    ),
+    ("category_stats", ["category", "orders", "units", "revenue", "revenue_share"], ["category"]),
+    ("region_channel_stats", ["region", "channel", "orders", "revenue"], ["region", "channel"]),
+    (
+        "customer_value",
+        ["customer_id", "tier", "city", "orders", "revenue", "rank"],
+        ["customer_id"],
+    ),
+    ("customer_tier", ["tier", "customers", "revenue"], ["tier"]),
 ]
 
 
@@ -80,7 +84,8 @@ def config_digest(cfg: dict[str, Any]) -> str:
 
 
 def load_stage(name: str):
-    return importlib.import_module("src.stages." + name)
+    # __package__ 使包名不再硬编码为 "src"（以 autobatch 名安装时同样可用）
+    return importlib.import_module(f"{__package__}.stages." + name)
 
 
 def _init_spark_session(cfg: dict[str, Any], logger) -> Any:
@@ -145,7 +150,9 @@ def _init_spark_session(cfg: dict[str, Any], logger) -> Any:
         builder = builder.config("spark.hadoop.fs.s3a.access.key", storage.get("access_key", ""))
         builder = builder.config("spark.hadoop.fs.s3a.secret.key", storage.get("secret_key", ""))
         builder = builder.config("spark.hadoop.fs.s3a.path.style.access", "true")
-        builder = builder.config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
+        builder = builder.config(
+            "spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem"
+        )
         # Windows Driver 端缺 hadoop.dll 时，S3A 默认 disk buffer 会触发
         # NativeIO$Windows.access0 → UnsatisfiedLinkError。改用内存 buffer 避免
         # 创建本地临时文件（Worker 在 Linux 容器中不受影响，内存 buffer 也可用）。
@@ -153,7 +160,9 @@ def _init_spark_session(cfg: dict[str, Any], logger) -> Any:
         builder = builder.config("spark.hadoop.fs.s3a.fast.upload.buffer", "array")
         # FileOutputCommitter v2 避免 commitJob 时 list _temporary/0（S3 eventual
         # consistency 可能导致 list 不到刚写入的 task 输出）。
-        builder = builder.config("spark.hadoop.mapreduce.fileoutputcommitter.algorithm.version", "2")
+        builder = builder.config(
+            "spark.hadoop.mapreduce.fileoutputcommitter.algorithm.version", "2"
+        )
         # 多机模式下，Worker 容器和 Driver 端都需要 hadoop-aws + aws-sdk JAR。
         # 前提：这些 JAR 已预装在 SPARK_HOME/jars/（Driver）和 Docker 容器的
         # /opt/spark/jars/（Worker）中。不使用 spark.jars 分发（aws-java-sdk-bundle
@@ -201,9 +210,7 @@ def _init_spark_session(cfg: dict[str, Any], logger) -> Any:
             "spark_catalog_class",
             "org.apache.iceberg.spark.SparkCatalog",
         )
-        builder = builder.config(
-            f"spark.sql.catalog.{catalog_name}", spark_catalog_class
-        )
+        builder = builder.config(f"spark.sql.catalog.{catalog_name}", spark_catalog_class)
         # catalog 类型：rest（生产）/ sql（开发测试）/ hive（兼容 Hive Metastore）
         builder = builder.config(
             f"spark.sql.catalog.{catalog_name}.type",
@@ -248,10 +255,14 @@ def _init_spark_session(cfg: dict[str, Any], logger) -> Any:
             )
 
     spark = builder.getOrCreate()
-    logger.info("spark session created",
-                extra={"stage": "pipeline",
-                       "master": scfg.get("master", "local[*]"),
-                       "app": scfg.get("app_name", "autobatch")})
+    logger.info(
+        "spark session created",
+        extra={
+            "stage": "pipeline",
+            "master": scfg.get("master", "local[*]"),
+            "app": scfg.get("app_name", "autobatch"),
+        },
+    )
     return spark
 
 
@@ -297,13 +308,19 @@ def _cleanup_stage_output(stage_name: str, run_dir: str, logger) -> None:
             continue
         try:
             shutil.rmtree(target)
-            logger.info("stage output cleaned for retry",
-                        extra={"stage": stage_name, "cleaned_dir": sub})
+            logger.info(
+                "stage output cleaned for retry", extra={"stage": stage_name, "cleaned_dir": sub}
+            )
         except Exception as exc:  # noqa: BLE001
             # 清理失败不应阻塞重试；记录 warning 后继续.
-            logger.warning("stage output cleanup failed, continuing retry",
-                           extra={"stage": stage_name, "cleaned_dir": sub,
-                                  "error": f"{type(exc).__name__}: {exc}"})
+            logger.warning(
+                "stage output cleanup failed, continuing retry",
+                extra={
+                    "stage": stage_name,
+                    "cleaned_dir": sub,
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+            )
 
 
 def _run_with_timeout(
@@ -315,13 +332,13 @@ def _run_with_timeout(
 ) -> Any:
     """在墙钟超时控制下执行 fn.
 
-    用 threading.Timer + threading.Event 实现，兼容 Windows（不支持 signal.alarm）.
-    fn 在当前线程内执行（避免子进程开销 + ctx 传递复杂度），Timer 到点后
-    设置 event，fn 内部若有 IO 阻塞无法立即响应——这是 threading 方案的
-    固有局限，但对 CPU-bound stage 与大多数 IO-bound stage 已足够.
-    超时后抛 StageTimeoutError.
+    fn 在独立 daemon 线程中运行，主线程用 ``Event.wait(timeout)`` 等待；
+    超时后放弃等待并抛 StageTimeoutError（daemon 线程随主进程退出，
+    Python 无法强杀线程——若 fn 持有临界资源，由运维层面介入）。
+    兼容 Windows（不支持 signal.alarm）。
 
-    timeout_seconds=None / <=0 时不启用超时，直接执行 fn（向后兼容）.
+    timeout_seconds=None / <=0 时不启用超时，直接在当前线程执行 fn（向后兼容，
+    也避免无谓的线程开销）.
 
     Args:
         fn:              无参可调用，封装了 stage 执行逻辑.
@@ -334,7 +351,7 @@ def _run_with_timeout(
         fn() 的返回值.
 
     Raises:
-        StageTimeoutError: 超时.
+        StageTimeoutError: 超时（fn 未在阈值内完成）.
         Exception:        fn 抛出的任何异常原样向上传播.
     """
     if not timeout_seconds or timeout_seconds <= 0:
@@ -342,33 +359,24 @@ def _run_with_timeout(
 
     result_holder: dict[str, Any] = {}
     done_event = threading.Event()
-    timer = threading.Timer(timeout_seconds, done_event.set)
-    timer.daemon = True
 
     def _runner():
         try:
             result_holder["value"] = fn()
         except Exception as exc:  # noqa: BLE001
-            # 仅捕获 Exception，让 KeyboardInterrupt/SystemExit 直接传播
-            # （由 finally 块的 done_event.set() 通知外层，但异常本身从
-            # _runner 同步向上抛出，不被 result_holder 吞掉）。
+            # 仅捕获 Exception；KeyboardInterrupt/SystemExit 不入 holder
             result_holder["error"] = exc
         finally:
             done_event.set()
 
     start = time.monotonic()
-    timer.start()
-    _runner()  # 在当前线程内同步执行，Timer 在另一线程计时
-    # _runner 同步执行，到这里 fn 已返回或抛异常.检查 timer 是否先触发.
-    elapsed = time.monotonic() - start
-    timer.cancel()  # 取消计时器（若已触发是 no-op）
-
+    worker = threading.Thread(target=_runner, daemon=True, name=f"stage-{stage_name}")
+    worker.start()
+    if not done_event.wait(timeout=timeout_seconds):
+        elapsed = time.monotonic() - start
+        raise StageTimeoutError(stage_name, batch_id, attempt, timeout_seconds, elapsed)
     if "error" in result_holder:
         raise result_holder["error"]
-    if "value" not in result_holder:
-        # fn 未完成且 timer 先触发（done_event 由 timer 设置，runner 未及写入）
-        raise StageTimeoutError(stage_name, batch_id, attempt,
-                                timeout_seconds, elapsed)
     return result_holder["value"]
 
 
@@ -439,12 +447,16 @@ def _run_stage_with_retry(
         try:
             summary = _run_with_timeout(
                 lambda: stage_fn(ctx, slog),
-                timeout_s, stage_name, batch_id, attempt,
+                timeout_s,
+                stage_name,
+                batch_id,
+                attempt,
             )
             if attempt > 0:
-                logger.info("stage succeeded after retry",
-                            extra={"stage": stage_name, "batch": batch_id,
-                                   "attempt": attempt})
+                logger.info(
+                    "stage succeeded after retry",
+                    extra={"stage": stage_name, "batch": batch_id, "attempt": attempt},
+                )
                 slog.info("stage succeeded after retry", attempt=attempt)
             return summary
         except Exception as exc:  # noqa: BLE001
@@ -454,31 +466,48 @@ def _run_stage_with_retry(
             last_tb = traceback.format_exc()
             err_msg = f"{type(exc).__name__}: {exc}"
             # 结构化日志：stage / batch / attempt / error / traceback
-            logger.error("stage attempt failed",
-                         extra={"stage": stage_name, "batch": batch_id,
-                                "attempt": attempt,
-                                "max_retries": max_retries,
-                                "error": err_msg})
-            slog.error("stage attempt failed",
-                       attempt=attempt, max_retries=max_retries,
-                       error=err_msg, traceback=last_tb)
+            logger.error(
+                "stage attempt failed",
+                extra={
+                    "stage": stage_name,
+                    "batch": batch_id,
+                    "attempt": attempt,
+                    "max_retries": max_retries,
+                    "error": err_msg,
+                },
+            )
+            slog.error(
+                "stage attempt failed",
+                attempt=attempt,
+                max_retries=max_retries,
+                error=err_msg,
+                traceback=last_tb,
+            )
 
             if attempt >= max_retries:
                 # 重试耗尽，跳出循环抛 StageExecutionError
                 break
 
             # 计算指数退避：min(base * 2^attempt, max)
-            backoff = min(backoff_base * (2 ** attempt), backoff_max)
-            logger.info("stage retry scheduled",
-                        extra={"stage": stage_name, "batch": batch_id,
-                               "attempt": attempt,
-                               "backoff_seconds": backoff})
-            slog.info("stage retry scheduled",
-                      attempt=attempt, backoff_seconds=backoff)
+            backoff = min(backoff_base * (2**attempt), backoff_max)
+            logger.info(
+                "stage retry scheduled",
+                extra={
+                    "stage": stage_name,
+                    "batch": batch_id,
+                    "attempt": attempt,
+                    "backoff_seconds": backoff,
+                },
+            )
+            slog.info("stage retry scheduled", attempt=attempt, backoff_seconds=backoff)
             time.sleep(backoff)
 
-    # 重试耗尽仍失败 → 抛 StageExecutionError（携带完整上下文）
+    # 重试耗尽仍失败 → 抛 StageExecutionError（携带完整上下文）。
+    # 超时例外：StageTimeoutError 是 StageExecutionError 子类，保持原类型
+    # 向上传播（docstring 契约），供调用方区分"超时"与"执行失败"。
     assert last_exc is not None  # 循环至少执行一次，last_exc 必被赋值
+    if isinstance(last_exc, StageTimeoutError):
+        raise last_exc
     raise StageExecutionError(
         stage_name=stage_name,
         batch_id=batch_id,
@@ -534,13 +563,13 @@ def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
         ctx.state = store.load()
         ctx.state_path = store.state_path
         ctx.incremental_enabled = True
-        logger.info("incremental mode enabled",
-                    extra={"stage": "pipeline", "state_dir": state_dir})
+        logger.info("incremental mode enabled", extra={"stage": "pipeline", "state_dir": state_dir})
 
     # 任务41 监控告警：加载 config/monitoring.json（缺省 disabled）.
     # enabled=false 时 health_server 保持 None，行为 100% 不变.
     monitoring_cfg = load_monitoring_config(
-        abs_path(cfg.get("monitoring_config", "config/monitoring.json")))
+        abs_path(cfg.get("monitoring_config", "config/monitoring.json"))
+    )
     monitoring_enabled = bool(monitoring_cfg.get("enabled", False))
     health_server: Optional[HealthServer] = None
     if monitoring_enabled:
@@ -552,10 +581,10 @@ def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
                 run_dir=run_root,
             )
             health_server.start()
-            logger.info("health server started",
-                        extra={"stage": "pipeline",
-                               "host": health_server.host,
-                               "port": health_server.port})
+            logger.info(
+                "health server started",
+                extra={"stage": "pipeline", "host": health_server.host, "port": health_server.port},
+            )
 
     logger.info("pipeline start", extra={"stage": "pipeline", "batch": batch_id})
     overall = "success"
@@ -568,24 +597,24 @@ def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
             if fail_at == name:
                 overall = "failed"
                 error_msg = "demo failure injected at stage " + name
-                with StageLog(os.path.join(run_dir, log_path),
-                              batch_id=batch_id, stage=name) as slog:
+                with StageLog(
+                    os.path.join(run_dir, log_path), batch_id=batch_id, stage=name
+                ) as slog:
                     slog.error(error_msg, injected=True)
                 manifest.add_stage(name, "failed", 0, 0, 0, log_path, error_msg)
                 metrics.record_stage(name, "failed", 0, 0, 0)
-                logger.error("stage failed (demo injection)",
-                             extra={"stage": name})
+                logger.error("stage failed (demo injection)", extra={"stage": name})
                 break
             stage_mod = load_stage(name)
             start = time.monotonic()
             try:
-                with StageLog(os.path.join(run_dir, log_path),
-                              batch_id=batch_id, stage=name) as slog:
+                with StageLog(
+                    os.path.join(run_dir, log_path), batch_id=batch_id, stage=name
+                ) as slog:
                     # 任务39 错误处理加固：用 _run_stage_with_retry 包装 stage 执行，
                     # 提供 try-except + 重试 + 超时 + 幂等清理.
                     # max_retries=0（缺省）时行为与原 pipeline 完全一致.
-                    summary = _run_stage_with_retry(
-                        name, stage_mod.run, ctx, slog, cfg, logger)
+                    summary = _run_stage_with_retry(name, stage_mod.run, ctx, slog, cfg, logger)
                 rows_in = summary.get("rows_in", 0)
                 rows_out = summary.get("rows_out", 0)
                 dur = int((time.monotonic() - start) * 1000)
@@ -594,56 +623,69 @@ def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
                 # Collect lineage declarations from this stage into the shared map.
                 for target, ups in summary.get("lineage", {}).items():
                     ctx.lineage_decls[target] = list(ups)
-                logger.info("stage done",
-                            extra={"stage": name, "rows_in": rows_in,
-                                   "rows_out": rows_out, "dur_ms": dur})
+                logger.info(
+                    "stage done",
+                    extra={"stage": name, "rows_in": rows_in, "rows_out": rows_out, "dur_ms": dur},
+                )
             except StageExecutionError as exc:  # noqa: BLE001
                 # 任务39：stage 重试耗尽后抛 StageExecutionError，携带完整上下文.
                 # 捕获后记录 failed 状态并终止本轮批次（与原行为一致）.
                 overall = "failed"
                 error_msg = f"{type(exc.original_error).__name__}: {exc.original_error}"
                 trace_tail = exc.traceback_str.splitlines()[-8:] if exc.traceback_str else []
-                with StageLog(os.path.join(run_dir, log_path),
-                              batch_id=batch_id, stage=name) as slog:
-                    slog.error("stage failed",
-                               error=error_msg, trace=trace_tail,
-                               stage_name=exc.stage_name,
-                               batch_id=exc.batch_id,
-                               attempt=exc.attempt)
+                with StageLog(
+                    os.path.join(run_dir, log_path), batch_id=batch_id, stage=name
+                ) as slog:
+                    slog.error(
+                        "stage failed",
+                        error=error_msg,
+                        trace=trace_tail,
+                        stage_name=exc.stage_name,
+                        batch_id=exc.batch_id,
+                        attempt=exc.attempt,
+                    )
                 dur = int((time.monotonic() - start) * 1000)
                 manifest.add_stage(name, "failed", 0, 0, dur, log_path, error_msg)
                 metrics.record_stage(name, "failed", dur, 0, 0)
-                logger.error("stage failed (after retries)",
-                             extra={"stage": name, "batch": batch_id,
-                                    "error": error_msg,
-                                    "attempt": exc.attempt})
+                logger.error(
+                    "stage failed (after retries)",
+                    extra={
+                        "stage": name,
+                        "batch": batch_id,
+                        "error": error_msg,
+                        "attempt": exc.attempt,
+                    },
+                )
                 break
             except Exception as exc:  # noqa: BLE001
                 overall = "failed"
                 error_msg = f"{type(exc).__name__}: {str(exc)}"
                 trace_tail = traceback.format_exc().splitlines()[-8:]
-                with StageLog(os.path.join(run_dir, log_path),
-                              batch_id=batch_id, stage=name) as slog:
+                with StageLog(
+                    os.path.join(run_dir, log_path), batch_id=batch_id, stage=name
+                ) as slog:
                     slog.error("stage failed", error=error_msg, trace=trace_tail)
                 dur = int((time.monotonic() - start) * 1000)
                 manifest.add_stage(name, "failed", 0, 0, dur, log_path, error_msg)
                 metrics.record_stage(name, "failed", dur, 0, 0)
-                logger.error("stage failed",
-                             extra={"stage": name, "error": error_msg})
+                logger.error("stage failed", extra={"stage": name, "error": error_msg})
 
                 break
 
         manifest.finish(overall, error_msg)
         manifest.save()
         save_latest_pointer(run_root, batch_id, run_dir)
-        json_save(os.path.join(run_dir, "status.json"), {
-            "batch_id": batch_id,
-            "status": overall,
-            "error": error_msg,
-            "started_at": manifest.started_at,
-            "finished_at": manifest.finished_at,
-            "stages": manifest.stages,
-        })
+        json_save(
+            os.path.join(run_dir, "status.json"),
+            {
+                "batch_id": batch_id,
+                "status": overall,
+                "error": error_msg,
+                "started_at": manifest.started_at,
+                "finished_at": manifest.finished_at,
+                "stages": manifest.stages,
+            },
+        )
 
         # Two-phase commit: advance watermarks + merge aggregates into state/ ONLY
         # when every stage succeeded. On failure we deliberately skip this block so
@@ -659,8 +701,7 @@ def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
         if manifest.quality is not None:
             dq_score = manifest.quality.get("dq_score")
             quarantined_rows = manifest.quality.get("quarantined_rows", {})
-        metrics.finish(overall, total_dur, dq_score=dq_score,
-                       quarantined_rows=quarantined_rows)
+        metrics.finish(overall, total_dur, dq_score=dq_score, quarantined_rows=quarantined_rows)
         metrics.save(run_dir)
 
         # 任务41 监控告警：monitoring.enabled=true 时，
@@ -676,54 +717,67 @@ def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
                 existing = json_load(metrics_path)
                 existing["resource_sample"] = resource_sample
                 json_save(metrics_path, existing)
-                logger.info("resource sampled",
-                            extra={"stage": "pipeline",
-                                   "cpu_percent": resource_sample.get("cpu_percent"),
-                                   "memory_mb": resource_sample.get("memory_mb")})
+                logger.info(
+                    "resource sampled",
+                    extra={
+                        "stage": "pipeline",
+                        "cpu_percent": resource_sample.get("cpu_percent"),
+                        "memory_mb": resource_sample.get("memory_mb"),
+                    },
+                )
 
                 alerts = check_alerts(run_root, monitoring_cfg)
                 for alert in alerts:
-                    logger.warning("alert: " + alert.message,
-                                   extra={"stage": "pipeline",
-                                          "alert_rule": alert.rule,
-                                          "alert_value": alert.value,
-                                          "alert_threshold": alert.threshold,
-                                          "alert_batch_id": alert.batch_id,
-                                          "alert_stage": alert.stage})
+                    logger.warning(
+                        "alert: " + alert.message,
+                        extra={
+                            "stage": "pipeline",
+                            "alert_rule": alert.rule,
+                            "alert_value": alert.value,
+                            "alert_threshold": alert.threshold,
+                            "alert_batch_id": alert.batch_id,
+                            "alert_stage": alert.stage,
+                        },
+                    )
                 if alerts:
-                    logger.warning("alerts triggered",
-                                   extra={"stage": "pipeline",
-                                          "alert_count": len(alerts)})
+                    logger.warning(
+                        "alerts triggered", extra={"stage": "pipeline", "alert_count": len(alerts)}
+                    )
                 else:
-                    logger.info("no alerts",
-                                extra={"stage": "pipeline"})
+                    logger.info("no alerts", extra={"stage": "pipeline"})
             except Exception:  # noqa: BLE001
                 # 监控失败不应影响 pipeline 主流程
-                logger.warning("monitoring check failed, ignoring",
-                               extra={"stage": "pipeline"}, exc_info=True)
+                logger.warning(
+                    "monitoring check failed, ignoring", extra={"stage": "pipeline"}, exc_info=True
+                )
 
-        print(f"batch={batch_id} status={overall} run_dir={run_dir}")
+        logger.info(
+            "pipeline finished",
+            extra={"stage": "pipeline", "batch": batch_id, "status": overall, "run_dir": run_dir},
+        )
         return 0 if overall == "success" else 1
     finally:
         # 任务41：停止 HealthServer（若已启动）
         if health_server is not None:
             try:
                 health_server.stop()
-                logger.info("health server stopped",
-                            extra={"stage": "pipeline", "batch": batch_id})
+                logger.info("health server stopped", extra={"stage": "pipeline", "batch": batch_id})
             except Exception:  # noqa: BLE001
-                logger.warning("health_server.stop() raised, ignoring",
-                               extra={"stage": "pipeline"}, exc_info=True)
+                logger.warning(
+                    "health_server.stop() raised, ignoring",
+                    extra={"stage": "pipeline"},
+                    exc_info=True,
+                )
         # Phase 2b: 无论成功/失败/异常，都停止 SparkSession 释放 executor 资源。
         # 参见 docs/evolution.md §4.4.2.2 / §4.8.2。
         if spark is not None:
             try:
                 spark.stop()
-                logger.info("spark session stopped",
-                            extra={"stage": "pipeline", "batch": batch_id})
+                logger.info("spark session stopped", extra={"stage": "pipeline", "batch": batch_id})
             except Exception:  # noqa: BLE001
-                logger.warning("spark.stop() raised, ignoring",
-                               extra={"stage": "pipeline"}, exc_info=True)
+                logger.warning(
+                    "spark.stop() raised, ignoring", extra={"stage": "pipeline"}, exc_info=True
+                )
         # 任务38：清理 root logger 上由 setup_logging 添加的 handler，
         # 避免 pytest 多次调用 run_pipeline 时 handler 累积导致重复输出.
         close_logging()
@@ -754,22 +808,22 @@ def _advance_and_merge(ctx: PipelineContext, store: StateStore, logger) -> None:
     # （snapshot 段无 new_snapshot_id 时跳过，行为与 commit_watermark 等价）。
     inc_mode = ctx.config.get("incremental", {}).get("mode", "high_watermark")
     has_iceberg_snaps = bool(ctx.state.get("iceberg_snapshots"))
-    use_commit_all = (
-        inc_mode == "iceberg_snapshot_diff" and has_iceberg_snaps
-    )
+    use_commit_all = inc_mode == "iceberg_snapshot_diff" and has_iceberg_snaps
 
     if use_commit_all:
         try:
             store.commit_all(ctx.state, ctx.batch_id)
-            logger.info("watermark + iceberg snapshot id committed atomically",
-                        extra={"stage": "pipeline", "batch": ctx.batch_id})
+            logger.info(
+                "watermark + iceberg snapshot id committed atomically",
+                extra={"stage": "pipeline", "batch": ctx.batch_id},
+            )
         except Exception:  # noqa: BLE001
-            logger.warning("commit_all failed, ignoring",
-                           extra={"stage": "pipeline"}, exc_info=True)
+            logger.warning(
+                "commit_all failed, ignoring", extra={"stage": "pipeline"}, exc_info=True
+            )
     else:
         store.commit_watermark(ctx.state, ctx.batch_id)
-        logger.info("watermark committed",
-                    extra={"stage": "pipeline", "batch": ctx.batch_id})
+        logger.info("watermark committed", extra={"stage": "pipeline", "batch": ctx.batch_id})
 
     agg_dir = os.path.join(ctx.run_dir, "04_aggregates")
     if not os.path.isdir(agg_dir):
@@ -779,8 +833,7 @@ def _advance_and_merge(ctx: PipelineContext, store: StateStore, logger) -> None:
         if not _table_exists(batch_csv, ctx.config):
             continue
         if ctx.engine_backend == "spark":
-            _merge_aggregate_spark(ctx, store, name, fields, key_cols,
-                                   batch_csv, logger)
+            _merge_aggregate_spark(ctx, store, name, fields, key_cols, batch_csv, logger)
             continue
         # python/polars 路径：用 table_read 读 04_aggregates（兼容 parquet storage）
         # polars backend 下 table_read 返回 polars.DataFrame，需转 List[Dict]
@@ -796,14 +849,21 @@ def _advance_and_merge(ctx: PipelineContext, store: StateStore, logger) -> None:
                 store.save_aggregate(name, fields, [])
             continue
         merged_count = store.merge_aggregate(name, fields, new_rows, key_cols)
-        logger.info("aggregate merged",
-                    extra={"stage": "compute", "agg": name,
-                           "new": len(new_rows), "total": merged_count})
+        logger.info(
+            "aggregate merged",
+            extra={"stage": "compute", "agg": name, "new": len(new_rows), "total": merged_count},
+        )
 
 
-def _merge_aggregate_spark(ctx: PipelineContext, store: StateStore, name: str,
-                           fields: list[str], key_cols: list[str],
-                           batch_csv: str, logger) -> None:
+def _merge_aggregate_spark(
+    ctx: PipelineContext,
+    store: StateStore,
+    name: str,
+    fields: list[str],
+    key_cols: list[str],
+    batch_csv: str,
+    logger,
+) -> None:
     """Spark 分布式聚合合并：history.union(delta).groupBy(key).agg().
 
     用 ``table_read`` 读历史聚合（若存在）与本批次增量，``unionByName``
@@ -840,17 +900,20 @@ def _merge_aggregate_spark(ctx: PipelineContext, store: StateStore, name: str,
         if not _table_exists(hist_path, ctx.config):
             empty_df = spark.createDataFrame([], delta_df.schema)
             table_write(hist_path, empty_df, ctx.config, spark=ctx.spark_session)
-        logger.info("aggregate merged (spark, empty delta)",
-                    extra={"stage": "compute", "agg": name})
+        logger.info(
+            "aggregate merged (spark, empty delta)", extra={"stage": "compute", "agg": name}
+        )
         return
 
     # 数值列累加；非数值非派生列（tier/city 等）取 delta 最新值；
     # 派生列（avg_order_value/revenue_share/rank）不参与累加。
     derived_cols = {"avg_order_value", "revenue_share", "rank"}
     non_key = [f for f in fields if f not in key_cols]
-    num_cols = [f for f in non_key
-                if f not in derived_cols
-                and f not in ("tier", "city", "category", "region", "channel")]
+    num_cols = [
+        f
+        for f in non_key
+        if f not in derived_cols and f not in ("tier", "city", "category", "region", "channel")
+    ]
 
     # 辅助函数：按 fields 对齐 df 的列，缺失列用 null 填充。
     # 历史聚合产物（_merge_aggregate_spark 写回的）只含 key_cols + num_cols，
@@ -858,16 +921,14 @@ def _merge_aggregate_spark(ctx: PipelineContext, store: StateStore, name: str,
     # 报 UNRESOLVED_COLUMN。delta_df 由 compute stage 写出，含全部 fields。
     def _align_columns(df):
         existing = set(df.columns)
-        return df.select(*[
-            F.col(f) if f in existing else F.lit(None).alias(f)
-            for f in fields
-        ])
+        return df.select(*[F.col(f) if f in existing else F.lit(None).alias(f) for f in fields])
 
     if _table_exists(hist_path, ctx.config):
         hist_df = table_read(hist_path, ctx.config, spark=ctx.spark_session)
         # unionByName 按列名对齐，避免列顺序差异
         merged = (
-            _align_columns(hist_df).unionByName(_align_columns(delta_df))
+            _align_columns(hist_df)
+            .unionByName(_align_columns(delta_df))
             .groupBy(list(key_cols))
             .agg(*[F.sum(c).alias(c) for c in num_cols])
         )
@@ -889,9 +950,10 @@ def _merge_aggregate_spark(ctx: PipelineContext, store: StateStore, name: str,
     if spark_cfg.get("write_single_file", False):
         merged = merged.coalesce(1)
     total = table_write(hist_path, merged, ctx.config, spark=ctx.spark_session)
-    logger.info("aggregate merged (spark)",
-                extra={"stage": "compute", "agg": name,
-                       "new": delta_count, "total": total})
+    logger.info(
+        "aggregate merged (spark)",
+        extra={"stage": "compute", "agg": name, "new": delta_count, "total": total},
+    )
 
 
 def main(argv: list[str]) -> int:
@@ -901,12 +963,27 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--fail-at", default="")
     args = parser.parse_args(argv)
     cfg = json_load(abs_path(args.config))
+    if validate_config is not None:
+        try:
+            cfg = validate_config(cfg)
+        except ConfigValidationError as e:
+            # 退出码 2 = 配置内容非法（区别于 argparse 用法错误的退出码 2 之外的语义，
+            # 调度脚本可用 stderr 文本区分）
+            print(f"config validation error: {e}", file=sys.stderr)
+            return 2
     fail_at = args.fail_at or cfg.get("demo", {}).get("fail_at") or ""
+    # 白名单校验：仅允许合法 stage 名，防止拼写错误静默失效
+    if fail_at and fail_at not in STAGES:
+        raise ValueError(f"invalid fail_at stage {fail_at!r}; must be one of {STAGES}")
     if cfg.get("generator", {}).get("enabled", False):
         from .generator import main as gen_main
+
         meta = gen_main(cfg)
-        print("generated data: orders={} customers={} products={}".format(
-            meta["rows"]["orders"], meta["rows"]["customers"], meta["rows"]["products"]))
+        print(
+            "generated data: orders={} customers={} products={}".format(
+                meta["rows"]["orders"], meta["rows"]["customers"], meta["rows"]["products"]
+            )
+        )
     return run_pipeline(cfg, args.batch_id, fail_at)
 
 

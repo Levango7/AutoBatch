@@ -5,14 +5,14 @@
 # ────────────────────────────────────────────────────────────────
 
 # ── Stage 1: builder ────────────────────────────────────────────
-FROM python:3.13-slim AS builder
+FROM python:3.13.1-slim AS builder
 WORKDIR /build
 COPY requirements.txt .
 # 装到 /install（便于 runtime 阶段精确拷贝，不含 pip/setuptools 等工具）
 RUN pip install --no-cache-dir --target=/install -r requirements.txt
 
 # ── Stage 2: runtime ────────────────────────────────────────────
-FROM python:3.13-slim AS runtime
+FROM python:3.13.1-slim AS runtime
 WORKDIR /app
 
 # 拷贝 builder 阶段安装的依赖
@@ -30,12 +30,12 @@ COPY --chown=autobatch:autobatch main.py ./
 COPY --chown=autobatch:autobatch requirements.txt ./
 
 # 创建运行时目录并赋属主
-RUN mkdir -p run data/raw && chown -R autobatch:autobatch run data
+RUN mkdir -p run data/raw state && chown -R autobatch:autobatch run data state
 
 USER autobatch
 
-# 健康检查：验证入口模块可导入（轻量，无副作用）
+# 健康检查：入口模块可导入 + 配置可解析（与 docker-compose.yml 的 healthcheck 语义一致）
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD python -c "import src.pipeline; import sys; sys.exit(0)"
+    CMD python -c "import json, src.pipeline; json.load(open('config/pipeline.json', encoding='utf-8-sig'))"
 
 CMD ["python", "-m", "src.pipeline", "--config", "config/pipeline.json"]

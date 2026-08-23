@@ -4,7 +4,7 @@
 # 信号处理：捕获 SIGTERM/SIGINT，优雅停止 Master/Worker
 # ───────────────────────────────────────────────────────────────
 
-set -e
+set -euo pipefail
 
 echo "=========================================="
 echo " AutoBatch Spark Cluster - ${SPARK_MODE}"

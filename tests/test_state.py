@@ -8,6 +8,7 @@
 - 失败不推进：未 commit 时 get_watermark/get_snapshot_id 返回旧值
 - merge_aggregate：累加 + 派生列重算
 """
+
 from __future__ import annotations
 
 import json
@@ -234,8 +235,14 @@ def test_commit_all_equivalent_to_separate_commits(store):
     a = store_a.load()
     b = store_b.load()
     assert a["tables"]["orders"]["watermark_value"] == b["tables"]["orders"]["watermark_value"]
-    assert a["iceberg_snapshots"]["orders"]["snapshot_id"] == b["iceberg_snapshots"]["orders"]["snapshot_id"]
-    assert a["tables"]["orders"]["cumulative_row_count"] == b["tables"]["orders"]["cumulative_row_count"]
+    assert (
+        a["iceberg_snapshots"]["orders"]["snapshot_id"]
+        == b["iceberg_snapshots"]["orders"]["snapshot_id"]
+    )
+    assert (
+        a["tables"]["orders"]["cumulative_row_count"]
+        == b["tables"]["orders"]["cumulative_row_count"]
+    )
 
 
 # ----------------------------------------------------------------------
@@ -280,13 +287,19 @@ def test_merge_aggregate_appends_new_keys(store):
 def test_merge_aggregate_accumulates_existing_key(store):
     fields = ["date", "orders", "revenue"]
     # 第一次写入
-    store.merge_aggregate("kpi", fields,
-                          [{"date": "2026-01-01", "orders": "10", "revenue": "1000.0"}],
-                          key_cols=["date"])
+    store.merge_aggregate(
+        "kpi",
+        fields,
+        [{"date": "2026-01-01", "orders": "10", "revenue": "1000.0"}],
+        key_cols=["date"],
+    )
     # 第二次同 key → 累加
-    n = store.merge_aggregate("kpi", fields,
-                              [{"date": "2026-01-01", "orders": "5", "revenue": "500.0"}],
-                              key_cols=["date"])
+    n = store.merge_aggregate(
+        "kpi",
+        fields,
+        [{"date": "2026-01-01", "orders": "5", "revenue": "500.0"}],
+        key_cols=["date"],
+    )
     assert n == 1
     data, _ = store.load_aggregate("kpi")
     # CSV 读回为字符串，但数值应等于累加结果
@@ -296,14 +309,18 @@ def test_merge_aggregate_accumulates_existing_key(store):
 
 def test_merge_aggregate_recomputes_avg_order_value(store):
     fields = ["date", "orders", "revenue", "avg_order_value"]
-    store.merge_aggregate("kpi", fields,
-                          [{"date": "2026-01-01", "orders": "10", "revenue": "1000.0",
-                            "avg_order_value": "100.0"}],
-                          key_cols=["date"])
-    store.merge_aggregate("kpi", fields,
-                          [{"date": "2026-01-01", "orders": "5", "revenue": "500.0",
-                            "avg_order_value": "100.0"}],
-                          key_cols=["date"])
+    store.merge_aggregate(
+        "kpi",
+        fields,
+        [{"date": "2026-01-01", "orders": "10", "revenue": "1000.0", "avg_order_value": "100.0"}],
+        key_cols=["date"],
+    )
+    store.merge_aggregate(
+        "kpi",
+        fields,
+        [{"date": "2026-01-01", "orders": "5", "revenue": "500.0", "avg_order_value": "100.0"}],
+        key_cols=["date"],
+    )
     data, _ = store.load_aggregate("kpi")
     # orders=15, revenue=1500 → avg = 100.0
     assert float(data[0]["avg_order_value"]) == 100.0
@@ -311,12 +328,27 @@ def test_merge_aggregate_recomputes_avg_order_value(store):
 
 def test_merge_aggregate_recomputes_revenue_share_and_rank(store):
     fields = ["date", "orders", "revenue", "revenue_share", "rank"]
-    store.merge_aggregate("kpi", fields, [
-        {"date": "2026-01-01", "orders": "10", "revenue": "1000.0",
-         "revenue_share": "1.0", "rank": "1"},
-        {"date": "2026-01-02", "orders": "20", "revenue": "3000.0",
-         "revenue_share": "1.0", "rank": "1"},
-    ], key_cols=["date"])
+    store.merge_aggregate(
+        "kpi",
+        fields,
+        [
+            {
+                "date": "2026-01-01",
+                "orders": "10",
+                "revenue": "1000.0",
+                "revenue_share": "1.0",
+                "rank": "1",
+            },
+            {
+                "date": "2026-01-02",
+                "orders": "20",
+                "revenue": "3000.0",
+                "revenue_share": "1.0",
+                "rank": "1",
+            },
+        ],
+        key_cols=["date"],
+    )
     data, _ = store.load_aggregate("kpi")
     by_date = {r["date"]: r for r in data}
     # total = 4000

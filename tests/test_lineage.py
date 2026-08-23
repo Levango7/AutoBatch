@@ -11,6 +11,7 @@
 Manifest 没有 from_dict 类方法，"往返"测试以 to_dict → JSON 序列化 →
 json_load 反序列化 → 与原 to_dict 相等的形式验证。
 """
+
 from __future__ import annotations
 
 import json
@@ -73,8 +74,7 @@ def test_add_stage_appends_record():
 
 def test_add_stage_with_error():
     m = Manifest("B-1", "d", "/tmp/x")
-    m.add_stage("compute", "failed", 100, 0, 30, "logs/compute.jsonl",
-                error="ZeroDivisionError")
+    m.add_stage("compute", "failed", 100, 0, 30, "logs/compute.jsonl", error="ZeroDivisionError")
     assert m.stages[0]["error"] == "ZeroDivisionError"
 
 
@@ -169,9 +169,19 @@ def test_to_dict_keys_complete():
     m = Manifest("B-1", "digest", "/tmp/x")
     d = m.to_dict()
     expected_keys = {
-        "batch_id", "pipeline_version", "config_digest", "started_at",
-        "finished_at", "status", "run_dir", "source", "stages",
-        "artifacts", "lineage", "quality", "error",
+        "batch_id",
+        "pipeline_version",
+        "config_digest",
+        "started_at",
+        "finished_at",
+        "status",
+        "run_dir",
+        "source",
+        "stages",
+        "artifacts",
+        "lineage",
+        "quality",
+        "error",
     }
     assert set(d.keys()) == expected_keys
 
@@ -203,8 +213,7 @@ def test_to_dict_json_roundtrip(tmp_path):
     m.set_source("ecommerce", [{"name": "orders.csv", "rows": 100}])
     m.add_stage("ingest", "success", 100, 100, 50, "logs/ingest.jsonl")
     m.add_stage("validate", "success", 100, 95, 20, "logs/validate.jsonl")
-    m.add_artifact("orders_clean.csv", "csv", 95, "sha256hex",
-                   extra={"compression": "zstd"})
+    m.add_artifact("orders_clean.csv", "csv", 95, "sha256hex", extra={"compression": "zstd"})
     m.add_edge("orders_clean.csv", ["orders_raw.csv"])
     m.set_quality({"dq_score": 0.98, "rules": 10})
     m.finish("success")

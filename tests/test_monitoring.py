@@ -9,6 +9,7 @@
   6. HealthServer start/stop（启动后可访问 /health，返回 JSON）
   7. monitoring.enabled=false 时不启用任何监控
 """
+
 from __future__ import annotations
 
 import json
@@ -50,8 +51,9 @@ class TestMetricsSampler:
         result = sampler.sample()
         for key in ("cpu_percent", "memory_mb"):
             v = result[key]
-            assert v is None or isinstance(v, float), \
+            assert v is None or isinstance(v, float), (
                 f"{key} 应为 float 或 None，实际 {type(v)}: {v}"
+            )
 
     def test_sample_does_not_raise(self):
         """sample() 不应抛异常（即使 psutil 不可用）."""
@@ -73,10 +75,20 @@ class TestAlertChecker:
             "dq_score": 0.95,  # 0-1 小数，规范化后 95.0
             "total_duration_ms": 1000,
             "stages": [
-                {"name": "ingest", "status": "success", "duration_ms": 100,
-                 "rows_in": 0, "rows_out": 100},
-                {"name": "validate", "status": "success", "duration_ms": 200,
-                 "rows_in": 100, "rows_out": 95},
+                {
+                    "name": "ingest",
+                    "status": "success",
+                    "duration_ms": 100,
+                    "rows_in": 0,
+                    "rows_out": 100,
+                },
+                {
+                    "name": "validate",
+                    "status": "success",
+                    "duration_ms": 200,
+                    "rows_in": 100,
+                    "rows_out": 95,
+                },
             ],
         }
         m.update(overrides)
@@ -120,12 +132,24 @@ class TestAlertChecker:
         thresholds = {"stage_duration_max_seconds": 0.5}  # 500ms
         checker = AlertChecker(thresholds)
         # validate stage duration_ms=2000 → 2.0s > 0.5s
-        metrics = self._base_metrics(stages=[
-            {"name": "ingest", "status": "success", "duration_ms": 100,
-             "rows_in": 0, "rows_out": 100},
-            {"name": "validate", "status": "success", "duration_ms": 2000,
-             "rows_in": 100, "rows_out": 95},
-        ])
+        metrics = self._base_metrics(
+            stages=[
+                {
+                    "name": "ingest",
+                    "status": "success",
+                    "duration_ms": 100,
+                    "rows_in": 0,
+                    "rows_out": 100,
+                },
+                {
+                    "name": "validate",
+                    "status": "success",
+                    "duration_ms": 2000,
+                    "rows_in": 100,
+                    "rows_out": 95,
+                },
+            ]
+        )
         alerts = checker.check(metrics)
         dur_alerts = [a for a in alerts if a.rule == "stage_duration_max_seconds"]
         assert len(dur_alerts) == 1
@@ -197,33 +221,63 @@ class TestCheckAlerts:
         # 批次 1：DQ 低
         b1 = os.path.join(run_dir, "B-001")
         os.makedirs(b1, exist_ok=True)
-        json_save(os.path.join(b1, "metrics.json"), {
-            "batch_id": "B-001",
-            "status": "success",
-            "dq_score": 0.50,  # 50.0 < 80.0
-            "stages": [{"name": "ingest", "status": "success",
-                        "duration_ms": 100, "rows_in": 0, "rows_out": 100}],
-        })
+        json_save(
+            os.path.join(b1, "metrics.json"),
+            {
+                "batch_id": "B-001",
+                "status": "success",
+                "dq_score": 0.50,  # 50.0 < 80.0
+                "stages": [
+                    {
+                        "name": "ingest",
+                        "status": "success",
+                        "duration_ms": 100,
+                        "rows_in": 0,
+                        "rows_out": 100,
+                    }
+                ],
+            },
+        )
         # 批次 2：DQ 高
         b2 = os.path.join(run_dir, "B-002")
         os.makedirs(b2, exist_ok=True)
-        json_save(os.path.join(b2, "metrics.json"), {
-            "batch_id": "B-002",
-            "status": "success",
-            "dq_score": 0.95,
-            "stages": [{"name": "ingest", "status": "success",
-                        "duration_ms": 100, "rows_in": 0, "rows_out": 100}],
-        })
+        json_save(
+            os.path.join(b2, "metrics.json"),
+            {
+                "batch_id": "B-002",
+                "status": "success",
+                "dq_score": 0.95,
+                "stages": [
+                    {
+                        "name": "ingest",
+                        "status": "success",
+                        "duration_ms": 100,
+                        "rows_in": 0,
+                        "rows_out": 100,
+                    }
+                ],
+            },
+        )
         # 批次 3：失败
         b3 = os.path.join(run_dir, "B-003")
         os.makedirs(b3, exist_ok=True)
-        json_save(os.path.join(b3, "metrics.json"), {
-            "batch_id": "B-003",
-            "status": "failed",
-            "dq_score": 0.90,
-            "stages": [{"name": "ingest", "status": "failed",
-                        "duration_ms": 100, "rows_in": 0, "rows_out": 0}],
-        })
+        json_save(
+            os.path.join(b3, "metrics.json"),
+            {
+                "batch_id": "B-003",
+                "status": "failed",
+                "dq_score": 0.90,
+                "stages": [
+                    {
+                        "name": "ingest",
+                        "status": "failed",
+                        "duration_ms": 100,
+                        "rows_in": 0,
+                        "rows_out": 0,
+                    }
+                ],
+            },
+        )
         return run_dir
 
     def test_scan_multiple_batches(self, run_dir_with_batches):
@@ -279,6 +333,7 @@ class TestCheckAlerts:
 class TestHealthServer:
     def _find_free_port(self):
         import socket
+
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))
             return s.getsockname()[1]
@@ -290,15 +345,18 @@ class TestHealthServer:
         os.makedirs(run_dir, exist_ok=True)
         b = os.path.join(run_dir, "B-health-001")
         os.makedirs(b, exist_ok=True)
-        json_save(os.path.join(b, "metrics.json"), {
-            "batch_id": "B-health-001",
-            "status": "success",
-            "started_at": "2026-08-16T10:00:00Z",
-            "finished_at": "2026-08-16T10:00:01Z",
-            "total_duration_ms": 1000,
-            "dq_score": 0.95,
-            "stages": [],
-        })
+        json_save(
+            os.path.join(b, "metrics.json"),
+            {
+                "batch_id": "B-health-001",
+                "status": "success",
+                "started_at": "2026-08-16T10:00:00Z",
+                "finished_at": "2026-08-16T10:00:01Z",
+                "total_duration_ms": 1000,
+                "dq_score": 0.95,
+                "stages": [],
+            },
+        )
         return run_dir
 
     def test_start_stop(self, health_run_dir):
@@ -387,10 +445,15 @@ class TestBackwardCompat:
         os.makedirs(run_dir, exist_ok=True)
         b = os.path.join(run_dir, "B-001")
         os.makedirs(b, exist_ok=True)
-        json_save(os.path.join(b, "metrics.json"), {
-            "batch_id": "B-001", "status": "failed", "dq_score": 0.1,
-            "stages": [],
-        })
+        json_save(
+            os.path.join(b, "metrics.json"),
+            {
+                "batch_id": "B-001",
+                "status": "failed",
+                "dq_score": 0.1,
+                "stages": [],
+            },
+        )
         cfg = {"enabled": False, "alerts": {"dq_score_min": 80.0}}
         assert check_alerts(run_dir, cfg) == []
 
@@ -429,6 +492,7 @@ class TestPipelineIntegration:
         try:
             # 准备小规模数据
             from src.generator import main as gen_main
+
             cfg = json_load(abs_path("config/pipeline_small.json"))
             data_dir = os.path.join(work_dir, "data", "raw")
             cfg["generator"]["output_dir"] = data_dir
@@ -488,6 +552,7 @@ class TestPipelineIntegration:
         work_dir = self._make_run_dir(tmp_path)
         try:
             from src.generator import main as gen_main
+
             cfg = json_load(abs_path("config/pipeline_small.json"))
             data_dir = os.path.join(work_dir, "data", "raw")
             cfg["generator"]["output_dir"] = data_dir

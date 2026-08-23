@@ -14,3 +14,9 @@ pyspark>=4.0,<5.0      # Phase 2b Spark 分布式加速（engine.backend="spark"
 pyarrow>=14.0,<20.0    # Phase 3 湖存储（storage.backend="parquet" 时需要；Parquet 读写 + S3/MinIO 客户端）
 minio>=7.0,<8.0        # Phase 3 湖存储（MinIO SDK；bucket 初始化与迁移脚本用）
 psutil>=5.9,<7.0       # 任务41 监控告警（monitoring.enabled=true 时可选；不可用则降级返回 None）
+pydantic>=2.0,<3.0     # 配置校验（src/config_schema.py；pipeline.py 导入失败时自动降级跳过校验）
+# 注意：iceberg 增量扫描用的 incremental_append_scan API 仅存在于 0.12 系列，
+# 当前只有预发布版。精确 pin 预发布版本 pip 可直接安装（无需 --pre）。
+# 0.12 正式版发布后应改为 pyiceberg>=0.12.0,<0.13。
+pyiceberg==0.12.0rc1  # Phase 4+5 湖表 ACID + time travel + snapshot diff（storage.backend="iceberg" 时需要）
+sqlalchemy>=2.0,<3.0    # pyiceberg SQL catalog 依赖（storage.backend="iceberg" + catalog_type="sql" 时需要）

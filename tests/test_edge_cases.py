@@ -2,6 +2,7 @@
 
 覆盖 src 各模块对边界输入的处理，确保不抛未捕获异常或产生静默错误结果.
 """
+
 from __future__ import annotations
 
 import os
@@ -126,8 +127,7 @@ def test_gen_orders_missing_defect_keys():
     customers = gen_customers(rng, 5, BASE_DATE)
     products = gen_products(rng, 5)
     # 只配 missing，其他键缺失
-    rows = gen_orders(rng, 50, customers, products, BASE_DATE,
-                      {"missing": 0.1}, 90)
+    rows = gen_orders(rng, 50, customers, products, BASE_DATE, {"missing": 0.1}, 90)
     assert len(rows) == 50
 
 
@@ -137,8 +137,7 @@ def test_metrics_recorder_record_stage_no_extra():
     r.record_stage("ingest", "success", 10, 100, 100)
     assert r.stages[0]["name"] == "ingest"
     # 不应有额外字段
-    assert set(r.stages[0].keys()) == {"name", "status", "duration_ms",
-                                        "rows_in", "rows_out"}
+    assert set(r.stages[0].keys()) == {"name", "status", "duration_ms", "rows_in", "rows_out"}
 
 
 # ----------------------------------------------------------------------
@@ -271,9 +270,9 @@ def test_merge_aggregate_empty_new_rows(tmp_path):
 def test_merge_aggregate_single_row(tmp_path):
     """merge_aggregate 单行 new_rows 应正常合并."""
     s = StateStore(str(tmp_path / "state"))
-    n = s.merge_aggregate("kpi", ["date", "orders"],
-                          [{"date": "2026-01-01", "orders": "5"}],
-                          key_cols=["date"])
+    n = s.merge_aggregate(
+        "kpi", ["date", "orders"], [{"date": "2026-01-01", "orders": "5"}], key_cols=["date"]
+    )
     assert n == 1
     data, _ = s.load_aggregate("kpi")
     assert len(data) == 1
@@ -282,18 +281,18 @@ def test_merge_aggregate_single_row(tmp_path):
 def test_merge_aggregate_none_numeric_value(tmp_path):
     """merge_aggregate 行中数值字段为 None 应不抛异常（_is_numeric(None)=False）."""
     s = StateStore(str(tmp_path / "state"))
-    n = s.merge_aggregate("kpi", ["date", "orders"],
-                          [{"date": "2026-01-01", "orders": None}],
-                          key_cols=["date"])
+    n = s.merge_aggregate(
+        "kpi", ["date", "orders"], [{"date": "2026-01-01", "orders": None}], key_cols=["date"]
+    )
     assert n == 1
 
 
 def test_merge_aggregate_empty_string_numeric_value(tmp_path):
     """merge_aggregate 行中数值字段为空字符串应不抛异常."""
     s = StateStore(str(tmp_path / "state"))
-    n = s.merge_aggregate("kpi", ["date", "orders"],
-                          [{"date": "2026-01-01", "orders": ""}],
-                          key_cols=["date"])
+    n = s.merge_aggregate(
+        "kpi", ["date", "orders"], [{"date": "2026-01-01", "orders": ""}], key_cols=["date"]
+    )
     assert n == 1
 
 

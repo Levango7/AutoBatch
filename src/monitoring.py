@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 from dataclasses import dataclass
@@ -40,6 +41,7 @@ def _try_psutil() -> Optional[Any]:
     """lazy import psutil；不可用返回 None."""
     try:
         import psutil  # noqa: WPS433
+
         return psutil
     except ImportError:
         return None
@@ -49,6 +51,7 @@ def _try_resource_module() -> Optional[Any]:
     """lazy import resource（Unix-only）；不可用返回 None."""
     try:
         import resource  # noqa: WPS433
+
         return resource
     except ImportError:
         return None
@@ -81,12 +84,14 @@ class MetricsSampler:
         if self._psutil is not None:
             try:
                 proc = self._psutil.Process()
-                cpu = proc.cpu_percent(interval=None)
+                # interval=None 首次调用因无基线恒返回 0.0；用短阻塞间隔
+                # （0.1s）拿到真实采样值，代价可忽略
+                cpu = proc.cpu_percent(interval=0.1)
                 mem = proc.memory_info().rss / (1024.0 * 1024.0)
                 return {"cpu_percent": float(cpu), "memory_mb": float(mem)}
             except Exception:  # noqa: BLE001
                 # psutil 调用失败时降级
-                pass
+                logging.getLogger(__name__).debug("psutil CPU/mem info unavailable")
 
         # 降级到 resource 模块（Unix-only）
         if self._resource is not None:
@@ -98,7 +103,7 @@ class MetricsSampler:
                 mem_mb = usage.ru_maxrss / 1024.0
                 return {"cpu_percent": None, "memory_mb": float(mem_mb)}
             except Exception:  # noqa: BLE001
-                pass
+                logging.getLogger(__name__).debug("resource.getrusage unavailable")
 
         # 完全降级：Windows 无 psutil 时返回 None 值
         return {"cpu_percent": None, "memory_mb": None}
@@ -175,14 +180,16 @@ class AlertChecker:
                 # 也可能是 0-100（如 99.66）.统一规范化为 0-100.
                 dq_normalized = self._normalize_dq(dq_score)
                 if dq_normalized < dq_min:
-                    alerts.append(Alert(
-                        severity="warning",
-                        rule="dq_score_min",
-                        message=f"DQ Score {dq_normalized} 低于阈值 {dq_min}",
-                        value=dq_normalized,
-                        threshold=dq_min,
-                        batch_id=batch_id,
-                    ))
+                    alerts.append(
+                        Alert(
+                            severity="warning",
+                            rule="dq_score_min",
+                            message=f"DQ Score {dq_normalized} 低于阈值 {dq_min}",
+                            value=dq_normalized,
+                            threshold=dq_min,
+                            batch_id=batch_id,
+                        )
+                    )
 
         # 2. 单阶段耗时超阈值
         dur_max = self.thresholds.get("stage_duration_max_seconds")
@@ -193,16 +200,19 @@ class AlertChecker:
                     continue
                 dur_sec = dur_ms / 1000.0
                 if dur_sec > dur_max:
-                    alerts.append(Alert(
-                        severity="warning",
-                        rule="stage_duration_max_seconds",
-                        message="stage {} 耗时 {:.1f}s 超过阈值 {}s".format(
-                            stage.get("name", "?"), dur_sec, dur_max),
-                        value=dur_sec,
-                        threshold=dur_max,
-                        batch_id=batch_id,
-                        stage=stage.get("name"),
-                    ))
+                    alerts.append(
+                        Alert(
+                            severity="warning",
+                            rule="stage_duration_max_seconds",
+                            message="stage {} 耗时 {:.1f}s 超过阈值 {}s".format(
+                                stage.get("name", "?"), dur_sec, dur_max
+                            ),
+                            value=dur_sec,
+                            threshold=dur_max,
+                            batch_id=batch_id,
+                            stage=stage.get("name"),
+                        )
+                    )
 
         # 3. 内存占用超阈值
         mem_max = self.thresholds.get("memory_usage_max_mb")
@@ -211,14 +221,16 @@ class AlertChecker:
             rs = metrics.get("resource_sample") or {}
             mem_mb = rs.get("memory_mb")
             if mem_mb is not None and mem_mb > mem_max:
-                alerts.append(Alert(
-                    severity="warning",
-                    rule="memory_usage_max_mb",
-                    message=f"内存占用 {mem_mb:.1f}MB 超过阈值 {mem_max}MB",
-                    value=mem_mb,
-                    threshold=mem_max,
-                    batch_id=batch_id,
-                ))
+                alerts.append(
+                    Alert(
+                        severity="warning",
+                        rule="memory_usage_max_mb",
+                        message=f"内存占用 {mem_mb:.1f}MB 超过阈值 {mem_max}MB",
+                        value=mem_mb,
+                        threshold=mem_max,
+                        batch_id=batch_id,
+                    )
+                )
 
         # 4. 失败率超阈值（基于单批次 status）
         fail_max = self.thresholds.get("failure_rate_max_percent")
@@ -227,14 +239,16 @@ class AlertChecker:
             # 单批次失败率：failed=100%，success=0%.
             # 多批次聚合失败率由 check_alerts 在扫描多个批次时计算.
             if status == "failed":
-                alerts.append(Alert(
-                    severity="warning",
-                    rule="failure_rate_max_percent",
-                    message=f"批次状态为 failed（失败率 100% 超过阈值 {fail_max}%）",
-                    value=100.0,
-                    threshold=fail_max,
-                    batch_id=batch_id,
-                ))
+                alerts.append(
+                    Alert(
+                        severity="warning",
+                        rule="failure_rate_max_percent",
+                        message=f"批次状态为 failed（失败率 100% 超过阈值 {fail_max}%）",
+                        value=100.0,
+                        threshold=fail_max,
+                        batch_id=batch_id,
+                    )
+                )
 
         return alerts
 
@@ -332,13 +346,15 @@ def check_alerts(run_dir: str, monitoring_cfg: dict[str, Any]) -> list[Alert]:
             if rate > fail_max and failed > 0:
                 # 仅当聚合失败率超阈值时追加一条聚合告警；
                 # 单批次失败告警已由 AlertChecker.check 产生.
-                all_alerts.append(Alert(
-                    severity="warning",
-                    rule="failure_rate_max_percent",
-                    message=f"最近 {len(statuses)} 个批次失败率 {rate:.1f}% 超过阈值 {fail_max}%",
-                    value=rate,
-                    threshold=fail_max,
-                ))
+                all_alerts.append(
+                    Alert(
+                        severity="warning",
+                        rule="failure_rate_max_percent",
+                        message=f"最近 {len(statuses)} 个批次失败率 {rate:.1f}% 超过阈值 {fail_max}%",
+                        value=rate,
+                        threshold=fail_max,
+                    )
+                )
 
     return all_alerts
 
@@ -367,14 +383,16 @@ def _build_health_response(run_dir: str) -> dict[str, Any]:
         m = _load_metrics(bd)
         if m is None:
             continue
-        batches.append({
-            "batch_id": m.get("batch_id"),
-            "status": m.get("status"),
-            "started_at": m.get("started_at"),
-            "finished_at": m.get("finished_at"),
-            "total_duration_ms": m.get("total_duration_ms"),
-            "dq_score": m.get("dq_score"),
-        })
+        batches.append(
+            {
+                "batch_id": m.get("batch_id"),
+                "status": m.get("status"),
+                "started_at": m.get("started_at"),
+                "finished_at": m.get("finished_at"),
+                "total_duration_ms": m.get("total_duration_ms"),
+                "dq_score": m.get("dq_score"),
+            }
+        )
 
     total = len(batches)
     success = sum(1 for b in batches if b.get("status") == "success")
@@ -433,10 +451,11 @@ class HealthServer:
         class _Handler(BaseHTTPRequestHandler):
             def log_message(self, format, *args):  # noqa: A002
                 # 静默访问日志，避免污染 stdout
-                pass
+                ...
 
             def do_GET(self):  # noqa: N802
-                if self.path == "/health":
+                # 忽略查询串（/health?probe=1 这类探针请求同样命中）
+                if self.path.split("?", 1)[0] == "/health":
                     try:
                         body = _build_health_response(server_ref.run_dir)
                         payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
@@ -446,6 +465,7 @@ class HealthServer:
                         self.end_headers()
                         self.wfile.write(payload)
                     except Exception:  # noqa: BLE001
+                        logging.getLogger(__name__).debug("HTTP response write failed")
                         self.send_response(500)
                         self.send_header("Content-Type", "application/json")
                         self.end_headers()
@@ -459,8 +479,16 @@ class HealthServer:
         try:
             self._server = ThreadingHTTPServer((self.host, self.port), _Handler)
             self._server.daemon_threads = True
-        except OSError:
-            # 端口被占用等：标记未启动，start 失败但不抛
+        except OSError as e:
+            # 端口被占用等：标记未启动，start 失败但不抛。
+            # 必须打 warning——否则调用方打出 "health server started" 成功日志，
+            # 监控静默失效且无法诊断。
+            logging.getLogger(__name__).warning(
+                "health server failed to bind %s:%s (%s) — /health endpoint unavailable",
+                self.host,
+                self.port,
+                e,
+            )
             self._server = None
             return
 
@@ -481,15 +509,16 @@ class HealthServer:
                 self._server.shutdown()
                 self._server.server_close()
             except Exception:  # noqa: BLE001
-                pass
-            self._server = None
+                logging.getLogger(__name__).debug("server shutdown raised")
         if self._thread is not None:
             # daemon 线程，join 短超时避免阻塞
             try:
                 self._thread.join(timeout=2.0)
             except Exception:  # noqa: BLE001
-                pass
-            self._thread = None
+                logging.getLogger(__name__).debug("thread join raised")
+        # 重置状态，允许 stop 后再次 start（幂等重启）
+        self._server = None
+        self._thread = None
 
     def is_running(self) -> bool:
         """服务器是否在运行."""

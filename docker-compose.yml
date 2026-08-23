@@ -1,6 +1,7 @@
 # ── AutoBatch Pipeline 编排 ─────────────────────────────────────
 # 单服务：pipeline（python:3.13-slim + 多阶段构建）
-# 挂载 run/data/config 卷，便于宿主机查看产物与切换配置
+# 挂载 run/data/state/config 卷：run=批次产物，data=源/输出数据，
+# state=增量水位 + Iceberg SQL catalog（不挂载则容器重建后增量元数据丢失）
 # ────────────────────────────────────────────────────────────────
 
 services:
@@ -11,13 +12,18 @@ services:
     volumes:
       - ./run:/app/run
       - ./data:/app/data
+      - ./state:/app/state
       - ./config:/app/config
     # 注：不重复 Dockerfile CMD；如需覆盖配置，用 command 指定
     # command: ["python", "-m", "src.pipeline", "--config", "config/pipeline_small.json"]
-    restart: unless-stopped
+    # 批处理任务跑完即退出（exit 0），不能配 restart（否则成功后无限重跑）。
+    # 周期性调度应由外部 cron/Airflow 触发 docker compose run。
+    restart: "no"
     healthcheck:
-      # 与 Dockerfile HEALTHCHECK 一致；compose 层显式声明便于编排查看
-      test: ["CMD", "python", "-c", "import src.pipeline; import sys; sys.exit(0)"]
+      # 真实检查：配置可解析 + pipeline 模块可导入（对一次性批处理任务，
+      # 这比探测长驻端点更有意义；/health HTTP 端点需 monitoring 开启且
+      # 容器内进程存活，批处理场景不适用）
+      test: ["CMD-SHELL", "python -c \"import json, src.pipeline; json.load(open('config/pipeline.json', encoding='utf-8-sig'))\""]
       interval: 30s
       timeout: 10s
       retries: 3

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AutoBatch 数据质量仪表盘 · B-20260815-080941-AB8A9F</title>
+<title>AutoBatch 数据质量仪表盘</title>
 <style>
   /* 主题变量：Light（默认） */
   :root {
@@ -75,6 +75,18 @@
   svg text { fill: var(--ink); }
   svg .axis-text { fill: var(--muted); }
   svg .grid-line { stroke: var(--grid); }
+  /* 血缘图 / 趋势图专用：全部走主题变量，避免暗色下深底画深色元素 */
+  svg .node-box { fill: var(--soft); stroke: var(--ink); }
+  svg .node-box-hollow { fill: var(--bg); stroke: var(--ink); }
+  svg .node-box-warn { fill: var(--bg); stroke: var(--warn); }
+  svg .edge-line { stroke: var(--ink); }
+  svg .edge-warn { stroke: var(--warn); }
+  svg .arrow-head { fill: var(--ink); }
+  svg .warn-text { fill: var(--warn); }
+  svg .area-fill { fill: var(--note-bg); }
+  svg .line-stroke { stroke: var(--accent); }
+  svg .line-dot { fill: var(--accent); }
+  svg .chart-title { fill: var(--ink); font-weight: 600; }
   svg .axis-line { stroke: var(--line); }
 </style>
 </head>
@@ -84,7 +96,7 @@
 <header>
   <button class="theme-toggle" id="themeToggle" type="button" aria-label="切换主题">🌙 深色</button>
   <h1>AutoBatch · 数据质量仪表盘</h1>
-  <div class="meta">批次 <b>B-20260815-080941-AB8A9F</b> ｜ AutoBatch v1.0.0 ｜ 生成于 2026-08-15 ｜ 状态：<b class="ok">success</b> ｜ 数据源：ecommerce-demo（orders 20,200 / customers 3,000 / products 200）</div>
+  <div class="meta" id="batchMeta">加载中…</div>
 </header>
 
 <h2>一、批次 KPI</h2>
@@ -175,28 +187,28 @@
 <figure>
 <svg viewBox="0 0 960 150" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, PingFang SC, Microsoft YaHei, sans-serif" font-size="12">
   <defs>
-    <marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a1a1a"/></marker>
+    <marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="arrow-head"/></marker>
   </defs>
-  <rect x="10" y="30" width="150" height="46" rx="3" fill="#f7f7f7" stroke="#1a1a1a"/>
+  <rect x="10" y="30" width="150" height="46" rx="3" class="node-box"/>
   <text x="85" y="48" text-anchor="middle">01_raw/orders.csv</text>
-  <text x="85" y="64" text-anchor="middle" fill="#6b6b6b">sha256:4EDA7A88…</text>
-  <rect x="210" y="30" width="150" height="46" rx="3" fill="#f7f7f7" stroke="#1a1a1a"/>
+  <text x="85" y="64" text-anchor="middle" class="axis-text">sha256:4EDA7A88…</text>
+  <rect x="210" y="30" width="150" height="46" rx="3" class="node-box"/>
   <text x="285" y="48" text-anchor="middle">02_valid/valid_orders.csv</text>
-  <text x="285" y="64" text-anchor="middle" fill="#6b6b6b">sha256:A284938C…</text>
-  <rect x="410" y="30" width="170" height="46" rx="3" fill="#f7f7f7" stroke="#1a1a1a"/>
+  <text x="285" y="64" text-anchor="middle" class="axis-text">sha256:A284938C…</text>
+  <rect x="410" y="30" width="170" height="46" rx="3" class="node-box"/>
   <text x="495" y="48" text-anchor="middle">03_clean/orders_clean.csv</text>
-  <text x="495" y="64" text-anchor="middle" fill="#6b6b6b">sha256:E0C2CAF5…</text>
-  <rect x="630" y="14" width="140" height="40" rx="3" fill="#ffffff" stroke="#1a1a1a"/>
+  <text x="495" y="64" text-anchor="middle" class="axis-text">sha256:E0C2CAF5…</text>
+  <rect x="630" y="14" width="140" height="40" rx="3" class="node-box-hollow"/>
   <text x="700" y="39" text-anchor="middle">04_aggregates/*</text>
-  <rect x="630" y="62" width="140" height="40" rx="3" fill="#ffffff" stroke="#1a1a1a"/>
+  <rect x="630" y="62" width="140" height="40" rx="3" class="node-box-hollow"/>
   <text x="700" y="87" text-anchor="middle">05_output/orders_final.csv</text>
-  <line x1="160" y1="53" x2="208" y2="53" stroke="#1a1a1a" stroke-width="1.5" marker-end="url(#a3)"/>
-  <line x1="360" y1="53" x2="408" y2="53" stroke="#1a1a1a" stroke-width="1.5" marker-end="url(#a3)"/>
-  <line x1="580" y1="48" x2="628" y2="34" stroke="#1a1a1a" stroke-width="1.2" marker-end="url(#a3)"/>
-  <line x1="580" y1="58" x2="628" y2="82" stroke="#1a1a1a" stroke-width="1.2" marker-end="url(#a3)"/>
-  <rect x="210" y="92" width="150" height="36" rx="3" fill="#ffffff" stroke="#b00020"/>
-  <text x="285" y="114" text-anchor="middle" fill="#b00020">quarantine/（1,132 行）</text>
-  <line x1="285" y1="78" x2="285" y2="90" stroke="#b00020" stroke-width="1" stroke-dasharray="3 2"/>
+  <line x1="160" y1="53" x2="208" y2="53" class="edge-line" stroke-width="1.5" marker-end="url(#a3)"/>
+  <line x1="360" y1="53" x2="408" y2="53" class="edge-line" stroke-width="1.5" marker-end="url(#a3)"/>
+  <line x1="580" y1="48" x2="628" y2="34" class="edge-line" stroke-width="1.2" marker-end="url(#a3)"/>
+  <line x1="580" y1="58" x2="628" y2="82" class="edge-line" stroke-width="1.2" marker-end="url(#a3)"/>
+  <rect x="210" y="92" width="150" height="36" rx="3" class="node-box-warn"/>
+  <text x="285" y="114" text-anchor="middle" class="warn-text">quarantine/（1,132 行）</text>
+  <line x1="285" y1="78" x2="285" y2="90" class="edge-warn" stroke-width="1" stroke-dasharray="3 2"/>
 </svg>
 <figcaption>图 3 · 表级血缘：本批次 20 份产物、15 条血缘边；任一行可沿批次号与来源标记回溯</figcaption>
 </figure>
@@ -225,7 +237,7 @@
 </div>
 <div class="note">从 <b>run/&lt;batch&gt;/04_aggregates/kpi.json</b> 读取各批次聚合 KPI（订单数 / 销售件数 / 总营收 / 客单价），柱状图对比。可切换指标；缺 KPI 的批次不绘制。</div>
 
-<footer>数据来源：run/B-20260815-080941-AB8A9F/（manifest.json / quality_summary.json / 04_aggregates/）｜ 口径：营收为清洗后订单 total_amount 之和，异常标记订单计入营收 ｜ 本页自包含，可离线打开 ｜ 跨批次数据由 dashboard/data.js 提供（运行 <code>python dashboard/build_data.py</code> 重新生成）</footer>
+<footer id="dashboardFooter">数据来源：run/&lt;batch&gt;/（manifest.json / quality_summary.json / 04_aggregates/）｜ 口径：营收为清洗后订单 total_amount 之和，异常标记订单计入营收 ｜ 本页自包含，可离线打开 ｜ 跨批次数据由 dashboard/data.js 提供（运行 <code>python dashboard/build_data.py</code> 重新生成）</footer>
 </div>
 
 <script>
@@ -276,17 +288,17 @@
   for (var g = 0; g <= 4; g++) {
     var gy = P.t + ih - g * ih / 4;
     var gv = (maxV * g / 4 / 10000).toFixed(0) + '万';
-    svg += '<line x1="' + P.l + '" y1="' + gy + '" x2="' + (W - P.r) + '" y2="' + gy + '" stroke="#e5e5e5" stroke-width="1"/>';
-    svg += '<text x="' + (P.l - 8) + '" y="' + (gy + 4) + '" text-anchor="end" fill="#6b6b6b">' + gv + '</text>';
+    svg += '<line x1="' + P.l + '" y1="' + gy + '" x2="' + (W - P.r) + '" y2="' + gy + '" class="grid-line" stroke-width="1"/>';
+    svg += '<text x="' + (P.l - 8) + '" y="' + (gy + 4) + '" text-anchor="end" class="axis-text">' + gv + '</text>';
   }
-  svg += '<path d="' + area + '" fill="#eef4ff"/>';
-  svg += '<path d="' + line + '" fill="none" stroke="#1a56db" stroke-width="1.8"/>';
+  svg += '<path d="' + area + '" class="area-fill"/>';
+  svg += '<path d="' + line + '" fill="none" class="line-stroke" stroke-width="1.8"/>';
   var idx = [0, Math.floor(daily.length / 2), daily.length - 1];
   idx.forEach(function (i) {
-    svg += '<circle cx="' + x(i) + '" cy="' + y(daily[i][3]) + '" r="2.6" fill="#1a56db"/>';
-    svg += '<text x="' + x(i) + '" y="' + (H - 12) + '" text-anchor="middle" fill="#6b6b6b">' + daily[i][0].slice(5) + '</text>';
+    svg += '<circle cx="' + x(i) + '" cy="' + y(daily[i][3]) + '" r="2.6" class="line-dot"/>';
+    svg += '<text x="' + x(i) + '" y="' + (H - 12) + '" text-anchor="middle" class="axis-text">' + daily[i][0].slice(5) + '</text>';
   });
-  svg += '<text x="' + (P.l + iw / 2) + '" y="' + (H - 14) + '" text-anchor="middle" fill="#1a1a1a" font-weight="600">' + daily[0][0] + ' → ' + daily[daily.length - 1][0] + ' 每日营收</text>';
+  svg += '<text x="' + (P.l + iw / 2) + '" y="' + (H - 14) + '" text-anchor="middle" class="chart-title">' + daily[0][0] + ' → ' + daily[daily.length - 1][0] + ' 每日营收</text>';
   svg += '</svg>';
   document.getElementById('trend').innerHTML = svg;
 
@@ -689,6 +701,30 @@
 
   initTheme();
   renderAll();
+
+  /* ---------- 动态标题与 meta ---------- */
+  (function updateMeta() {
+    var s = DATA && DATA.summary ? DATA.summary : null;
+    var batches = DATA && DATA.batches ? DATA.batches : [];
+    var latest = batches.length > 0 ? batches[batches.length - 1] : null;
+    var metaEl  = document.getElementById('batchMeta');
+    var footerEl = document.getElementById('dashboardFooter');
+    if (latest) {
+      var statusCls = latest.status === 'success' ? 'ok' : 'bad';
+      var statusTxt = latest.status === 'success' ? 'success' : latest.status;
+      var d = latest.startedAt ? latest.startedAt.slice(0, 10) : '—';
+      // s 可能为 null（data.js 有 batches 但缺 summary），用局部兜底而非直接取字段
+      var totalB = s ? s.totalBatches : batches.length;
+      var okB = s ? s.successBatches : batches.filter(function (b) { return b.status === 'success'; }).length;
+      var badB = s ? s.failedBatches : (totalB - okB);
+      metaEl.innerHTML = '最新批次 <b>' + esc(latest.batchId) + '</b> ｜ AutoBatch v1.5.0 ｜ 运行于 ' + esc(d) + ' ｜ 状态：<b class="' + statusCls + '">' + esc(statusTxt) + '</b> ｜ 共 ' + totalB + ' 个批次（成功 ' + okB + ' / 失败 ' + badB + '）｜ 数据源：ecommerce-demo';
+      document.title = 'AutoBatch 数据质量仪表盘 — 最新批次 ' + latest.batchId;
+      // textContent 不解析 HTML：这里必须是纯文本（不能用 &lt; 或 <code> 标签）
+      footerEl.textContent = '数据来源：run/<批次>/（manifest.json / quality_summary.json / 04_aggregates/）｜ 最新批次 ' + latest.batchId + ' ｜ 口径：营收为清洗后订单 total_amount 之和，异常标记订单计入营收 ｜ 本页自包含，可离线打开 ｜ 跨批次数据由 dashboard/data.js 提供（运行 python dashboard/build_data.py 重新生成）';
+    } else {
+      metaEl.innerHTML = '暂无批次数据，运行 pipeline 后再打开此页。';
+    }
+  })();
 })();
 </script>
 </body>

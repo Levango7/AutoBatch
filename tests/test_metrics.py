@@ -10,6 +10,7 @@
 MetricsRecorder 没有 load 类方法，"往返"测试以 save → json_load → 与
 to_dict 相等的形式验证。
 """
+
 from __future__ import annotations
 
 import os
@@ -53,8 +54,7 @@ def test_record_stage_appends_record():
 
 def test_record_stage_with_extra():
     r = MetricsRecorder("B-1")
-    r.record_stage("clean", "success", 30, 95, 90,
-                   extra={"quarantined": 5, "rules_triggered": 2})
+    r.record_stage("clean", "success", 30, 95, 90, extra={"quarantined": 5, "rules_triggered": 2})
     s = r.stages[0]
     assert s["quarantined"] == 5
     assert s["rules_triggered"] == 2
@@ -65,8 +65,7 @@ def test_record_stage_with_extra():
 # ----------------------------------------------------------------------
 def test_finish_success():
     r = MetricsRecorder("B-1")
-    r.finish("success", 1000, dq_score=0.98,
-             quarantined_rows={"missing": 5, "negative": 2})
+    r.finish("success", 1000, dq_score=0.98, quarantined_rows={"missing": 5, "negative": 2})
     assert r.status == "success"
     assert r.finished_at is not None
     assert r.total_duration_ms == 1000
@@ -93,9 +92,16 @@ def test_to_dict_keys_complete():
     r.finish("success", 1000, dq_score=0.98, quarantined_rows={"missing": 5})
     d = r.to_dict()
     expected_keys = {
-        "batch_id", "started_at", "finished_at", "status",
-        "total_duration_ms", "dq_score", "quarantined_rows",
-        "quarantined_total", "stages", "metrics",
+        "batch_id",
+        "started_at",
+        "finished_at",
+        "status",
+        "total_duration_ms",
+        "dq_score",
+        "quarantined_rows",
+        "quarantined_total",
+        "stages",
+        "metrics",
     }
     assert set(d.keys()) == expected_keys
 
@@ -167,11 +173,9 @@ def test_save_writes_metrics_json(tmp_path):
 def test_save_to_dict_roundtrip(tmp_path):
     """save → json_load → 与 to_dict 完全相等."""
     r = MetricsRecorder("B-rt")
-    r.record_stage("ingest", "success", 50, 100, 100,
-                   extra={"foo": "bar"})
+    r.record_stage("ingest", "success", 50, 100, 100, extra={"foo": "bar"})
     r.record_stage("compute", "success", 30, 95, 95)
-    r.finish("success", 80, dq_score=0.97,
-             quarantined_rows={"missing": 3, "negative": 1})
+    r.finish("success", 80, dq_score=0.97, quarantined_rows={"missing": 3, "negative": 1})
     original = r.to_dict()
     path = r.save(str(tmp_path))
     loaded = json_load(path)

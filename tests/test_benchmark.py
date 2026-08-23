@@ -15,6 +15,7 @@
 
 注意：基准测试会创建 run/bench-*/ 目录，跑完自动清理（除非 --no-cleanup）。
 """
+
 from __future__ import annotations
 
 import os
@@ -31,8 +32,7 @@ if _ROOT not in sys.path:
 def pytest_addoption(parser):
     """注册 --runslow 命令行选项，用于启用基准测试。"""
     parser.addoption(
-        "--runslow", action="store_true", default=False,
-        help="运行基准测试（默认跳过，因为耗时长）"
+        "--runslow", action="store_true", default=False, help="运行基准测试（默认跳过，因为耗时长）"
     )
 
 
@@ -58,8 +58,9 @@ _BENCH_COMBINATIONS = [
 
 
 @pytest.mark.skip(reason="benchmark, run manually")
-@pytest.mark.parametrize("engine,storage", _BENCH_COMBINATIONS,
-                         ids=[f"{e}/{s}" for e, s in _BENCH_COMBINATIONS])
+@pytest.mark.parametrize(
+    "engine,storage", _BENCH_COMBINATIONS, ids=[f"{e}/{s}" for e, s in _BENCH_COMBINATIONS]
+)
 def test_benchmark_combination(engine, storage):
     """跑单个 engine × storage 组合的基准测试。
 

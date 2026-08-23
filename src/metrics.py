@@ -32,9 +32,15 @@ class MetricsRecorder:
         self.dq_score: Optional[float] = None
         self.quarantined_rows: dict[str, int] = {}
 
-    def record_stage(self, name: str, status: str, duration_ms: int,
-                     rows_in: int, rows_out: int,
-                     extra: Optional[dict[str, Any]] = None) -> None:
+    def record_stage(
+        self,
+        name: str,
+        status: str,
+        duration_ms: int,
+        rows_in: int,
+        rows_out: int,
+        extra: Optional[dict[str, Any]] = None,
+    ) -> None:
         """Record one stage execution result."""
         rec: dict[str, Any] = {
             "name": name,
@@ -47,9 +53,13 @@ class MetricsRecorder:
             rec.update(extra)
         self.stages.append(rec)
 
-    def finish(self, status: str, total_duration_ms: int,
-               dq_score: Optional[float] = None,
-               quarantined_rows: Optional[dict[str, int]] = None) -> None:
+    def finish(
+        self,
+        status: str,
+        total_duration_ms: int,
+        dq_score: Optional[float] = None,
+        quarantined_rows: Optional[dict[str, int]] = None,
+    ) -> None:
         """Finalise the pipeline-level metrics."""
         self.status = status
         self.finished_at = utc_ts()

@@ -38,9 +38,13 @@ from ..helpers import (
 def _register_artifacts(ctx: PipelineContext) -> None:
     manifest = ctx.manifest
     kind_map = {
-        "01_raw": "raw", "02_valid": "valid", "03_clean": "clean",
-        "04_aggregates": "aggregate", "05_output": "output",
-        "quarantine": "quarantine", "report": "report",
+        "01_raw": "raw",
+        "02_valid": "valid",
+        "03_clean": "clean",
+        "04_aggregates": "aggregate",
+        "05_output": "output",
+        "quarantine": "quarantine",
+        "report": "report",
     }
     for dirname, kind in kind_map.items():
         base = os.path.join(ctx.run_dir, dirname)
@@ -65,14 +69,17 @@ def _register_edges(ctx: PipelineContext) -> int:
     as artifacts, and register the surviving edges. Returns the edge count.
     """
     manifest = ctx.manifest
-    prefix = f"run/{ctx.batch_id}/"
+    # run_dir 可能被配置改名（缺省 "run"），前缀必须与 _register_stage_artifacts
+    # 里 os.path.relpath(fp, ROOT) 产生的命名空间一致，否则所有血缘边被静默丢弃。
+    # 注意 ctx.run_dir 已包含 batch_id（= run_root/<batch_id>），不可再拼接。
+    run_dir_rel = os.path.relpath(ctx.run_dir, ROOT).replace("\\", "/").strip("/")
+    prefix = f"{run_dir_rel}/"
     count = 0
     for target_rel, upstream_rels in ctx.lineage_decls.items():
         target = prefix + target_rel
         if target not in manifest.artifacts:
             continue
-        surviving = [prefix + up for up in upstream_rels
-                     if (prefix + up) in manifest.artifacts]
+        surviving = [prefix + up for up in upstream_rels if (prefix + up) in manifest.artifacts]
         if not surviving:
             # No materialised upstreams (e.g. a root product) -> no edge.
             continue
@@ -138,14 +145,16 @@ def run(ctx: PipelineContext, log) -> dict[str, Any]:
         ctx.lineage_decls.setdefault(k, list(v))
     edge_count = _register_edges(ctx)
     manifest_path = ctx.manifest.save()
-    log.info("output done", artifacts=len(ctx.manifest.artifacts),
-             lineage_edges=edge_count, manifest=manifest_path)
+    log.info(
+        "output done",
+        artifacts=len(ctx.manifest.artifacts),
+        lineage_edges=edge_count,
+        manifest=manifest_path,
+    )
     return {"rows_in": rows_in, "rows_out": rows_out, "lineage": lineage}
 
 
-def _write_orders_final_python(
-    ctx: PipelineContext, out_dir: str
-) -> tuple[int, int]:
+def _write_orders_final_python(ctx: PipelineContext, out_dir: str) -> tuple[int, int]:
     """Python 路径：table_read → 加标记列 → table_write.
 
     storage.backend="local_csv" 时 table_read/table_write 等价于 load_csv/csv_write，
@@ -162,9 +171,7 @@ def _write_orders_final_python(
     return len(orders), len(orders)
 
 
-def _write_orders_final_polars(
-    ctx: PipelineContext, out_dir: str
-) -> tuple[int, int]:
+def _write_orders_final_polars(ctx: PipelineContext, out_dir: str) -> tuple[int, int]:
     """Polars 路径：pl.read_csv → 加标记列 → table_write.
 
     读时 ``infer_schema_length=0`` 保留所有列为 Utf8，保证写出 CSV 与
@@ -186,9 +193,7 @@ def _write_orders_final_polars(
     return rows_in, df.height
 
 
-def _write_orders_final_spark(
-    ctx: PipelineContext, out_dir: str
-) -> tuple[int, int]:
+def _write_orders_final_spark(ctx: PipelineContext, out_dir: str) -> tuple[int, int]:
     """Spark 路径：table_read → 加标记列 → table_write.
 
     读入用 ``table_read``（backend="spark" 下返回 SparkDataFrame），加标记列用
@@ -204,9 +209,7 @@ def _write_orders_final_spark(
     rows_in = df.count()  # 触发 action 取行数
 
     # 加标记列（与 Python/Polars 路径一致：_batch_id, _source_file）
-    df = df.withColumn(
-        "_batch_id", F.lit(ctx.batch_id)
-    ).withColumn(
+    df = df.withColumn("_batch_id", F.lit(ctx.batch_id)).withColumn(
         "_source_file", F.lit("data/raw/orders.csv")
     )
     table_write(

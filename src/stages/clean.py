@@ -72,9 +72,7 @@ def _clean_orders(ctx: PipelineContext, log) -> tuple[int, list[dict[str, Any]],
     return len(rows), kept, fields + ["total_amount", flag_col]
 
 
-def _clean_orders_polars(
-    ctx: PipelineContext, log
-) -> tuple[int, Any, list[str]]:
+def _clean_orders_polars(ctx: PipelineContext, log) -> tuple[int, Any, list[str]]:
     """Polars 列式实现：去重 / 补缺 / total_amount / is_anomaly.
 
     读时 ``infer_schema_length=0`` 让所有列保留为 Utf8 字符串，保证写出
@@ -145,9 +143,7 @@ def _clean_orders_polars(
     return rows_in, df, out_fields
 
 
-def _clean_orders_spark(
-    ctx: PipelineContext, log
-) -> tuple[int, Any, list[str]]:
+def _clean_orders_spark(ctx: PipelineContext, log) -> tuple[int, Any, list[str]]:
     """Spark 分布式实现：去重 / 补缺 / total_amount / is_anomaly.
 
     通过 ``table_read`` 读入 SparkDataFrame（``spark.read.csv`` 默认 inferSchema），
@@ -204,8 +200,7 @@ def _clean_orders_spark(
     outlier_keys = list(ctx.outlier_keys)
     df = df.withColumn(
         flag_col,
-        F.when(F.col("order_id").isin(outlier_keys), F.lit("1"))
-        .otherwise(F.lit("0")),
+        F.when(F.col("order_id").isin(outlier_keys), F.lit("1")).otherwise(F.lit("0")),
     )
 
     # out_fields：base_fields + 新增列，避免重复
@@ -233,9 +228,7 @@ def run(ctx: PipelineContext, log) -> dict[str, Any]:
     return _run_python(ctx, log, cl_dir)
 
 
-def _run_python(
-    ctx: PipelineContext, log, cl_dir: str
-) -> dict[str, Any]:
+def _run_python(ctx: PipelineContext, log, cl_dir: str) -> dict[str, Any]:
     cfg = ctx.config
     rows_in, orders, o_fields = _clean_orders(ctx, log)
     table_write(os.path.join(cl_dir, "orders_clean.csv"), orders, cfg, fields=o_fields)
@@ -251,16 +244,12 @@ def _run_python(
             rows, fields = table_read(src, cfg)
             table_write(os.path.join(cl_dir, name + "_clean.csv"), rows, cfg, fields=fields)
             rows_out += len(rows)
-            lineage[f"03_clean/{name}_clean.csv"] = [
-                f"02_valid/valid_{name}.csv"
-            ]
+            lineage[f"03_clean/{name}_clean.csv"] = [f"02_valid/valid_{name}.csv"]
     ctx.clean_orders = orders
     return {"rows_in": rows_in, "rows_out": rows_out, "lineage": lineage}
 
 
-def _run_polars(
-    ctx: PipelineContext, log, cl_dir: str
-) -> dict[str, Any]:
+def _run_polars(ctx: PipelineContext, log, cl_dir: str) -> dict[str, Any]:
     """Polars 路径：orders 用列式去重/补缺/计算，customers/products 透传."""
     import polars as pl  # lazy import
 
@@ -294,15 +283,11 @@ def _run_polars(
                 ref_fields,
             )
             rows_out += ref_df.height
-            lineage[f"03_clean/{name}_clean.csv"] = [
-                f"02_valid/valid_{name}.csv"
-            ]
+            lineage[f"03_clean/{name}_clean.csv"] = [f"02_valid/valid_{name}.csv"]
     return {"rows_in": rows_in, "rows_out": rows_out, "lineage": lineage}
 
 
-def _run_spark(
-    ctx: PipelineContext, log, cl_dir: str
-) -> dict[str, Any]:
+def _run_spark(ctx: PipelineContext, log, cl_dir: str) -> dict[str, Any]:
     """Spark 路径：orders 用分布式去重/补缺/计算，customers/products 透传.
 
     orders 通过 ``_clean_orders_spark`` 走 Spark DataFrame API；
@@ -345,7 +330,5 @@ def _run_spark(
                 spark=ctx.spark_session,
             )
             rows_out += ref_df.count()
-            lineage[f"03_clean/{name}_clean.csv"] = [
-                f"02_valid/valid_{name}.csv"
-            ]
+            lineage[f"03_clean/{name}_clean.csv"] = [f"02_valid/valid_{name}.csv"]
     return {"rows_in": rows_in, "rows_out": rows_out, "lineage": lineage}

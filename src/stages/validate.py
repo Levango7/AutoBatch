@@ -44,8 +44,7 @@ def _derive_amount(row: dict[str, str]) -> None:
         row["total_amount"] = ""
 
 
-def _select_source_path(ctx: PipelineContext, raw_dir: str,
-                        finfo: dict[str, Any]) -> str:
+def _select_source_path(ctx: PipelineContext, raw_dir: str, finfo: dict[str, Any]) -> str:
     """Pick the CSV file to validate for this dataset.
 
     Full mode: use the file ingest copied (always the full table).
@@ -65,8 +64,13 @@ def _select_source_path(ctx: PipelineContext, raw_dir: str,
 
 
 def _emit_valid_quarantine(
-    ctx: PipelineContext, name: str, good_count: int, bad_count: int,
-    log, write_valid: Callable[..., Any], write_quarantine: Callable[..., Any],
+    ctx: PipelineContext,
+    name: str,
+    good_count: int,
+    bad_count: int,
+    log,
+    write_valid: Callable[..., Any],
+    write_quarantine: Callable[..., Any],
 ) -> tuple[bool, bool]:
     """三引擎共用：处理 valid / quarantine 文件写出决策 + log warn.
 
@@ -137,8 +141,8 @@ def run(ctx: PipelineContext, log) -> dict[str, Any]:
     # may be "01_raw/<name>_incremental.csv" for delta datasets.
     src_rel_by_name: dict[str, str] = {}
 
-    is_polars = (ctx.engine_backend == "polars")
-    is_spark = (ctx.engine_backend == "spark")
+    is_polars = ctx.engine_backend == "polars"
+    is_spark = ctx.engine_backend == "spark"
 
     for finfo in ctx.ingested:
         name = finfo["name"]
@@ -150,6 +154,7 @@ def run(ctx: PipelineContext, log) -> dict[str, Any]:
 
         if is_spark:
             from pyspark.sql import functions as F
+
             spark = ctx.spark_session
             df = table_read(path, cfg, spark=spark)
             total_in += df.count()
@@ -173,22 +178,45 @@ def run(ctx: PipelineContext, log) -> dict[str, Any]:
             total_good += good_count
             total_bad += bad_count
             if outlier_indices:
-                # 用 collect 取 order_id 列表，按 outlier_indices 取对应 order_id
-                # 注：Spark collect 顺序不确定，outlier_keys 集合内容正确
-                # （outlier 行的 order_id 集合是确定的，只是顺序不同）
-                order_ids = [row["order_id"] for row in df.select("order_id").collect()]
-                for i in outlier_indices:
-                    oid = order_ids[i] if i < len(order_ids) else None
-                    if oid:
-                        outlier_keys.add(oid)
+                # 单次 collect 同时取 (order_id, value)，按"值是否越界"标记。
+                # 不能用两次独立 collect 的行索引互相对齐（Spark 不保证无 orderBy
+                # 的两次 action 行序一致）；outlier 判定是纯值函数，与行序无关，
+                # 因此按值判界结果确定。bounds 计算复用 quality._outlier_bounds。
+                oc = rules.get(name, {}).get("outlier") or {}
+                oc_col = oc.get("column")
+                if (
+                    oc.get("action") == "flag"
+                    and oc_col
+                    and oc_col in df.columns
+                    and "order_id" in df.columns
+                ):
+                    pairs = df.select(
+                        F.col("order_id"), F.col(oc_col).cast("double").alias("_oc_val")
+                    ).collect()
+                    vals = sorted(r["_oc_val"] for r in pairs if r["_oc_val"] is not None)
+                    if len(vals) >= 100:
+                        bounds = RuleEngine._outlier_bounds_from_vals(vals, oc)
+                        if bounds is not None:
+                            for r in pairs:
+                                v = r["_oc_val"]
+                                if (
+                                    v is not None
+                                    and (v < bounds[0] or v > bounds[1])
+                                    and r["order_id"]
+                                ):
+                                    outlier_keys.add(r["order_id"])
             emitted_v, emitted_q = _emit_valid_quarantine(
-                ctx, name, good_count, bad_count, log,
+                ctx,
+                name,
+                good_count,
+                bad_count,
+                log,
                 write_valid=lambda name=name, good_df=good_df, spark=spark: table_write(
-                    os.path.join(val_dir, "valid_" + name + ".csv"),
-                    good_df, cfg, spark=spark),
+                    os.path.join(val_dir, "valid_" + name + ".csv"), good_df, cfg, spark=spark
+                ),
                 write_quarantine=lambda name=name, bad_df=bad_df, spark=spark: table_write(
-                    os.path.join(qu_dir, "quarantine_" + name + ".csv"),
-                    bad_df, cfg, spark=spark),
+                    os.path.join(qu_dir, "quarantine_" + name + ".csv"), bad_df, cfg, spark=spark
+                ),
             )
             if emitted_v:
                 produced_valid.append(name)
@@ -196,12 +224,23 @@ def run(ctx: PipelineContext, log) -> dict[str, Any]:
                 produced_quarantine.append(name)
         elif is_polars:
             import polars as pl
+
             df = table_read(path, cfg)
             total_in += df.height
             # _derive_amount 的 polars 等价：total_amount = str(round(qty*price, 2)) 或 ""
             if "quantity" in df.columns and "unit_price" in df.columns:
-                qty = pl.col("quantity").cast(pl.Utf8).str.replace_all(",", "").cast(pl.Int64, strict=False)
-                price = pl.col("unit_price").cast(pl.Utf8).str.replace_all(",", "").cast(pl.Float64, strict=False)
+                qty = (
+                    pl.col("quantity")
+                    .cast(pl.Utf8)
+                    .str.replace_all(",", "")
+                    .cast(pl.Int64, strict=False)
+                )
+                price = (
+                    pl.col("unit_price")
+                    .cast(pl.Utf8)
+                    .str.replace_all(",", "")
+                    .cast(pl.Float64, strict=False)
+                )
                 amt = (qty * price).round(2).cast(pl.Utf8).fill_null("")
                 df = df.with_columns(amt.alias("total_amount"))
             else:
@@ -219,11 +258,17 @@ def run(ctx: PipelineContext, log) -> dict[str, Any]:
                     if oid:
                         outlier_keys.add(oid)
             emitted_v, emitted_q = _emit_valid_quarantine(
-                ctx, name, good_df.height, bad_df.height, log,
+                ctx,
+                name,
+                good_df.height,
+                bad_df.height,
+                log,
                 write_valid=lambda name=name, good_df=good_df: table_write(
-                    os.path.join(val_dir, "valid_" + name + ".csv"), good_df, cfg),
+                    os.path.join(val_dir, "valid_" + name + ".csv"), good_df, cfg
+                ),
                 write_quarantine=lambda name=name, bad_df=bad_df: table_write(
-                    os.path.join(qu_dir, "quarantine_" + name + ".csv"), bad_df, cfg),
+                    os.path.join(qu_dir, "quarantine_" + name + ".csv"), bad_df, cfg
+                ),
             )
             if emitted_v:
                 produced_valid.append(name)
@@ -246,13 +291,17 @@ def run(ctx: PipelineContext, log) -> dict[str, Any]:
                     outlier_keys.add(oid)
             bad_fields = fields + ["_line", "_reasons"]
             emitted_v, emitted_q = _emit_valid_quarantine(
-                ctx, name, len(good), len(bad), log,
+                ctx,
+                name,
+                len(good),
+                len(bad),
+                log,
                 write_valid=lambda name=name, good=good, fields=fields: table_write(
-                    os.path.join(val_dir, "valid_" + name + ".csv"),
-                    good, cfg, fields=fields),
+                    os.path.join(val_dir, "valid_" + name + ".csv"), good, cfg, fields=fields
+                ),
                 write_quarantine=lambda name=name, bad=bad, bad_fields=bad_fields: table_write(
-                    os.path.join(qu_dir, "quarantine_" + name + ".csv"),
-                    bad, cfg, fields=bad_fields),
+                    os.path.join(qu_dir, "quarantine_" + name + ".csv"), bad, cfg, fields=bad_fields
+                ),
             )
             if emitted_v:
                 produced_valid.append(name)
@@ -271,8 +320,9 @@ def run(ctx: PipelineContext, log) -> dict[str, Any]:
     with open(os.path.join(report_dir, "quality_report.md"), "w", encoding="utf-8") as f:
         f.write(render_markdown_report(summary))
     json_save(os.path.join(report_dir, "quality_report.json"), summary)
-    log.info("quality done", dq_score=summary["dq_score"], quarantined=total_bad,
-             mode=summary["mode"])
+    log.info(
+        "quality done", dq_score=summary["dq_score"], quarantined=total_bad, mode=summary["mode"]
+    )
 
     # Declare lineage for products of this stage (paths relative to run_dir).
     lineage: dict[str, list] = {}
@@ -287,5 +337,9 @@ def run(ctx: PipelineContext, log) -> dict[str, Any]:
         lineage["report/quality_report.md"] = list(valid_upstreams)
         lineage["report/quality_report.json"] = list(valid_upstreams)
 
-    return {"rows_in": total_in, "rows_out": total_good,
-            "quarantined": total_bad, "lineage": lineage}
+    return {
+        "rows_in": total_in,
+        "rows_out": total_good,
+        "quarantined": total_bad,
+        "lineage": lineage,
+    }

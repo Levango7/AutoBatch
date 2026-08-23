@@ -1,4 +1,5 @@
 """RuleEngine 单元测试：8 类规则正例/反例 + referential 性能回归。"""
+
 from __future__ import annotations
 
 import time
@@ -122,21 +123,31 @@ def test_outlier_fail(orders_rules, ref_data, good_order):
 
 
 def test_referential_performance(orders_rules):
-    customers = [{"customer_id": f"CUS-{i:06d}", "tier": "silver",
-                  "city": "上海", "join_date": "2022-01-01"} for i in range(1, 1001)]
-    products = [{"product_id": f"PRD-{i:06d}", "name": "p",
-                 "category": "数码", "cost": "10"} for i in range(1, 201)]
+    customers = [
+        {"customer_id": f"CUS-{i:06d}", "tier": "silver", "city": "上海", "join_date": "2022-01-01"}
+        for i in range(1, 1001)
+    ]
+    products = [
+        {"product_id": f"PRD-{i:06d}", "name": "p", "category": "数码", "cost": "10"}
+        for i in range(1, 201)
+    ]
     ref = {"customers": customers, "products": products}
     rows = []
     for i in range(5000):
-        rows.append({
-            "order_id": f"ORD-{i + 1:08d}",
-            "customer_id": f"CUS-{(i % 1000) + 1:06d}",
-            "product_id": f"PRD-{(i % 200) + 1:06d}",
-            "order_date": "2026-01-15", "created_ts": "2026-01-15T10:00:00",
-            "region": "华东", "channel": "web", "quantity": "5",
-            "unit_price": "100.00", "status": "completed",
-        })
+        rows.append(
+            {
+                "order_id": f"ORD-{i + 1:08d}",
+                "customer_id": f"CUS-{(i % 1000) + 1:06d}",
+                "product_id": f"PRD-{(i % 200) + 1:06d}",
+                "order_date": "2026-01-15",
+                "created_ts": "2026-01-15T10:00:00",
+                "region": "华东",
+                "channel": "web",
+                "quantity": "5",
+                "unit_price": "100.00",
+                "status": "completed",
+            }
+        )
     engine = RuleEngine("orders", orders_rules, ref)
     start = time.monotonic()
     engine.check(rows)

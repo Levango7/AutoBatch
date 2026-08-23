@@ -56,7 +56,9 @@ from ..helpers import (
 
 
 def _bucket(rows):
-    buckets: defaultdict[str, dict[str, Any]] = defaultdict(lambda: {"orders": 0, "units": 0, "revenue": 0.0})
+    buckets: defaultdict[str, dict[str, Any]] = defaultdict(
+        lambda: {"orders": 0, "units": 0, "revenue": 0.0}
+    )
     for r in rows:
         b = buckets[r["order_date"]]
         b["orders"] += 1
@@ -71,19 +73,25 @@ def daily_sales(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
     out = []
     for d in sorted(buckets):
         b = buckets[d]
-        out.append({
-            "order_date": d,
-            "orders": b["orders"],
-            "units": b["units"],
-            "revenue": round(b["revenue"], 2),
-            "avg_order_value": round(b["revenue"] / b["orders"], 2),
-        })
+        out.append(
+            {
+                "order_date": d,
+                "orders": b["orders"],
+                "units": b["units"],
+                "revenue": round(b["revenue"], 2),
+                "avg_order_value": round(b["revenue"] / b["orders"], 2),
+            }
+        )
     return out
 
 
-def category_stats(orders: list[dict[str, str]], products: list[dict[str, str]]) -> list[dict[str, Any]]:
+def category_stats(
+    orders: list[dict[str, str]], products: list[dict[str, str]]
+) -> list[dict[str, Any]]:
     pcat = {p["product_id"]: p.get("category", "未知") for p in products}
-    buckets: defaultdict[str, dict[str, Any]] = defaultdict(lambda: {"orders": 0, "units": 0, "revenue": 0.0})
+    buckets: defaultdict[str, dict[str, Any]] = defaultdict(
+        lambda: {"orders": 0, "units": 0, "revenue": 0.0}
+    )
     for r in orders:
         cat = pcat.get(r.get("product_id", ""), "未知")
         b = buckets[cat]
@@ -94,18 +102,22 @@ def category_stats(orders: list[dict[str, str]], products: list[dict[str, str]])
     out = []
     for cat in sorted(buckets, key=lambda c: -buckets[c]["revenue"]):
         b = buckets[cat]
-        out.append({
-            "category": cat,
-            "orders": b["orders"],
-            "units": b["units"],
-            "revenue": round(b["revenue"], 2),
-            "revenue_share": round(b["revenue"] / total, 4),
-        })
+        out.append(
+            {
+                "category": cat,
+                "orders": b["orders"],
+                "units": b["units"],
+                "revenue": round(b["revenue"], 2),
+                "revenue_share": round(b["revenue"] / total, 4),
+            }
+        )
     return out
 
 
 def region_channel_stats(orders: list[dict[str, str]]) -> list[dict[str, Any]]:
-    buckets: defaultdict[tuple[str, str], dict[str, Any]] = defaultdict(lambda: {"orders": 0, "revenue": 0.0})
+    buckets: defaultdict[tuple[str, str], dict[str, Any]] = defaultdict(
+        lambda: {"orders": 0, "revenue": 0.0}
+    )
     for r in orders:
         key = (r.get("region", "unknown"), r.get("channel", "unknown"))
         b = buckets[key]
@@ -114,17 +126,20 @@ def region_channel_stats(orders: list[dict[str, str]]) -> list[dict[str, Any]]:
     out = []
     for region, channel in sorted(buckets):
         b = buckets[(region, channel)]
-        out.append({
-            "region": region,
-            "channel": channel,
-            "orders": b["orders"],
-            "revenue": round(b["revenue"], 2),
-        })
+        out.append(
+            {
+                "region": region,
+                "channel": channel,
+                "orders": b["orders"],
+                "revenue": round(b["revenue"], 2),
+            }
+        )
     return out
 
 
-def customer_value(orders: list[dict[str, str]], customers: list[dict[str, str]],
-                   top_n: int) -> dict[str, Any]:
+def customer_value(
+    orders: list[dict[str, str]], customers: list[dict[str, str]], top_n: int
+) -> dict[str, Any]:
     cmeta = {c["customer_id"]: c for c in customers}
     buckets: defaultdict[str, dict[str, Any]] = defaultdict(lambda: {"orders": 0, "revenue": 0.0})
     for r in orders:
@@ -136,22 +151,28 @@ def customer_value(orders: list[dict[str, str]], customers: list[dict[str, str]]
     top: list[dict[str, Any]] = []
     for cid, b in ranked[:top_n]:
         c = cmeta.get(cid, {})
-        top.append({
-            "customer_id": cid,
-            "tier": c.get("tier", ""),
-            "city": c.get("city", ""),
-            "orders": b["orders"],
-            "revenue": round(b["revenue"], 2),
-            "rank": len(top) + 1,
-        })
-    tier_agg: defaultdict[str, dict[str, Any]] = defaultdict(lambda: {"customers": 0, "revenue": 0.0})
+        top.append(
+            {
+                "customer_id": cid,
+                "tier": c.get("tier", ""),
+                "city": c.get("city", ""),
+                "orders": b["orders"],
+                "revenue": round(b["revenue"], 2),
+                "rank": len(top) + 1,
+            }
+        )
+    tier_agg: defaultdict[str, dict[str, Any]] = defaultdict(
+        lambda: {"customers": 0, "revenue": 0.0}
+    )
     for cid, b in buckets.items():
         tier = cmeta.get(cid, {}).get("tier", "unknown")
         t = tier_agg[tier]
         t["customers"] += 1
         t["revenue"] += b["revenue"]
-    tiers = [{"tier": t, "customers": v["customers"], "revenue": round(v["revenue"], 2)}
-             for t, v in sorted(tier_agg.items())]
+    tiers = [
+        {"tier": t, "customers": v["customers"], "revenue": round(v["revenue"], 2)}
+        for t, v in sorted(tier_agg.items())
+    ]
     return {"top": top, "tiers": tiers}
 
 
@@ -178,13 +199,15 @@ def _history_customer_meta(ctx: PipelineContext) -> dict[str, dict[str, str]]:
     """
     if not ctx.state_path:
         return {}
-    agg_path = os.path.join(os.path.dirname(ctx.state_path),
-                            "aggregates", "customer_value.csv")
+    agg_path = os.path.join(os.path.dirname(ctx.state_path), "aggregates", "customer_value.csv")
     if not os.path.exists(agg_path):
         return {}
     rows, _ = load_csv(agg_path)
-    return {r["customer_id"]: {"tier": r.get("tier", ""), "city": r.get("city", "")}
-            for r in rows if r.get("customer_id")}
+    return {
+        r["customer_id"]: {"tier": r.get("tier", ""), "city": r.get("city", "")}
+        for r in rows
+        if r.get("customer_id")
+    }
 
 
 def _customer_value_incremental(
@@ -218,8 +241,7 @@ def _customer_value_incremental(
     this batch's ``customers`` table.
     """
     cmeta = {c["customer_id"]: c for c in customers}
-    buckets: dict[str, dict[str, Any]] = defaultdict(
-        lambda: {"orders": 0, "revenue": 0.0})
+    buckets: dict[str, dict[str, Any]] = defaultdict(lambda: {"orders": 0, "revenue": 0.0})
     for r in orders:
         cid = r.get("customer_id", "")
         b = buckets[cid]
@@ -236,17 +258,18 @@ def _customer_value_incremental(
             c = cmeta.get(cid, {})
             tier = c.get("tier", "")
             city = c.get("city", "")
-        cv_rows.append({
-            "customer_id": cid,
-            "tier": tier,
-            "city": city,
-            "orders": b["orders"],
-            "revenue": round(b["revenue"], 2),
-            "rank": i + 1,
-        })
+        cv_rows.append(
+            {
+                "customer_id": cid,
+                "tier": tier,
+                "city": city,
+                "orders": b["orders"],
+                "revenue": round(b["revenue"], 2),
+                "rank": i + 1,
+            }
+        )
 
-    tier_buckets: dict[str, dict[str, Any]] = defaultdict(
-        lambda: {"customers": 0, "revenue": 0.0})
+    tier_buckets: dict[str, dict[str, Any]] = defaultdict(lambda: {"customers": 0, "revenue": 0.0})
     for cid, b in buckets.items():
         if cid in history_meta:
             tier = history_meta[cid]["tier"] or "unknown"
@@ -256,9 +279,10 @@ def _customer_value_incremental(
         if cid not in history_meta:
             t["customers"] += 1
         t["revenue"] += b["revenue"]
-    tier_rows = [{"tier": t, "customers": v["customers"],
-                  "revenue": round(v["revenue"], 2)}
-                 for t, v in sorted(tier_buckets.items())]
+    tier_rows = [
+        {"tier": t, "customers": v["customers"], "revenue": round(v["revenue"], 2)}
+        for t, v in sorted(tier_buckets.items())
+    ]
     return cv_rows, tier_rows
 
 
@@ -287,12 +311,14 @@ def _load_clean_polars(ctx: PipelineContext, name: str):
 def _qty_expr():
     """quantity 列表达式：cast Int64，非法值/空 → 0（对齐 as_int(...) or 0）."""
     import polars as pl
+
     return pl.col("quantity").cast(pl.Int64, strict=False).fill_null(0)
 
 
 def _amt_expr():
     """total_amount 列表达式：cast Float64，非法值/空 → 0.0（对齐 as_float(...) or 0.0）."""
     import polars as pl
+
     return pl.col("total_amount").cast(pl.Float64, strict=False).fill_null(0.0)
 
 
@@ -303,6 +329,7 @@ def daily_sales_polars(orders):
         order_date, orders, units, revenue, avg_order_value
     """
     import polars as pl
+
     return (
         orders.group_by("order_date", maintain_order=True)
         .agg(
@@ -326,6 +353,7 @@ def category_stats_polars(orders, products):
         category, orders, units, revenue, revenue_share
     """
     import polars as pl
+
     if products is not None and products.height > 0:
         pcat = products.select(["product_id", "category"])
         df = orders.join(pcat, on="product_id", how="left").with_columns(
@@ -333,24 +361,18 @@ def category_stats_polars(orders, products):
         )
     else:
         df = orders.with_columns(pl.lit("未知").alias("category"))
-    agg = (
-        df.group_by("category", maintain_order=True)
-        .agg(
-            pl.len().cast(pl.Int64).alias("orders"),
-            _qty_expr().sum().alias("units"),
-            _amt_expr().sum().alias("revenue"),
-        )
+    agg = df.group_by("category", maintain_order=True).agg(
+        pl.len().cast(pl.Int64).alias("orders"),
+        _qty_expr().sum().alias("units"),
+        _amt_expr().sum().alias("revenue"),
     )
     total = agg.select(pl.col("revenue").sum()).item() or 1.0
     # 排序用未 round 的 revenue（与 Python `key=lambda c: -buckets[c]["revenue"]` 一致）
     agg = agg.sort("revenue", descending=True, maintain_order=True)
-    return (
-        agg.with_columns(
-            pl.col("revenue").round(2).alias("revenue"),
-            (pl.col("revenue") / total).round(4).alias("revenue_share"),
-        )
-        .select(["category", "orders", "units", "revenue", "revenue_share"])
-    )
+    return agg.with_columns(
+        pl.col("revenue").round(2).alias("revenue"),
+        (pl.col("revenue") / total).round(4).alias("revenue_share"),
+    ).select(["category", "orders", "units", "revenue", "revenue_share"])
 
 
 def region_channel_stats_polars(orders):
@@ -360,6 +382,7 @@ def region_channel_stats_polars(orders):
         region, channel, orders, revenue
     """
     import polars as pl
+
     return (
         orders.group_by(["region", "channel"], maintain_order=True)
         .agg(
@@ -379,12 +402,10 @@ def customer_value_polars(orders, customers, top_n: int):
     tiers columns: tier, customers, revenue
     """
     import polars as pl
-    buckets = (
-        orders.group_by("customer_id", maintain_order=True)
-        .agg(
-            pl.len().cast(pl.Int64).alias("orders"),
-            _amt_expr().sum().alias("revenue"),
-        )
+
+    buckets = orders.group_by("customer_id", maintain_order=True).agg(
+        pl.len().cast(pl.Int64).alias("orders"),
+        _amt_expr().sum().alias("revenue"),
     )
     # 排序用未 round 的 revenue（与 Python `key=lambda kv: -kv[1]["revenue"]` 一致）
     ranked = buckets.sort("revenue", descending=True, maintain_order=True)
@@ -392,9 +413,13 @@ def customer_value_polars(orders, customers, top_n: int):
     # top N + tier/city
     if customers is not None and customers.height > 0:
         cmeta = customers.select(["customer_id", "tier", "city"])
-        top = ranked.head(top_n).join(cmeta, on="customer_id", how="left").with_columns(
-            pl.col("tier").fill_null(""),
-            pl.col("city").fill_null(""),
+        top = (
+            ranked.head(top_n)
+            .join(cmeta, on="customer_id", how="left")
+            .with_columns(
+                pl.col("tier").fill_null(""),
+                pl.col("city").fill_null(""),
+            )
         )
     else:
         top = ranked.head(top_n).with_columns(
@@ -441,12 +466,9 @@ def _customer_value_incremental_polars(
     """
     import polars as pl
 
-    buckets = (
-        orders.group_by("customer_id", maintain_order=True)
-        .agg(
-            pl.len().cast(pl.Int64).alias("orders"),
-            _amt_expr().sum().alias("revenue"),
-        )
+    buckets = orders.group_by("customer_id", maintain_order=True).agg(
+        pl.len().cast(pl.Int64).alias("orders"),
+        _amt_expr().sum().alias("revenue"),
     )
     ranked = buckets.sort("revenue", descending=True, maintain_order=True)
 
@@ -567,9 +589,7 @@ def daily_sales_spark(orders):
         )
         .withColumn("_raw_revenue", F.col("_raw_revenue_dec").cast("double"))
         .withColumn("revenue", F.round(F.col("_raw_revenue"), 2))
-        .withColumn(
-            "avg_order_value", F.bround(F.col("_raw_revenue") / F.col("orders"), 2)
-        )
+        .withColumn("avg_order_value", F.bround(F.col("_raw_revenue") / F.col("orders"), 2))
         .drop("_raw_revenue", "_raw_revenue_dec")
         .orderBy("order_date")
     )
@@ -590,14 +610,11 @@ def category_stats_spark(orders, products):
     else:
         df = orders.withColumn("category", F.lit("未知"))
     # decimal(20,2) 累加 total_amount 避免浮点误差（与 daily_sales_spark 同理）
-    agg = (
-        df.groupBy("category")
-        .agg(
-            F.count("*").alias("orders"),
-            # cast("int") 对齐 Python 路径 as_int(quantity) 累加（Spark sum 返回 double）
-            F.sum("quantity").cast("int").alias("units"),
-            F.sum(F.col("total_amount").cast(DecimalType(20, 2))).cast("double").alias("revenue"),
-        )
+    agg = df.groupBy("category").agg(
+        F.count("*").alias("orders"),
+        # cast("int") 对齐 Python 路径 as_int(quantity) 累加（Spark sum 返回 double）
+        F.sum("quantity").cast("int").alias("units"),
+        F.sum(F.col("total_amount").cast(DecimalType(20, 2))).cast("double").alias("revenue"),
     )
     # total 用未 round 的 revenue（与 Python `sum(b["revenue"] for b in buckets.values())` 一致）
     total = agg.agg(F.sum("revenue").alias("total")).collect()[0]["total"] or 1.0
@@ -605,12 +622,8 @@ def category_stats_spark(orders, products):
     # revenue_share 用未 round 的 revenue / total（与 Python `round(b["revenue"] / total, 4)` 一致）
     return (
         agg.orderBy(F.desc("revenue"))
-        .withColumn(
-            "revenue_share", F.round(F.col("revenue") / F.lit(total), 4)
-        )
-        .withColumn(
-            "revenue", F.round(F.col("revenue"), 2)
-        )
+        .withColumn("revenue_share", F.round(F.col("revenue") / F.lit(total), 4))
+        .withColumn("revenue", F.round(F.col("revenue"), 2))
         .select("category", "orders", "units", "revenue", "revenue_share")
     )
 
@@ -629,9 +642,9 @@ def region_channel_stats_spark(orders):
         orders.groupBy("region", "channel")
         .agg(
             F.count("*").alias("orders"),
-            F.round(
-                F.sum(F.col("total_amount").cast(DecimalType(20, 2))).cast("double"), 2
-            ).alias("revenue"),
+            F.round(F.sum(F.col("total_amount").cast(DecimalType(20, 2))).cast("double"), 2).alias(
+                "revenue"
+            ),
         )
         .orderBy("region", "channel")
         .select("region", "channel", "orders", "revenue")
@@ -652,10 +665,16 @@ def customer_value_spark(orders, customers, top_n: int):
     # 聚合每个客户的 orders / revenue
     # decimal(20,2) 累加 total_amount 避免浮点误差（与 daily_sales_spark 同理）
     # buckets._raw_revenue 保留未 round 的累加值，revenue 是 round 后的值
-    buckets = orders.groupBy("customer_id").agg(
-        F.count("*").alias("orders"),
-        F.sum(F.col("total_amount").cast(DecimalType(20, 2))).cast("double").alias("_raw_revenue"),
-    ).withColumn("revenue", F.round(F.col("_raw_revenue"), 2))
+    buckets = (
+        orders.groupBy("customer_id")
+        .agg(
+            F.count("*").alias("orders"),
+            F.sum(F.col("total_amount").cast(DecimalType(20, 2)))
+            .cast("double")
+            .alias("_raw_revenue"),
+        )
+        .withColumn("revenue", F.round(F.col("_raw_revenue"), 2))
+    )
 
     # 窗口函数取 Top N：row_number().over(Window.orderBy(F.desc("revenue")))
     w = Window.orderBy(F.desc("revenue"))
@@ -670,12 +689,12 @@ def customer_value_spark(orders, customers, top_n: int):
             .fillna({"tier": "", "city": ""})
         )
     else:
-        top = ranked.filter(F.col("rank") <= top_n).withColumn(
-            "tier", F.lit("")
-        ).withColumn("city", F.lit(""))
-    top = top.select(
-        "customer_id", "tier", "city", "orders", "revenue", "rank"
-    )
+        top = (
+            ranked.filter(F.col("rank") <= top_n)
+            .withColumn("tier", F.lit(""))
+            .withColumn("city", F.lit(""))
+        )
+    top = top.select("customer_id", "tier", "city", "orders", "revenue", "rank")
 
     # tier 汇总：revenue 用未 round 的 _raw_revenue 累加（与 Python 路径
     # `t["revenue"] += b["revenue"]` 一致，b["revenue"] 是未 round 的累加值）
@@ -723,15 +742,16 @@ def _spark_df_to_dicts(df):
 def _skip_kpi(cconf: dict[str, Any]) -> dict[str, Any]:
     """构造 compute skip 时的 kpi dict（无 orders 输入，全 0）."""
     return {
-        "orders": 0, "units": 0, "total_revenue": 0.0,
-        "avg_order_value": 0.0, "days": 0,
+        "orders": 0,
+        "units": 0,
+        "total_revenue": 0.0,
+        "avg_order_value": 0.0,
+        "days": 0,
         "currency": cconf.get("currency", "CNY"),
     }
 
 
-def _skip_result(
-    ctx: PipelineContext, agg_dir: str, cconf: dict[str, Any], log
-) -> dict[str, Any]:
+def _skip_result(ctx: PipelineContext, agg_dir: str, cconf: dict[str, Any], log) -> dict[str, Any]:
     """构造 compute skip 时的 ctx.aggregates / kpi.json / return dict.
 
     三引擎 ``_run_*`` 在 orders 为空时调用，行为一致：
@@ -751,8 +771,11 @@ def _skip_result(
     log.warn("no clean orders; compute skipped", reason="missing_input")
     kpi = _skip_kpi(cconf)
     ctx.aggregates = {
-        "daily": [], "category": [], "region_channel": [],
-        "customer_value": {"top": [], "tiers": []}, "kpi": kpi,
+        "daily": [],
+        "category": [],
+        "region_channel": [],
+        "customer_value": {"top": [], "tiers": []},
+        "kpi": kpi,
     }
     json_save(os.path.join(agg_dir, "kpi.json"), kpi)
     # No lineage edges: kpi.json has no upstream products when skipped.
@@ -833,9 +856,7 @@ def run(ctx: PipelineContext, log) -> dict[str, Any]:
     return _run_python(ctx, log, agg_dir, cconf)
 
 
-def _run_python(
-    ctx: PipelineContext, log, agg_dir: str, cconf: dict[str, Any]
-) -> dict[str, Any]:
+def _run_python(ctx: PipelineContext, log, agg_dir: str, cconf: dict[str, Any]) -> dict[str, Any]:
     cfg = ctx.config
     orders = _load_clean(ctx, "orders")
     customers = _load_clean(ctx, "customers")
@@ -852,35 +873,59 @@ def _run_python(
         cats = category_stats(orders, products)
         rcs = region_channel_stats(orders)
         history_meta = _history_customer_meta(ctx)
-        cv_top, cv_tiers = _customer_value_incremental(
-            orders, customers, history_meta)
+        cv_top, cv_tiers = _customer_value_incremental(orders, customers, history_meta)
         cv = {"top": cv_top, "tiers": cv_tiers}
-        log.info("compute incremental buckets",
-                 new_orders=len(orders), affected_customers=len(cv_top),
-                 history_customers=len(history_meta))
+        log.info(
+            "compute incremental buckets",
+            new_orders=len(orders),
+            affected_customers=len(cv_top),
+            history_customers=len(history_meta),
+        )
     else:
         daily = daily_sales(orders)
         cats = category_stats(orders, products)
         rcs = region_channel_stats(orders)
-        cv = customer_value(orders, customers,
-                            int(cconf.get("top_n_customers", 20)))
+        cv = customer_value(orders, customers, int(cconf.get("top_n_customers", 20)))
 
-    table_write(os.path.join(agg_dir, "daily_sales.csv"),
-                daily, cfg, fields=["order_date", "orders", "units", "revenue", "avg_order_value"])
-    table_write(os.path.join(agg_dir, "category_stats.csv"),
-                cats, cfg, fields=["category", "orders", "units", "revenue", "revenue_share"])
-    table_write(os.path.join(agg_dir, "region_channel_stats.csv"),
-                rcs, cfg, fields=["region", "channel", "orders", "revenue"])
-    table_write(os.path.join(agg_dir, "customer_value.csv"),
-                cv["top"], cfg, fields=["customer_id", "tier", "city", "orders", "revenue", "rank"])
-    table_write(os.path.join(agg_dir, "customer_tier.csv"),
-                cv["tiers"], cfg, fields=["tier", "customers", "revenue"])
+    table_write(
+        os.path.join(agg_dir, "daily_sales.csv"),
+        daily,
+        cfg,
+        fields=["order_date", "orders", "units", "revenue", "avg_order_value"],
+    )
+    table_write(
+        os.path.join(agg_dir, "category_stats.csv"),
+        cats,
+        cfg,
+        fields=["category", "orders", "units", "revenue", "revenue_share"],
+    )
+    table_write(
+        os.path.join(agg_dir, "region_channel_stats.csv"),
+        rcs,
+        cfg,
+        fields=["region", "channel", "orders", "revenue"],
+    )
+    table_write(
+        os.path.join(agg_dir, "customer_value.csv"),
+        cv["top"],
+        cfg,
+        fields=["customer_id", "tier", "city", "orders", "revenue", "rank"],
+    )
+    table_write(
+        os.path.join(agg_dir, "customer_tier.csv"),
+        cv["tiers"],
+        cfg,
+        fields=["tier", "customers", "revenue"],
+    )
 
     kpi = _compute_kpi(len(orders), daily, cconf.get("currency", "CNY"))
     json_save(os.path.join(agg_dir, "kpi.json"), kpi)
     ctx.aggregates = {
-        "daily": daily, "category": cats, "region_channel": rcs,
-        "customer_value": cv, "kpi": kpi,
+        "daily": daily,
+        "category": cats,
+        "region_channel": rcs,
+        "customer_value": cv,
+        "kpi": kpi,
     }
     log.info("compute done", kpi=kpi)
 
@@ -888,9 +933,7 @@ def _run_python(
     return {"rows_in": len(orders), "rows_out": len(daily), "lineage": lineage}
 
 
-def _run_polars(
-    ctx: PipelineContext, log, agg_dir: str, cconf: dict[str, Any]
-) -> dict[str, Any]:
+def _run_polars(ctx: PipelineContext, log, agg_dir: str, cconf: dict[str, Any]) -> dict[str, Any]:
     """Polars 列式聚合路径."""
     import polars as pl  # noqa: F401  lazy import
 
@@ -908,8 +951,7 @@ def _run_polars(
         cats_df = category_stats_polars(orders, products)
         rcs_df = region_channel_stats_polars(orders)
         history_meta = _history_customer_meta(ctx)
-        cv_top_df, cv_tiers_df = _customer_value_incremental_polars(
-            orders, customers, history_meta)
+        cv_top_df, cv_tiers_df = _customer_value_incremental_polars(orders, customers, history_meta)
         cv = {"top": cv_top_df, "tiers": cv_tiers_df}
         log.info(
             "compute incremental buckets (polars)",
@@ -921,8 +963,7 @@ def _run_polars(
         daily_df = daily_sales_polars(orders)
         cats_df = category_stats_polars(orders, products)
         rcs_df = region_channel_stats_polars(orders)
-        cv = customer_value_polars(
-            orders, customers, int(cconf.get("top_n_customers", 20)))
+        cv = customer_value_polars(orders, customers, int(cconf.get("top_n_customers", 20)))
 
     # 写出 CSV（table_write 在 polars backend 下调 df.write_csv）
     table_write(os.path.join(agg_dir, "daily_sales.csv"), daily_df, ctx.config)
@@ -951,9 +992,7 @@ def _run_polars(
     return {"rows_in": orders.height, "rows_out": daily_df.height, "lineage": lineage}
 
 
-def _run_spark(
-    ctx: PipelineContext, log, agg_dir: str, cconf: dict[str, Any]
-) -> dict[str, Any]:
+def _run_spark(ctx: PipelineContext, log, agg_dir: str, cconf: dict[str, Any]) -> dict[str, Any]:
     """Spark 分布式聚合路径.
 
     四个聚合用 Spark DataFrame API（groupBy+agg+window），写出用 table_write
@@ -985,21 +1024,27 @@ def _run_spark(
     daily_df = daily_sales_spark(orders)
     cats_df = category_stats_spark(orders, products)
     rcs_df = region_channel_stats_spark(orders)
-    cv = customer_value_spark(
-        orders, customers, int(cconf.get("top_n_customers", 20))
-    )
+    cv = customer_value_spark(orders, customers, int(cconf.get("top_n_customers", 20)))
 
     # 写出 CSV（table_write 在 spark backend 下调 df.write.mode("overwrite").csv）
-    table_write(os.path.join(agg_dir, "daily_sales.csv"), daily_df, ctx.config,
-                spark=ctx.spark_session)
-    table_write(os.path.join(agg_dir, "category_stats.csv"), cats_df, ctx.config,
-                spark=ctx.spark_session)
-    table_write(os.path.join(agg_dir, "region_channel_stats.csv"), rcs_df, ctx.config,
-                spark=ctx.spark_session)
-    table_write(os.path.join(agg_dir, "customer_value.csv"), cv["top"], ctx.config,
-                spark=ctx.spark_session)
-    table_write(os.path.join(agg_dir, "customer_tier.csv"), cv["tiers"], ctx.config,
-                spark=ctx.spark_session)
+    table_write(
+        os.path.join(agg_dir, "daily_sales.csv"), daily_df, ctx.config, spark=ctx.spark_session
+    )
+    table_write(
+        os.path.join(agg_dir, "category_stats.csv"), cats_df, ctx.config, spark=ctx.spark_session
+    )
+    table_write(
+        os.path.join(agg_dir, "region_channel_stats.csv"),
+        rcs_df,
+        ctx.config,
+        spark=ctx.spark_session,
+    )
+    table_write(
+        os.path.join(agg_dir, "customer_value.csv"), cv["top"], ctx.config, spark=ctx.spark_session
+    )
+    table_write(
+        os.path.join(agg_dir, "customer_tier.csv"), cv["tiers"], ctx.config, spark=ctx.spark_session
+    )
 
     # ctx.aggregates 存 List[Dict]（与 Python/Polars 路径格式对齐，供 output stage 消费）
     daily_dicts = _spark_df_to_dicts(daily_df)

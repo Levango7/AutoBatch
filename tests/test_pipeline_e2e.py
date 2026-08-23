@@ -1,4 +1,5 @@
 """端到端冒烟：跑完整流水线，断言 status/DQ Score/manifest/metrics/产物/KPI."""
+
 from __future__ import annotations
 
 import csv
@@ -86,8 +87,7 @@ def test_kpi_json_fields(small_batch_dir):
     path = os.path.join(small_batch_dir, "04_aggregates", "kpi.json")
     assert os.path.isfile(path), "kpi.json 应存在"
     kpi = json_load(path)
-    expected_keys = {"orders", "units", "total_revenue",
-                     "avg_order_value", "days", "currency"}
+    expected_keys = {"orders", "units", "total_revenue", "avg_order_value", "days", "currency"}
     assert set(kpi.keys()) == expected_keys, f"kpi 字段缺失：{set(kpi.keys())}"
     # 数值合法性
     assert kpi["orders"] > 0
@@ -107,8 +107,9 @@ def test_kpi_total_revenue_matches_daily_sales_sum(small_batch_dir):
     daily_path = os.path.join(small_batch_dir, "04_aggregates", "daily_sales.csv")
     rows = _csv_rows(daily_path)
     total = sum(float(r["revenue"]) for r in rows)
-    assert total == pytest.approx(kpi["total_revenue"], rel=1e-6), \
+    assert total == pytest.approx(kpi["total_revenue"], rel=1e-6), (
         f"daily_sales revenue 之和 {total} 应等于 kpi.total_revenue {kpi['total_revenue']}"
+    )
 
 
 def test_kpi_orders_matches_daily_sales_sum(small_batch_dir):
@@ -117,8 +118,9 @@ def test_kpi_orders_matches_daily_sales_sum(small_batch_dir):
     daily_path = os.path.join(small_batch_dir, "04_aggregates", "daily_sales.csv")
     rows = _csv_rows(daily_path)
     total = sum(int(r["orders"]) for r in rows)
-    assert total == kpi["orders"], \
+    assert total == kpi["orders"], (
         f"daily_sales orders 之和 {total} 应等于 kpi.orders {kpi['orders']}"
+    )
 
 
 def test_category_stats_revenue_share_sums_to_one(small_batch_dir):
@@ -130,8 +132,9 @@ def test_category_stats_revenue_share_sums_to_one(small_batch_dir):
     path = os.path.join(small_batch_dir, "04_aggregates", "category_stats.csv")
     rows = _csv_rows(path)
     total = sum(float(r["revenue_share"]) for r in rows)
-    assert total == pytest.approx(1.0, abs=1e-3), \
+    assert total == pytest.approx(1.0, abs=1e-3), (
         f"category_stats revenue_share 之和 {total} 应≈1.0"
+    )
 
 
 def test_daily_sales_avg_order_value_consistent(small_batch_dir):
@@ -143,8 +146,9 @@ def test_daily_sales_avg_order_value_consistent(small_batch_dir):
         revenue = float(r["revenue"])
         avg = float(r["avg_order_value"])
         expected = revenue / orders if orders else 0.0
-        assert avg == pytest.approx(expected, rel=1e-4), \
+        assert avg == pytest.approx(expected, rel=1e-4), (
             f"avg_order_value {avg} 应≈revenue/orders {expected}（date={r['order_date']})"
+        )
 
 
 # ----------------------------------------------------------------------

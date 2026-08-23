@@ -17,6 +17,7 @@ time travel、ACID 原子性、向后兼容等行为. 设计见 docs/evolution.m
 11. test_iceberg_list_snapshots         — list_snapshots 返回完整 snapshot 历史
 12. test_iceberg_path_routing           — table_read path 路由（表名 vs 文件路径）
 """
+
 from __future__ import annotations
 
 import os
@@ -59,6 +60,7 @@ def _new_bid(tag: str) -> str:
 def _make_iceberg_cfg(iceberg_env) -> dict[str, Any]:
     """从 iceberg_env fixture 复制 cfg 并返回（避免修改 fixture 状态）。"""
     import copy
+
     return copy.deepcopy(iceberg_env["cfg"])
 
 
@@ -160,14 +162,24 @@ def test_iceberg_snapshot_diff(iceberg_env):
     cfg = _make_iceberg_cfg(iceberg_env)
     fields = ["id", "val"]
     # 第一次 append（建立初始 snapshot）
-    table_write("warehouse.delta", [{"id": "1", "val": "a"}, {"id": "2", "val": "b"}],
-                cfg, fields=fields, mode="append")
+    table_write(
+        "warehouse.delta",
+        [{"id": "1", "val": "a"}, {"id": "2", "val": "b"}],
+        cfg,
+        fields=fields,
+        mode="append",
+    )
     snaps_1 = list_snapshots("warehouse.delta", cfg)
     sid_1 = snaps_1[-1]["snapshot_id"]
 
     # 第二次 append（增量）
-    table_write("warehouse.delta", [{"id": "3", "val": "c"}, {"id": "4", "val": "d"}],
-                cfg, fields=fields, mode="append")
+    table_write(
+        "warehouse.delta",
+        [{"id": "3", "val": "c"}, {"id": "4", "val": "d"}],
+        cfg,
+        fields=fields,
+        mode="append",
+    )
 
     # snapshot diff：从 sid_1 到 current
     diff = iceberg_snapshot_diff("warehouse.delta", cfg, from_snapshot=sid_1)
@@ -190,20 +202,27 @@ def test_iceberg_overwrite(iceberg_env):
     cfg = _make_iceberg_cfg(iceberg_env)
     fields = ["id", "val"]
     # 初始 append
-    table_write("warehouse.overwrite_test", [{"id": "1", "val": "a"}],
-                cfg, fields=fields, mode="append")
+    table_write(
+        "warehouse.overwrite_test", [{"id": "1", "val": "a"}], cfg, fields=fields, mode="append"
+    )
     rows, _ = table_read("warehouse.overwrite_test", cfg)
     assert len(rows) == 1
     # overwrite：覆盖为 2 行
-    table_write("warehouse.overwrite_test", [{"id": "2", "val": "b"}, {"id": "3", "val": "c"}],
-                cfg, fields=fields, mode="overwrite")
+    table_write(
+        "warehouse.overwrite_test",
+        [{"id": "2", "val": "b"}, {"id": "3", "val": "c"}],
+        cfg,
+        fields=fields,
+        mode="overwrite",
+    )
     rows, _ = table_read("warehouse.overwrite_test", cfg)
     assert len(rows) == 2
     actual_ids = {r["id"] for r in rows}
     assert actual_ids == {"2", "3"}
     # 再 append：应有 3 行
-    table_write("warehouse.overwrite_test", [{"id": "4", "val": "d"}],
-                cfg, fields=fields, mode="append")
+    table_write(
+        "warehouse.overwrite_test", [{"id": "4", "val": "d"}], cfg, fields=fields, mode="append"
+    )
     rows, _ = table_read("warehouse.overwrite_test", cfg)
     assert len(rows) == 3
 
@@ -217,8 +236,13 @@ def test_iceberg_polars_backend(iceberg_env):
     cfg["engine"]["backend"] = "polars"
     fields = ["id", "val"]
     # 用 python backend 写入（polars 写入需要 polars.DataFrame）
-    table_write("warehouse.polars_test", [{"id": "1", "val": "a"}, {"id": "2", "val": "b"}],
-                cfg, fields=fields, mode="append")
+    table_write(
+        "warehouse.polars_test",
+        [{"id": "1", "val": "a"}, {"id": "2", "val": "b"}],
+        cfg,
+        fields=fields,
+        mode="append",
+    )
     # 用 polars backend 读回
     df = table_read("warehouse.polars_test", cfg)
     assert df is not None
@@ -297,6 +321,7 @@ def test_iceberg_back_compat_parquet(iceberg_env):
     # table_write 应走 parquet 分支，不调 pyiceberg
     rows = [{"id": "1", "val": "a"}]
     import tempfile
+
     dst = os.path.join(tempfile.mkdtemp(dir=iceberg_env["work_dir"]), "test.parquet")
     n = table_write(dst, rows, cfg, fields=["id", "val"])
     assert n == 1
@@ -330,6 +355,7 @@ def test_iceberg_incremental_mode_switch(iceberg_env):
 
     # 验证 _ingest_incremental 路由：mode="iceberg_snapshot_diff" → 调 _copy_incremental_iceberg
     import sys
+
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from src.stages import ingest as ingest_mod
     from src.stages.ingest import _ingest_incremental
@@ -354,9 +380,15 @@ def test_iceberg_incremental_mode_switch(iceberg_env):
     try:
         ctx = _Ctx(cfg)
         # mode="iceberg_snapshot_diff" → 应调 _copy_incremental_iceberg
-        result = _ingest_incremental(ctx, "orders", "orders", "src.csv",
-                                     "/tmp/raw", {"watermark_column": "order_date"},
-                                     log=None)
+        result = _ingest_incremental(
+            ctx,
+            "orders",
+            "orders",
+            "src.csv",
+            "/tmp/raw",
+            {"watermark_column": "order_date"},
+            log=None,
+        )
         assert calls["iceberg"] == 1, "mode=iceberg_snapshot_diff 应调 _copy_incremental_iceberg"
         assert result["incremental_mode"] == "iceberg_snapshot_diff"
 
@@ -366,9 +398,15 @@ def test_iceberg_incremental_mode_switch(iceberg_env):
         # high_watermark 分支会调 _ingest_full 或 _copy_incremental（依赖真实数据），
         # 这里只验证不调 _copy_incremental_iceberg：用 try/except 捕获后续分支的异常
         try:
-            _ingest_incremental(ctx, "orders", "orders", "src.csv",
-                                "/tmp/raw", {"watermark_column": "order_date"},
-                                log=None)
+            _ingest_incremental(
+                ctx,
+                "orders",
+                "orders",
+                "src.csv",
+                "/tmp/raw",
+                {"watermark_column": "order_date"},
+                log=None,
+            )
         except Exception:
             pass  # 后续分支可能因数据不存在抛异常，不影响断言
         assert calls["iceberg"] == 0, "mode=high_watermark 不应调 _copy_incremental_iceberg"
@@ -385,8 +423,13 @@ def test_iceberg_list_snapshots(iceberg_env):
     fields = ["id", "val"]
     # 三次 append
     for i in range(3):
-        table_write("warehouse.snap_list", [{"id": str(i), "val": f"v{i}"}],
-                    cfg, fields=fields, mode="append")
+        table_write(
+            "warehouse.snap_list",
+            [{"id": str(i), "val": f"v{i}"}],
+            cfg,
+            fields=fields,
+            mode="append",
+        )
     snaps = list_snapshots("warehouse.snap_list", cfg)
     assert len(snaps) == 3
     # 验证 snapshot id 唯一
@@ -409,16 +452,17 @@ def test_iceberg_path_routing(iceberg_env):
     cfg = _make_iceberg_cfg(iceberg_env)
     # 先写一个 Iceberg 表
     fields = ["id", "val"]
-    table_write("warehouse.routing", [{"id": "1", "val": "a"}],
-                cfg, fields=fields, mode="append")
+    table_write("warehouse.routing", [{"id": "1", "val": "a"}], cfg, fields=fields, mode="append")
     # 用表名读：走 iceberg 分支
     rows, _ = table_read("warehouse.routing", cfg)
     assert len(rows) == 1
     # 用文件路径读：走 local_csv 分支（回退）
     # 创建一个 CSV 文件，用文件路径读
     import tempfile
+
     csv_path = os.path.join(tempfile.mkdtemp(dir=iceberg_env["work_dir"]), "test.csv")
     from src.helpers import csv_write
+
     csv_write(csv_path, ["id", "val"], [{"id": "x", "val": "y"}])
     # storage.backend="iceberg" 但 path 是文件路径 → 回退到 local_csv
     rows_csv, _ = table_read(csv_path, cfg)
@@ -443,9 +487,11 @@ def test_iceberg_e2e_incremental_snapshot_diff(iceberg_env):
     cfg["incremental"]["mode"] = "iceberg_snapshot_diff"
 
     # 1. 把所有源 CSV 注册为 Iceberg 表（orders/customers/products）
-    for name, path_key in [("orders", "orders_path"),
-                            ("customers", "customers_path"),
-                            ("products", "products_path")]:
+    for name, path_key in [
+        ("orders", "orders_path"),
+        ("customers", "customers_path"),
+        ("products", "products_path"),
+    ]:
         rows, fields = csv_read(iceberg_env[path_key])
         table_write(f"warehouse.{name}", rows, cfg, fields=fields, mode="append")
 
@@ -465,8 +511,10 @@ def test_iceberg_e2e_incremental_snapshot_diff(iceberg_env):
     state_path = os.path.join(iceberg_env["work_dir"], "state", "state.json")
     assert os.path.exists(state_path), "state.json should exist"
     from src.helpers import json_load
+
     state = json_load(state_path)
     assert "iceberg_snapshots" in state, "state should have iceberg_snapshots"
     assert "orders" in state["iceberg_snapshots"], "state should have orders snapshot"
-    assert state["iceberg_snapshots"]["orders"]["snapshot_id"] is not None, \
+    assert state["iceberg_snapshots"]["orders"]["snapshot_id"] is not None, (
         "snapshot_id should be committed"
+    )

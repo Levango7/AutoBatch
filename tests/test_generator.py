@@ -8,6 +8,7 @@
 
 仅依赖 stdlib + src.helpers，不启动 pipeline，跑得快。
 """
+
 from __future__ import annotations
 
 import os
@@ -32,8 +33,16 @@ from src.generator import (
 
 BASE_DATE = datetime(2026, 8, 15)
 ORDER_FIELDS = {
-    "order_id", "customer_id", "product_id", "order_date", "created_ts",
-    "region", "channel", "quantity", "unit_price", "status",
+    "order_id",
+    "customer_id",
+    "product_id",
+    "order_date",
+    "created_ts",
+    "region",
+    "channel",
+    "quantity",
+    "unit_price",
+    "status",
 }
 CUSTOMER_FIELDS = {"customer_id", "tier", "city", "join_date"}
 PRODUCT_FIELDS = {"product_id", "name", "category", "cost"}
@@ -87,7 +96,10 @@ def test_gen_products_row_count():
 
 def test_gen_products_fields_complete():
     rng = random.Random(42)
-    rows = gen_products(rng, 10, )
+    rows = gen_products(
+        rng,
+        10,
+    )
     for r in rows:
         assert set(r.keys()) == PRODUCT_FIELDS
 
@@ -177,8 +189,7 @@ def test_gen_orders_value_domain_clean():
 def test_gen_orders_duplicate_increases_rows():
     rng = random.Random(7)
     customers, products = _make_ref()
-    rows = gen_orders(rng, 100, customers, products, BASE_DATE,
-                      {"duplicate": 0.1}, 90)
+    rows = gen_orders(rng, 100, customers, products, BASE_DATE, {"duplicate": 0.1}, 90)
     # dup_count = int(100 * 0.1) = 10 → 总行数 110
     assert len(rows) == 110
 
@@ -187,8 +198,7 @@ def test_gen_orders_missing_introduces_empty_string():
     """missing=1.0 强制每条记录至少触发一次 missing 缺陷（victim 随机选字段）."""
     rng = random.Random(7)
     customers, products = _make_ref()
-    rows = gen_orders(rng, 200, customers, products, BASE_DATE,
-                      {"missing": 1.0}, 90)
+    rows = gen_orders(rng, 200, customers, products, BASE_DATE, {"missing": 1.0}, 90)
     # 至少有一条记录的 region/channel/customer_id/unit_price/quantity 之一为空
     empty_fields = 0
     for r in rows:
@@ -200,8 +210,7 @@ def test_gen_orders_missing_introduces_empty_string():
 def test_gen_orders_negative_qty():
     rng = random.Random(7)
     customers, products = _make_ref()
-    rows = gen_orders(rng, 500, customers, products, BASE_DATE,
-                      {"negative_qty": 1.0}, 90)
+    rows = gen_orders(rng, 500, customers, products, BASE_DATE, {"negative_qty": 1.0}, 90)
     neg = [r for r in rows if isinstance(r["quantity"], int) and r["quantity"] < 0]
     assert len(neg) > 0, "negative_qty=1.0 应产生负数 quantity"
 
@@ -209,8 +218,7 @@ def test_gen_orders_negative_qty():
 def test_gen_orders_invalid_status():
     rng = random.Random(7)
     customers, products = _make_ref()
-    rows = gen_orders(rng, 500, customers, products, BASE_DATE,
-                      {"invalid_status": 1.0}, 90)
+    rows = gen_orders(rng, 500, customers, products, BASE_DATE, {"invalid_status": 1.0}, 90)
     bad = [r for r in rows if r["status"] not in STATUSES]
     assert len(bad) > 0, "invalid_status=1.0 应产生非标准 status"
 
@@ -218,8 +226,7 @@ def test_gen_orders_invalid_status():
 def test_gen_orders_bad_date():
     rng = random.Random(7)
     customers, products = _make_ref()
-    rows = gen_orders(rng, 500, customers, products, BASE_DATE,
-                      {"bad_date": 1.0}, 90)
+    rows = gen_orders(rng, 500, customers, products, BASE_DATE, {"bad_date": 1.0}, 90)
     bad = []
     for r in rows:
         try:
@@ -232,8 +239,7 @@ def test_gen_orders_bad_date():
 def test_gen_orders_orphan_fk():
     rng = random.Random(7)
     customers, products = _make_ref()
-    rows = gen_orders(rng, 500, customers, products, BASE_DATE,
-                      {"orphan_fk": 1.0}, 90)
+    rows = gen_orders(rng, 500, customers, products, BASE_DATE, {"orphan_fk": 1.0}, 90)
     orphans = [r for r in rows if r["customer_id"] == "CUS-999999"]
     assert len(orphans) > 0, "orphan_fk=1.0 应产生悬空 customer_id"
 
@@ -241,8 +247,7 @@ def test_gen_orders_orphan_fk():
 def test_gen_orders_bad_channel():
     rng = random.Random(7)
     customers, products = _make_ref()
-    rows = gen_orders(rng, 500, customers, products, BASE_DATE,
-                      {"bad_channel": 1.0}, 90)
+    rows = gen_orders(rng, 500, customers, products, BASE_DATE, {"bad_channel": 1.0}, 90)
     bad = [r for r in rows if r["channel"] not in CHANNELS]
     assert len(bad) > 0, "bad_channel=1.0 应产生非标准 channel"
 
@@ -250,10 +255,10 @@ def test_gen_orders_bad_channel():
 def test_gen_orders_outlier_unit_price():
     rng = random.Random(7)
     customers, products = _make_ref()
-    rows = gen_orders(rng, 500, customers, products, BASE_DATE,
-                      {"outlier": 1.0}, 90)
-    outliers = [r for r in rows
-                if isinstance(r["unit_price"], (int, float)) and r["unit_price"] > 1500.0]
+    rows = gen_orders(rng, 500, customers, products, BASE_DATE, {"outlier": 1.0}, 90)
+    outliers = [
+        r for r in rows if isinstance(r["unit_price"], (int, float)) and r["unit_price"] > 1500.0
+    ]
     assert len(outliers) > 0, "outlier=1.0 应产生 unit_price > 1500 的异常值"
 
 

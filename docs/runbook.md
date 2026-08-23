@@ -1,4 +1,4 @@
-# 运行与扩展手册（RUNBOOK）
+﻿# 运行与扩展手册（RUNBOOK）
 
 ## 1. 环境要求
 
@@ -24,7 +24,7 @@
 | 增量 + Polars | 同时设 `incremental.enabled=true` 与 `engine.backend="polars"` | 两能力正交叠加，ingest 流式过滤 + compute 列式 merge |
 | Spark 分布式加速 | 把 `engine.backend` 改为 `"spark"` 后 `python main.py --config config\pipeline_small.json` | 五阶段走 Spark DataFrame API 路径，产物与 python 一致，详见第 21 节 |
 | 增量 + Spark | 同时设 `incremental.enabled=true` 与 `engine.backend="spark"` | 两能力正交叠加，ingest 分区并行过滤 + compute 分布式 merge |
-| Spark 多机分布式 | 启动集群 `pwsh docker/spark-cluster/up.ps1` + `engine.spark.master="spark://localhost:7077"` + `engine.spark.cluster.enabled=true` + `storage.backend="parquet"` | Docker Compose Standalone 集群（Master + 2 Worker）+ MinIO 共享存储，详见第 21.3 节 |
+| Spark 多机分布式 | 启动集群 `pwsh docker/spark-cluster/up.ps1` + `engine.spark.master="spark://localhost:15077"` + `engine.spark.cluster.enabled=true` + `storage.backend="parquet"` | Docker Compose Standalone 集群（Master + 2 Worker）+ MinIO 共享存储，详见第 21.3 节 |
 | 本地 Parquet 湖存储 | 把 `storage.backend` 改为 `"parquet"`（不配 bucket/endpoint）后 `python main.py --config config\pipeline_small.json` | 五阶段产物改写本地 `.parquet`，列式压缩 3-6 倍，产物与 local_csv 一致，详见第 22 节 |
 | S3/MinIO Parquet 湖存储 | 把 `storage.backend` 改为 `"parquet"` + 配 `bucket`/`endpoint` 后 `python main.py --config config\pipeline_small.json` | 产物写到 `s3://bucket/warehouse/.../*.parquet`，远端共享存储，详见第 22 节 |
 | 增量 + Parquet | 同时设 `incremental.enabled=true` 与 `storage.backend="parquet"` | 两能力正交叠加，ingest 增量过滤 + Parquet 谓词下推，compute 增量 merge + 列式聚合 |
@@ -68,7 +68,7 @@
 | engine.polars.streaming | Polars streaming 模式（spill 到磁盘） | true / false（缺省） |
 | engine.polars.parquet_compression | Parquet 压缩算法 | `zstd`（缺省）/ `snappy` / `gzip` |
 | engine.polars.read_options | 传给 `pl.read_csv` 的参数 | `{"try_parse_dates": true}` 等 |
-| engine.spark.master | Spark 集群 master URL | `local[*]`（本地模式，缺省）/ `spark://localhost:7077`（Docker Compose Standalone 集群，多机模式已实现）/ `k8s://https://...`（K8s） |
+| engine.spark.master | Spark 集群 master URL | `local[*]`（本地模式，缺省）/ `spark://localhost:15077`（Docker Compose Standalone 集群，多机模式已实现）/ `k8s://https://...`（K8s） |
 | engine.spark.app_name | Spark 应用名（Spark UI 显示） | `autobatch-small` |
 | engine.spark.executor_memory | 每个 executor 内存 | `1g`（缺省）/ `4g` 等 |
 | engine.spark.executor_cores | 每个 executor CPU 核数 | 1（缺省）/ 2 / 4 |
@@ -348,7 +348,7 @@ Phase 2a 列式加速 + Phase 2b 分布式加速能力通过 `config/pipeline.js
 | `polars.streaming` | `true` / `false`（缺省） | Polars streaming 模式。`true` 时允许超内存数据集 spill 到磁盘，支持千万行以上 |
 | `polars.parquet_compression` | `zstd`（缺省）/ `snappy` / `gzip` | Parquet 压缩算法。`zstd` 压缩比与速度综合最优 |
 | `polars.read_options` | dict | 传给 `pl.read_csv` 的参数。`try_parse_dates=true` 自动把日期列解析为 Date/Datetime 类型 |
-| `spark.master` | URL | Spark 集群 master。`local[*]`（本地模式，缺省）/ `spark://localhost:7077`（Docker Compose Standalone 集群，多机模式已实现）/ `k8s://https://...`（K8s）。详见第 21 节 |
+| `spark.master` | URL | Spark 集群 master。`local[*]`（本地模式，缺省）/ `spark://localhost:15077`（Docker Compose Standalone 集群，多机模式已实现）/ `k8s://https://...`（K8s）。详见第 21 节 |
 | `spark.app_name` | str | Spark 应用名（Spark UI 显示） |
 | `spark.executor_memory` | str | 每个 executor 内存，如 `1g` / `4g` |
 | `spark.executor_cores` | int | 每个 executor CPU 核数 |
@@ -474,7 +474,7 @@ Phase 2a 列式加速 + Phase 2b 分布式加速能力通过 `config/pipeline.js
 1. 安装 driver 端依赖：`pip install pyspark==4.2.0` + JDK 17（建议 junction 路径 `F:\jdk17` / `F:\spark_home` / `F:\Py314` 避免空格）
 2. 启动 MinIO + 创建 bucket `autobatch`（见第 22.2 节）
 3. 启动 Spark 集群：`pwsh docker/spark-cluster/up.ps1`（自动 build 镜像 + 启动 Master/Worker + 连接 MinIO 网络）
-4. 修改配置：`engine.backend="spark"` + `engine.spark.master="spark://localhost:7077"` + `engine.spark.cluster.enabled=true` + `storage.backend="parquet"` + `storage.endpoint="localhost:9000"`
+4. 修改配置：`engine.backend="spark"` + `engine.spark.master="spark://localhost:15077"` + `engine.spark.cluster.enabled=true` + `storage.backend="parquet"` + `storage.endpoint="localhost:9000"`
 5. 运行：`python main.py --config config/pipeline_small.json`
 6. 验证产物：与 `backend="python"` 路径产物完全一致。`tests/test_engine_spark.py::test_cluster_spark_s3_equivalence` 自动覆盖多机模式等价性
 7. 停止集群：`pwsh docker/spark-cluster/down.ps1`
@@ -497,7 +497,7 @@ Phase 2a 列式加速 + Phase 2b 分布式加速能力通过 `config/pipeline.js
 
 ## 21. Spark 配置与运行（Phase 2b）
 
-Phase 2b 分布式加速能力通过 `config/pipeline.json` 的 `engine.spark` 段开启，`engine.backend="spark"` 时生效。本地模式 `master="local[*]"` 与多机模式 `master="spark://localhost:7077"`（Docker Compose Standalone 集群）均已实现并上线（2026-08-16）。多机模式通过 S3A connector 连接 MinIO 共享存储、Worker 内 socat 代理解决 `localhost:9000` → `minio:9000` 网络寻址问题。
+Phase 2b 分布式加速能力通过 `config/pipeline.json` 的 `engine.spark` 段开启，`engine.backend="spark"` 时生效。本地模式 `master="local[*]"` 与多机模式 `master="spark://localhost:15077"`（Docker Compose Standalone 集群）均已实现并上线（2026-08-16）。多机模式通过 S3A connector 连接 MinIO 共享存储、Worker 内 socat 代理解决 `localhost:9000` → `minio:9000` 网络寻址问题。
 
 ### 22.1 engine.spark 段配置说明
 
@@ -560,7 +560,7 @@ Phase 2b 分布式加速能力通过 `config/pipeline.json` 的 `engine.spark` �
                 │  │                                                                       │  │
                 │  │  minio:9000 (S3 API) / :9001 (Web Console)  ← connect-minio.ps1   │  │
                 │  └───────────────────────────────────────────────────────────────────┘  │
-                │     端口映射: 7077/8080/8081/8082/9000/9001 → localhost                │
+                │     端口映射: 15077/8080/8081/8082/9000/9001 → localhost                │
                 └───────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -570,7 +570,7 @@ Phase 2b 分布式加速能力通过 `config/pipeline.json` 的 `engine.spark` �
 
 | 组件 | 容器内端口 | 宿主机端口 | 用途 |
 |---|---|---|---|
-| Spark Master | 7077 | 7077 | Spark RPC（driver 与 executor 通信） |
+| Spark Master | 15077 | 15077 | Spark RPC（driver 与 executor 通信） |
 | Spark Master Web UI | 8080 | 8080 | Master 状态 / Worker 列表 / 应用列表 |
 | Spark Worker-1 Web UI | 8081 | 8081 | Worker-1 资源 / 执行的 executor |
 | Spark Worker-2 Web UI | 8081 | 8082 | Worker-2 资源 / 执行的 executor |
@@ -608,7 +608,7 @@ pwsh docker/spark-cluster/up.ps1
 ==============================================
   集群启动完成！
   Master Web UI:  http://localhost:8080
-  Master RPC:     spark://localhost:7077
+  Master RPC:     spark://localhost:15077
   Worker-1 UI:    http://localhost:8081
   Worker-2 UI:    http://localhost:8082
 ==============================================
@@ -645,7 +645,7 @@ socat TCP-LISTEN:9000,fork,reuseaddr TCP:minio:9000 &
   "backend": "spark",
   "format": "parquet",
   "spark": {
-    "master": "spark://localhost:7077",
+    "master": "spark://localhost:15077",
     "app_name": "autobatch-cluster",
     "executor_memory": "2g",
     "executor_cores": 2,
@@ -694,7 +694,7 @@ socat TCP-LISTEN:9000,fork,reuseaddr TCP:minio:9000 &
 python main.py --config config/pipeline_small.json
 ```
 
-driver 在宿主机创建 SparkSession 连接 `spark://localhost:7077`，五阶段跨 Master/Worker 分布式执行，executor 通过 S3A connector 读写 `s3a://autobatch/warehouse/.../*.parquet`。
+driver 在宿主机创建 SparkSession 连接 `spark://localhost:15077`，五阶段跨 Master/Worker 分布式执行，executor 通过 S3A connector 读写 `s3a://autobatch/warehouse/.../*.parquet`。
 
 **步骤 6：停止集群**
 
@@ -735,12 +735,12 @@ pwsh docker/spark-cluster/down.ps1
 
 | 现象 | 原因与处理 |
 |---|---|
-| `up.ps1` 卡在 "等待 Spark Master 就绪" | Master 容器启动失败。处理：① `docker logs spark-master` 看 Master 日志；② 确认 Docker Desktop 已启动且 WSL2 后端可用；③ 确认 7077/8080 端口未被占用（`netstat -an \| findstr "7077 8080"`）；④ 内存不足时调大 Docker 内存限制或减小 Worker `SPARK_WORKER_MEMORY` |
+| `up.ps1` 卡在 "等待 Spark Master 就绪" | Master 容器启动失败。处理：① `docker logs spark-master` 看 Master 日志；② 确认 Docker Desktop 已启动且 WSL2 后端可用；③ 确认 15077/8080 端口未被占用（`netstat -an \| findstr "15077 8080"`）；④ 内存不足时调大 Docker 内存限制或减小 Worker `SPARK_WORKER_MEMORY` |
 | Worker 不注册到 Master（Master Web UI Workers=0） | Worker 无法连接 Master。处理：① `docker logs spark-worker-1` 看 Worker 日志；② 确认 Worker 与 Master 在同一 `autobatch-net` 网络（`docker network inspect autobatch-net`）；③ 确认 `SPARK_MASTER_URL=spark://spark-master:7077`（容器名 `spark-master` 而非 `localhost`） |
 | Worker 报 `Connection refused: minio:9000` | MinIO 未加入 `autobatch-net` 网络。处理：① 确认 MinIO 容器已启动（`docker ps \| findstr minio`）；② 重新执行 `pwsh docker/spark-cluster/connect-minio.ps1`；③ `docker network inspect autobatch-net` 确认 MinIO 在网络成员列表中 |
 | Worker 报 `Connection refused: localhost:9000` | socat 代理未启动。处理：① `docker exec spark-worker-1 ps aux \| findstr socat` 确认 socat 进程存在；② 若不存在，`docker exec spark-worker-1 socat TCP-LISTEN:9000,fork,reuseaddr TCP:minio:9000 &` 手动启动；③ 检查 `entrypoint.sh` 是否被正确复制（Dockerfile `COPY entrypoint.sh /opt/entrypoint.sh`） |
 | driver 报 `FileNotFoundException: s3a://autobatch/...` | bucket 不存在或 S3A 配置错误。处理：① 浏览器打开 `http://localhost:9001` 确认 bucket `autobatch` 已创建；② 确认 `storage.backend="parquet"` + `storage.bucket="autobatch"` + `storage.endpoint="localhost:9000"`；③ 确认 `engine.spark.cluster.enabled=true`；④ `docker logs spark-worker-1` 看 S3A 连接日志 |
-| driver 报 `Connection refused: localhost:7077` | Master 未启动或端口未映射。处理：① `docker ps \| findstr spark-master` 确认容器运行；② `curl http://localhost:8080` 确认 Web UI 可达；③ 确认 `engine.spark.master="spark://localhost:7077"`（不是 `spark://master:7077`，driver 在宿主机用 `localhost`） |
+| driver 报 `Connection refused: localhost:7077` | Master 未启动或端口未映射。处理：① `docker ps \| findstr spark-master` 确认容器运行；② `curl http://localhost:8080` 确认 Web UI 可达；③ 确认 `engine.spark.master="spark://localhost:15077"`（不是 `spark://master:7077`，driver 在宿主机用 `localhost`） |
 | Docker Desktop 不稳定 / 容器频繁退出 | Docker Desktop 资源不足。处理：① Settings → Resources 调大 Memory ≥ 4 GB、CPU ≥ 2；② 启用 WSL2 后端；③ `docker system prune -a` 清理无用镜像/容器释放磁盘；④ 重启 Docker Desktop |
 | 多机模式产物与 python 路径不一致 | 不应发生。`tests/test_engine_spark.py::test_cluster_spark_s3_equivalence` 覆盖此等价性。若观察到差异，检查：① MinIO bucket 是否被其他数据污染；② config 是否还残留其他改动；③ `docker logs spark-master` + `spark-worker-1` + `spark-worker-2` 看是否有 task 失败重试 |
 | 多机模式比本地模式慢 | 不应发生（除非数据量极小）。可能原因：① 数据量 < 10 万行，分布式调度 + 网络开销大于并行收益；② Docker Desktop 网络性能差（WSL2 后端建议）；③ MinIO IO 瓶颈（单机 MinIO 磁盘）；④ `shuffle_partitions` 过大（小数据建议 8，非 200）。处理：小数据量用 `master="local[*]"` 本地模式 |
@@ -985,7 +985,7 @@ SQL catalog 把元数据存到关系库，开发/测试用 SQLite 零额外服�
   "backend": "iceberg",
   "iceberg": {
     "catalog_type": "sql",
-    "uri": "sqlite:///autobatch.db",
+    "catalog_uri": "sqlite:///autobatch.db",
     "warehouse": "s3://autobatch/warehouse"
   }
 }
@@ -1005,8 +1005,7 @@ REST catalog 把元数据寻址逻辑放到独立服务（tabulario/iceberg-rest
 命令示例：启动 REST catalog（生产）
 
 ```bash
-pwsh docker/iceberg/up.ps1
-# 或直接
+docker compose -f docker/iceberg/docker-compose.yml up -d
 docker compose -f docker/iceberg/docker-compose.yml up -d
 ```
 
@@ -1017,7 +1016,7 @@ docker compose -f docker/iceberg/docker-compose.yml up -d
   "backend": "iceberg",
   "iceberg": {
     "catalog_type": "rest",
-    "uri": "http://localhost:8181",
+    "catalog_uri": "http://localhost:8181",
     "warehouse": "s3://autobatch/warehouse"
   }
 }
@@ -1038,7 +1037,7 @@ REST catalog 服务端口与用途：
 命令示例：停止 REST catalog
 
 ```bash
-pwsh docker/iceberg/down.ps1
+docker compose -f docker/iceberg/docker-compose.yml down
 ```
 
 #### 24.1.3 catalog 选项对比
@@ -1058,7 +1057,7 @@ pwsh docker/iceberg/down.ps1
 
 `storage.backend="iceberg"` 时，首次写入某张表会自动建表：`table_write` 检测到 catalog 中不存在该表，按写入数据的 schema + 默认 partition spec（按 `order_date` 日分区，参考表无分区）创建 Iceberg 表，然后 append 写入。后续写入复用已有表，每次 append 生成一个新 snapshot。
 
-无需手工执行 DDL，零额外建表脚本。`tests/test_storage_iceberg.py::test_iceberg_auto_create_table` 覆盖此路径。
+无需手工执行 DDL，零额外建表脚本。`tests/test_storage_iceberg.py::test_iceberg_table_write_read` 覆盖此路径。
 
 #### 24.2.2 零拷贝迁移（tools/parquet_to_iceberg_migrate.py）
 
@@ -1068,11 +1067,8 @@ pwsh docker/iceberg/down.ps1
 
 ```bash
 python tools/parquet_to_iceberg_migrate.py \
-  --source s3://autobatch/warehouse/orders/orders_clean.parquet \
-  --table warehouse.orders \
-  --catalog-type sql \
-  --catalog-uri sqlite:///autobatch.db \
-  --warehouse s3://autobatch/warehouse
+  --parquet-path s3://autobatch/warehouse/orders/orders_clean.parquet \
+  --iceberg-table warehouse.orders
 ```
 
 迁移后 Iceberg 表的 snapshot 0 指向原 Parquet 文件，可立即用 `table_read` 读取或 time travel。原 Parquet 文件不动，迁移可重复执行（幂等，已注册的文件会跳过）。
@@ -1084,7 +1080,7 @@ from pyiceberg.catalog import load_catalog
 
 catalog = load_catalog("default", **{
     "type": "sql",
-    "uri": "sqlite:///autobatch.db",
+    "catalog_uri": "sqlite:///autobatch.db",
     "warehouse": "s3://autobatch/warehouse",
 })
 # 自动建表（如不存在）+ 注册已有 Parquet 文件，零拷贝
@@ -1104,10 +1100,10 @@ Iceberg 每次写操作（append / overwrite / delete）生成一个不可变 sn
 代码示例：time travel 读取历史快照（Python）
 
 ```python
-from src.storage_iceberg import list_snapshots, read_history_snapshot
+from src.iceberg import list_snapshots, read_history_snapshot
 
 # 1. 列出所有快照
-snapshots = list_snapshots("warehouse.orders")
+snapshots = list_snapshots("warehouse.orders", cfg)
 for snap in snapshots:
     print(snap.snapshot_id, snap.timestamp, snap.parent_id, snap.summary)
 # 9123456789 2026-08-16T10:00:00Z 9123456788 {"added-data-files":"1"}
@@ -1115,7 +1111,7 @@ for snap in snapshots:
 # ...
 
 # 2. 读取昨天 09:00 的快照（回溯到某个 snapshot_id）
-rows, fields = read_history_snapshot("warehouse.orders", snapshot_id=9123456788)
+rows, fields = read_history_snapshot("warehouse.orders", cfg, snapshot_id=9123456788)
 print(f"历史快照行数: {len(rows)}")
 ```
 
@@ -1125,7 +1121,7 @@ print(f"历史快照行数: {len(rows)}")
 - **审计**：按 snapshot_id 查任意历史时刻的全量视图
 - **可重复读**：固定 snapshot_id 做分析，不受后续写操作影响（snapshot 不可变）
 
-`tests/test_storage_iceberg.py::test_time_travel_read_history` 覆盖此路径：写入 3 批数据后，`read_history_snapshot` 各 snapshot 返回对应批次的行数。
+`tests/test_storage_iceberg.py::test_iceberg_time_travel` 覆盖此路径：写入 3 批数据后，`read_history_snapshot` 各 snapshot 返回对应批次的行数。
 
 ### 24.4 Snapshot Diff 增量
 
@@ -1152,7 +1148,7 @@ print(f"历史快照行数: {len(rows)}")
   "backend": "iceberg",
   "iceberg": {
     "catalog_type": "sql",
-    "uri": "sqlite:///autobatch.db",
+    "catalog_uri": "sqlite:///autobatch.db",
     "warehouse": "s3://autobatch/warehouse"
   }
 }
@@ -1199,7 +1195,7 @@ rows = list(new_scan.to_arrow().to_pylist())
 5. 后续运行：snapshot diff 只处理新增/更新/删除的 data files
 6. 回退：`incremental.mode` 改回 `"high_watermark"` + 删除 `state/` 重建水位
 
-`tests/test_storage_iceberg.py::test_snapshot_diff_incremental` 覆盖：写入 3 批数据，每次只处理本批 snapshot diff，聚合 merge 正确。
+`tests/test_storage_iceberg.py::test_iceberg_snapshot_diff` 覆盖：写入 3 批数据，每次只处理本批 snapshot diff，聚合 merge 正确。
 
 ### 24.5 Spark + Iceberg 集成
 
@@ -1237,7 +1233,7 @@ docker build -t autobatch-spark:iceberg \
   "backend": "spark",
   "format": "parquet",
   "spark": {
-    "master": "spark://localhost:7077",
+    "master": "spark://localhost:15077",
     "app_name": "autobatch-iceberg",
     "executor_memory": "2g",
     "executor_cores": 2,
@@ -1247,7 +1243,7 @@ docker build -t autobatch-spark:iceberg \
     "catalog": {
       "autobatch": {
         "type": "rest",
-        "uri": "http://localhost:8181",
+        "catalog_uri": "http://localhost:8181",
         "warehouse": "s3://autobatch/warehouse"
       }
     }
@@ -1257,7 +1253,7 @@ docker build -t autobatch-spark:iceberg \
   "backend": "iceberg",
   "iceberg": {
     "catalog_type": "rest",
-    "uri": "http://localhost:8181",
+    "catalog_uri": "http://localhost:8181",
     "warehouse": "s3://autobatch/warehouse"
   }
 }

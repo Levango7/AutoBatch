@@ -29,6 +29,7 @@
     清理 root logger 上由 setup_logging 添加的 handler，避免 pytest 多次
     调用 run_pipeline 时 handler 累积.
 """
+
 from __future__ import annotations
 
 import json
@@ -39,12 +40,31 @@ from typing import Any
 
 # 标准字段，不放入 extra
 _STD_ATTRS = {
-    "name", "msg", "args", "levelname", "levelno", "pathname", "filename",
-    "module", "exc_info", "exc_text", "stack_info", "lineno", "funcName",
-    "created", "msecs", "relativeCreated", "thread", "threadName",
-    "processName", "process", "getMessage", "taskName",
+    "name",
+    "msg",
+    "args",
+    "levelname",
+    "levelno",
+    "pathname",
+    "filename",
+    "module",
+    "exc_info",
+    "exc_text",
+    "stack_info",
+    "lineno",
+    "funcName",
+    "created",
+    "msecs",
+    "relativeCreated",
+    "thread",
+    "threadName",
+    "processName",
+    "process",
+    "getMessage",
+    "taskName",
     # 由 BatchLogFilter 注入的结构化字段，单独输出不进 extra
-    "batch_id", "stage",
+    "batch_id",
+    "stage",
 }
 
 
@@ -121,7 +141,7 @@ class TextFormatter(logging.Formatter):
     def __init__(self):
         super().__init__(
             fmt="%(asctime)s %(levelname)s [batch=%(batch_id)s stage=%(stage)s] "
-                "%(name)s: %(message)s",
+            "%(name)s: %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         )
 

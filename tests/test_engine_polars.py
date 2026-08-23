@@ -10,6 +10,7 @@
 3. test_polars_incremental_combination      — 增量 + polars：首次建水位、二跑零增量、追加只处理新增
 4. test_polars_parquet_format               — engine.format="parquet" 时 pipeline 跑通（若当前阶段未支持则 skip）
 """
+
 from __future__ import annotations
 
 import copy
@@ -68,24 +69,27 @@ def _append_orders(orders_path: str, new_rows: list[dict[str, str]]) -> None:
     csv_write(orders_path, fields, existing + new_rows)
 
 
-def _make_new_orders(n: int, start_id: int, cid: str, pid: str,
-                     base_date: str, unit_price: str = "100000.00") -> list[dict[str, str]]:
+def _make_new_orders(
+    n: int, start_id: int, cid: str, pid: str, base_date: str, unit_price: str = "100000.00"
+) -> list[dict[str, str]]:
     """生成 n 个合法新订单，order_date 从 base_date 开始每日递增。"""
     rows = []
     for i in range(n):
         date_str = _next_date(base_date, i)
-        rows.append({
-            "order_id": f"ORD-{start_id + i:08d}",
-            "customer_id": cid,
-            "product_id": pid,
-            "order_date": date_str,
-            "created_ts": date_str + "T10:00:00",
-            "region": "华东",
-            "channel": "web",
-            "quantity": "5",
-            "unit_price": unit_price,
-            "status": "completed",
-        })
+        rows.append(
+            {
+                "order_id": f"ORD-{start_id + i:08d}",
+                "customer_id": cid,
+                "product_id": pid,
+                "order_date": date_str,
+                "created_ts": date_str + "T10:00:00",
+                "region": "华东",
+                "channel": "web",
+                "quantity": "5",
+                "unit_price": unit_price,
+                "status": "completed",
+            }
+        )
     return rows
 
 
@@ -131,30 +135,30 @@ def test_polars_full_run_equals_python(polars_env):
     # orders_final.csv 行数一致
     p_final = _csv_count(os.path.join(run_dir_p, "05_output", "orders_final.csv"))
     py_final = _csv_count(os.path.join(run_dir_py, "05_output", "orders_final.csv"))
-    assert p_final == py_final, \
-        f"orders_final 行数 polars={p_final} 应等于 python={py_final}"
+    assert p_final == py_final, f"orders_final 行数 polars={p_final} 应等于 python={py_final}"
 
     # daily_sales.csv 内容一致（按 order_date 排序后逐行比较）
     p_daily = _csv_rows(os.path.join(run_dir_p, "04_aggregates", "daily_sales.csv"))
     py_daily = _csv_rows(os.path.join(run_dir_py, "04_aggregates", "daily_sales.csv"))
     daily_keys = ["order_date", "orders", "units", "revenue", "avg_order_value"]
-    assert _normalize_rows(p_daily, daily_keys) == _normalize_rows(py_daily, daily_keys), \
+    assert _normalize_rows(p_daily, daily_keys) == _normalize_rows(py_daily, daily_keys), (
         "daily_sales 内容 polars 与 python 不一致"
+    )
 
     # customer_value.csv 内容一致（按 customer_id 排序后比较关键列）
     p_cv = _csv_rows(os.path.join(run_dir_p, "04_aggregates", "customer_value.csv"))
     py_cv = _csv_rows(os.path.join(run_dir_py, "04_aggregates", "customer_value.csv"))
     cv_keys = ["customer_id", "tier", "city", "orders", "revenue", "rank"]
-    assert _normalize_rows(p_cv, cv_keys) == _normalize_rows(py_cv, cv_keys), \
+    assert _normalize_rows(p_cv, cv_keys) == _normalize_rows(py_cv, cv_keys), (
         "customer_value 内容 polars 与 python 不一致"
+    )
 
     # DQ Score 一致
     manifest_p = json_load(os.path.join(run_dir_p, "manifest.json"))
     manifest_py = json_load(os.path.join(run_dir_py, "manifest.json"))
     dq_p = manifest_p["quality"]["dq_score"]
     dq_py = manifest_py["quality"]["dq_score"]
-    assert dq_p == pytest.approx(dq_py, abs=1e-9), \
-        f"DQ Score polars={dq_p} 应等于 python={dq_py}"
+    assert dq_p == pytest.approx(dq_py, abs=1e-9), f"DQ Score polars={dq_p} 应等于 python={dq_py}"
 
 
 # ----------------------------------------------------------------------
@@ -226,8 +230,9 @@ def test_polars_incremental_combination(polars_env):
 
     # 首次水位 = max(order_date)
     expected_orders_wm = max(r["order_date"] for r in _csv_rows(env["orders_path"]))
-    assert state1["tables"]["orders"]["watermark_value"] == expected_orders_wm, \
+    assert state1["tables"]["orders"]["watermark_value"] == expected_orders_wm, (
         "首次 orders 水位应为 max(order_date)"
+    )
 
     # --- 第二次运行（无新数据）---
     bid2 = _new_bid("inc-2")
@@ -240,8 +245,9 @@ def test_polars_incremental_combination(polars_env):
 
     # 水位不变
     state2 = json_load(state_path)
-    assert state2["tables"]["orders"]["watermark_value"] == expected_orders_wm, \
+    assert state2["tables"]["orders"]["watermark_value"] == expected_orders_wm, (
         "无新数据时水位应不变"
+    )
 
     # --- 追加新数据后第三次运行 ---
     cust_rows = _csv_rows(env["customers_path"])
@@ -251,8 +257,9 @@ def test_polars_incremental_combination(polars_env):
 
     n_new = 10
     base_date = _next_date(expected_orders_wm)
-    new_orders = _make_new_orders(n_new, start_id=100001, cid=cid, pid=pid,
-                                  base_date=base_date, unit_price="100000.00")
+    new_orders = _make_new_orders(
+        n_new, start_id=100001, cid=cid, pid=pid, base_date=base_date, unit_price="100000.00"
+    )
     _append_orders(env["orders_path"], new_orders)
 
     bid3 = _new_bid("inc-3")
@@ -261,14 +268,12 @@ def test_polars_incremental_combination(polars_env):
 
     # orders_incremental.csv 只含新增行
     inc_csv3 = os.path.join(run_dir3, "01_raw", "orders_incremental.csv")
-    assert _csv_count(inc_csv3) == n_new, \
-        f"orders_incremental.csv 应只含新增 {n_new} 行"
+    assert _csv_count(inc_csv3) == n_new, f"orders_incremental.csv 应只含新增 {n_new} 行"
 
     # 水位推进到新 max
     state3 = json_load(state_path)
     expected_new_wm = max(o["order_date"] for o in new_orders)
-    assert state3["tables"]["orders"]["watermark_value"] == expected_new_wm, \
-        "水位应推进到新 max"
+    assert state3["tables"]["orders"]["watermark_value"] == expected_new_wm, "水位应推进到新 max"
 
 
 # ----------------------------------------------------------------------
@@ -292,14 +297,10 @@ def test_polars_parquet_format(polars_env):
     try:
         rc, run_dir = _run(cfg, bid)
     except Exception as exc:
-        pytest.skip(
-            f"当前 Phase 2a stage 未完整支持 parquet 端到端路由: {exc}"
-        )
+        pytest.skip(f"当前 Phase 2a stage 未完整支持 parquet 端到端路由: {exc}")
 
     if rc != 0:
-        pytest.skip(
-            f"当前 Phase 2a parquet 端到端未跑通（rc={rc}），待后续阶段补全"
-        )
+        pytest.skip(f"当前 Phase 2a parquet 端到端未跑通（rc={rc}），待后续阶段补全")
 
     # 跑通则验证 status=success
     status = json_load(os.path.join(run_dir, "status.json"))
@@ -317,10 +318,12 @@ def test_polars_parquet_format(polars_env):
     p_final_parquet = p_final_path + ".parquet"
     if os.path.exists(p_final_parquet):
         import polars as pl
+
         p_final_count = pl.read_parquet(p_final_parquet).height
     else:
         p_final_count = _csv_count(p_final_path)
 
     csv_final_count = _csv_count(os.path.join(run_dir_csv, "05_output", "orders_final.csv"))
-    assert p_final_count == csv_final_count, \
+    assert p_final_count == csv_final_count, (
         f"parquet format orders_final 行数 {p_final_count} 应等于 csv format {csv_final_count}"
+    )

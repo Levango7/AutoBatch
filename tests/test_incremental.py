@@ -10,6 +10,7 @@ state 目录和数据目录，run_dir 用唯一 batch_id 隔离。
 4. test_incremental_failure_idempotent       — 失败重跑幂等（水位不推进，重跑同批增量）
 5. test_full_mode_regression                 — 全量模式（enabled:false）行为不变回归
 """
+
 from __future__ import annotations
 
 import copy
@@ -67,8 +68,9 @@ def _append_orders(orders_path: str, new_rows: list[dict[str, str]]) -> None:
     csv_write(orders_path, fields, existing + new_rows)
 
 
-def _make_new_orders(n: int, start_id: int, cid: str, pid: str,
-                     base_date: str, unit_price: str = "100000.00") -> list[dict[str, str]]:
+def _make_new_orders(
+    n: int, start_id: int, cid: str, pid: str, base_date: str, unit_price: str = "100000.00"
+) -> list[dict[str, str]]:
     """生成 n 个合法新订单，order_date 从 base_date 开始每日递增。
 
     order_id 用 {:08d} 格式化，确保匹配 ^ORD-\\d{8}$ 规则；start_id 取 100001+
@@ -78,18 +80,20 @@ def _make_new_orders(n: int, start_id: int, cid: str, pid: str,
     rows = []
     for i in range(n):
         date_str = _next_date(base_date, i)
-        rows.append({
-            "order_id": f"ORD-{start_id + i:08d}",
-            "customer_id": cid,
-            "product_id": pid,
-            "order_date": date_str,
-            "created_ts": date_str + "T10:00:00",
-            "region": "华东",
-            "channel": "web",
-            "quantity": "5",
-            "unit_price": unit_price,
-            "status": "completed",
-        })
+        rows.append(
+            {
+                "order_id": f"ORD-{start_id + i:08d}",
+                "customer_id": cid,
+                "product_id": pid,
+                "order_date": date_str,
+                "created_ts": date_str + "T10:00:00",
+                "region": "华东",
+                "channel": "web",
+                "quantity": "5",
+                "unit_price": unit_price,
+                "status": "completed",
+            }
+        )
     return rows
 
 
@@ -121,10 +125,12 @@ def test_incremental_first_run_equals_full(inc_env):
     assert "customers" in state["tables"]
     expected_orders_wm = _max_col(env["orders_path"], "order_date")
     expected_cust_wm = _max_col(env["customers_path"], "join_date")
-    assert state["tables"]["orders"]["watermark_value"] == expected_orders_wm, \
+    assert state["tables"]["orders"]["watermark_value"] == expected_orders_wm, (
         "orders 水位应为 max(order_date)"
-    assert state["tables"]["customers"]["watermark_value"] == expected_cust_wm, \
+    )
+    assert state["tables"]["customers"]["watermark_value"] == expected_cust_wm, (
         "customers 水位应为 max(join_date)"
+    )
 
     # 产物行数与全量模式一致
     inc_final = _csv_count(os.path.join(run_dir_inc, "05_output", "orders_final.csv"))
@@ -136,8 +142,7 @@ def test_incremental_first_run_equals_full(inc_env):
     assert rc_full == 0, "全量运行应成功"
     full_final = _csv_count(os.path.join(run_dir_full, "05_output", "orders_final.csv"))
 
-    assert inc_final == full_final, \
-        f"首次增量产物行数 {inc_final} 应等于全量 {full_final}"
+    assert inc_final == full_final, f"首次增量产物行数 {inc_final} 应等于全量 {full_final}"
 
 
 # ----------------------------------------------------------------------
@@ -174,8 +179,7 @@ def test_incremental_no_new_data_second_run(inc_env):
 
     # 水位不变
     state2 = _read_state(state_dir)
-    assert state2["tables"]["orders"]["watermark_value"] == wm1, \
-        "无新数据时水位应不变"
+    assert state2["tables"]["orders"]["watermark_value"] == wm1, "无新数据时水位应不变"
 
     # DQ Score=1.0（无新增检查项：orders/customers 增量为空，products 全量但无缺陷）
     manifest = json_load(os.path.join(run_dir2, "manifest.json"))
@@ -214,8 +218,9 @@ def test_incremental_append_new_data(inc_env):
 
     n_new = 10
     base_date = _next_date(wm1)  # wm1 + 1 天，确保 > 水位
-    new_orders = _make_new_orders(n_new, start_id=100001, cid=cid, pid=pid,
-                                  base_date=base_date, unit_price="100000.00")
+    new_orders = _make_new_orders(
+        n_new, start_id=100001, cid=cid, pid=pid, base_date=base_date, unit_price="100000.00"
+    )
     _append_orders(env["orders_path"], new_orders)
 
     # 第二次增量运行（处理新增行）
@@ -225,26 +230,26 @@ def test_incremental_append_new_data(inc_env):
 
     # orders_incremental.csv 只含新增行
     inc_csv = os.path.join(run_dir2, "01_raw", "orders_incremental.csv")
-    assert _csv_count(inc_csv) == n_new, \
-        f"orders_incremental.csv 应只含新增 {n_new} 行"
+    assert _csv_count(inc_csv) == n_new, f"orders_incremental.csv 应只含新增 {n_new} 行"
 
     # 水位推进到新 max
     state2 = _read_state(state_dir)
     expected_new_wm = max(o["order_date"] for o in new_orders)
-    assert state2["tables"]["orders"]["watermark_value"] == expected_new_wm, \
-        "水位应推进到新 max"
+    assert state2["tables"]["orders"]["watermark_value"] == expected_new_wm, "水位应推进到新 max"
 
     # daily_sales 行数增加（新增 10 个日期桶）
     n_daily2 = _csv_count(daily_path)
-    assert n_daily2 == n_daily1 + n_new, \
+    assert n_daily2 == n_daily1 + n_new, (
         f"daily_sales 行数应增加 {n_new}，实际 {n_daily1} -> {n_daily2}"
+    )
 
     # 新日期都在 daily_sales 中
     daily_rows2, _ = csv_read(daily_path)
     daily_dates = {r["order_date"] for r in daily_rows2}
     for o in new_orders:
-        assert o["order_date"] in daily_dates, \
-            "新日期 {} 应在 daily_sales 中".format(o["order_date"])
+        assert o["order_date"] in daily_dates, "新日期 {} 应在 daily_sales 中".format(
+            o["order_date"]
+        )
 
     # customer_value 累加正确（cid 的 orders 累加 n_new）
     # unit_price=100000 让 cid 的增量 revenue = 10*5*100000 = 5,000,000，
@@ -253,8 +258,7 @@ def test_incremental_append_new_data(inc_env):
     cv_rows, _ = csv_read(cv_path)
     cv_by_cid = {r["customer_id"]: r for r in cv_rows}
     assert cid in cv_by_cid, "cid 应在 customer_value 中（revenue 足够高）"
-    assert int(cv_by_cid[cid]["orders"]) >= n_new, \
-        f"customer_value 的 orders 应累加 >= {n_new}"
+    assert int(cv_by_cid[cid]["orders"]) >= n_new, f"customer_value 的 orders 应累加 >= {n_new}"
 
 
 # ----------------------------------------------------------------------
@@ -285,8 +289,9 @@ def test_incremental_failure_idempotent(inc_env):
 
     n_new = 5
     base_date = _next_date(wm1)
-    new_orders = _make_new_orders(n_new, start_id=200001, cid=cid, pid=pid,
-                                  base_date=base_date, unit_price="100.00")
+    new_orders = _make_new_orders(
+        n_new, start_id=200001, cid=cid, pid=pid, base_date=base_date, unit_price="100.00"
+    )
     _append_orders(env["orders_path"], new_orders)
 
     # 失败运行（fail_at=output：ingest/validate/clean/compute 已成功，output 注入失败）
@@ -297,8 +302,7 @@ def test_incremental_failure_idempotent(inc_env):
 
     # state.json 的水位未推进（两阶段提交：set_new_watermark 在内存，未 commit）
     state_fail = _read_state(state_dir)
-    assert state_fail["tables"]["orders"]["watermark_value"] == wm1, \
-        "失败时水位不应推进"
+    assert state_fail["tables"]["orders"]["watermark_value"] == wm1, "失败时水位不应推进"
 
     # 重跑同批数据（无 fail_at）：ingest 重读同一增量（水位未推进），全阶段成功后 commit
     bid_retry = _new_bid("fail-retry")
@@ -308,8 +312,9 @@ def test_incremental_failure_idempotent(inc_env):
     # 水位推进到正确值
     state_retry = _read_state(state_dir)
     expected_new_wm = max(o["order_date"] for o in new_orders)
-    assert state_retry["tables"]["orders"]["watermark_value"] == expected_new_wm, \
+    assert state_retry["tables"]["orders"]["watermark_value"] == expected_new_wm, (
         "重跑后水位应推进到新 max"
+    )
 
 
 # ----------------------------------------------------------------------
@@ -335,8 +340,7 @@ def test_full_mode_regression(inc_env):
     assert rc == 0, "全量模式应成功"
 
     # 不生成 state.json（inc_env 未跑增量，state_dir 为空；全量模式不碰 state）
-    assert not os.path.exists(os.path.join(state_dir, "state.json")), \
-        "全量模式不应生成 state.json"
+    assert not os.path.exists(os.path.join(state_dir, "state.json")), "全量模式不应生成 state.json"
 
     # status=success
     status = json_load(os.path.join(run_dir, "status.json"))

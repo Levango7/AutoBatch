@@ -1,4 +1,4 @@
-# 运行产物（每批次独立目录）
+﻿# 运行产物（每批次独立目录）
 run/
 
 # 增量处理跨批次状态（Phase 1，见 docs/evolution.md §3.3.1）
@@ -32,6 +32,9 @@ replay_pid*.log
 
 # 临时测试输出
 test_out.csv
+wget-log
+$null
+500
 
 # mypy/ruff 缓存
 .mypy_cache/

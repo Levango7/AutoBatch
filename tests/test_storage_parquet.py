@@ -10,6 +10,7 @@
 3. test_parquet_compression_ratio    — 同一数据 CSV vs Parquet 文件大小对比
 4. test_incremental_parquet          — 增量 + Parquet 组合：首次建水位、追加只处理新增
 """
+
 from __future__ import annotations
 
 import copy
@@ -31,8 +32,10 @@ def _minio_available() -> bool:
     """检查 MinIO 是否可用（localhost:9000, bucket=autobatch）."""
     try:
         from minio import Minio
-        client = Minio("localhost:9000", access_key="minioadmin",
-                       secret_key="minioadmin", secure=False)
+
+        client = Minio(
+            "localhost:9000", access_key="minioadmin", secret_key="minioadmin", secure=False
+        )
         if not client.bucket_exists("autobatch"):
             client.make_bucket("autobatch")
         return True
@@ -69,6 +72,7 @@ def _table_rows(path: str, cfg: dict[str, Any]) -> list[dict[str, str]]:
     用 table_read 路由（兼容 local_csv 和 parquet storage）。
     """
     from src.helpers import _table_exists
+
     if not _table_exists(path, cfg):
         return []
     result = table_read(path, cfg)
@@ -82,6 +86,7 @@ def _table_rows(path: str, cfg: dict[str, Any]) -> list[dict[str, str]]:
 def _table_count(path: str, cfg: dict[str, Any]) -> int:
     """table 行数；文件不存在返回 -1。"""
     from src.helpers import _table_exists
+
     if not _table_exists(path, cfg):
         return -1
     return len(_table_rows(path, cfg))
@@ -107,24 +112,27 @@ def _append_orders(orders_path: str, new_rows: list[dict[str, str]]) -> None:
     csv_write(orders_path, fields, existing + new_rows)
 
 
-def _make_new_orders(n: int, start_id: int, cid: str, pid: str,
-                     base_date: str, unit_price: str = "100000.00") -> list[dict[str, str]]:
+def _make_new_orders(
+    n: int, start_id: int, cid: str, pid: str, base_date: str, unit_price: str = "100000.00"
+) -> list[dict[str, str]]:
     """生成 n 个合法新订单，order_date 从 base_date 开始每日递增。"""
     rows = []
     for i in range(n):
         date_str = _next_date(base_date, i)
-        rows.append({
-            "order_id": f"ORD-{start_id + i:08d}",
-            "customer_id": cid,
-            "product_id": pid,
-            "order_date": date_str,
-            "created_ts": date_str + "T10:00:00",
-            "region": "华东",
-            "channel": "web",
-            "quantity": "5",
-            "unit_price": unit_price,
-            "status": "completed",
-        })
+        rows.append(
+            {
+                "order_id": f"ORD-{start_id + i:08d}",
+                "customer_id": cid,
+                "product_id": pid,
+                "order_date": date_str,
+                "created_ts": date_str + "T10:00:00",
+                "region": "华东",
+                "channel": "web",
+                "quantity": "5",
+                "unit_price": unit_price,
+                "status": "completed",
+            }
+        )
     return rows
 
 
@@ -170,55 +178,58 @@ def test_local_parquet_equivalence(parquet_env):
     assert status_c["status"] == "success", "local_csv 模式 status 应为 success"
 
     # orders_final 行数一致
-    p_final = _table_count(
-        os.path.join(run_dir_p, "05_output", "orders_final.csv"), cfg_parquet)
-    c_final = _table_count(
-        os.path.join(run_dir_c, "05_output", "orders_final.csv"), cfg_csv)
-    assert p_final == c_final, \
-        f"orders_final 行数 parquet={p_final} 应等于 local_csv={c_final}"
+    p_final = _table_count(os.path.join(run_dir_p, "05_output", "orders_final.csv"), cfg_parquet)
+    c_final = _table_count(os.path.join(run_dir_c, "05_output", "orders_final.csv"), cfg_csv)
+    assert p_final == c_final, f"orders_final 行数 parquet={p_final} 应等于 local_csv={c_final}"
 
     # daily_sales 内容一致
     p_daily = _table_rows(os.path.join(run_dir_p, "04_aggregates", "daily_sales.csv"), cfg_parquet)
     c_daily = _table_rows(os.path.join(run_dir_c, "04_aggregates", "daily_sales.csv"), cfg_csv)
     daily_keys = ["order_date", "orders", "units", "revenue", "avg_order_value"]
-    assert _normalize_rows(p_daily, daily_keys) == _normalize_rows(c_daily, daily_keys), \
+    assert _normalize_rows(p_daily, daily_keys) == _normalize_rows(c_daily, daily_keys), (
         "daily_sales 内容 parquet 与 local_csv 不一致"
+    )
 
     # category_stats 内容一致
     p_cat = _table_rows(os.path.join(run_dir_p, "04_aggregates", "category_stats.csv"), cfg_parquet)
     c_cat = _table_rows(os.path.join(run_dir_c, "04_aggregates", "category_stats.csv"), cfg_csv)
     cat_keys = ["category", "orders", "units", "revenue", "revenue_share"]
-    assert _normalize_rows(p_cat, cat_keys) == _normalize_rows(c_cat, cat_keys), \
+    assert _normalize_rows(p_cat, cat_keys) == _normalize_rows(c_cat, cat_keys), (
         "category_stats 内容 parquet 与 local_csv 不一致"
+    )
 
     # region_channel_stats 内容一致
-    p_rc = _table_rows(os.path.join(run_dir_p, "04_aggregates", "region_channel_stats.csv"), cfg_parquet)
-    c_rc = _table_rows(os.path.join(run_dir_c, "04_aggregates", "region_channel_stats.csv"), cfg_csv)
+    p_rc = _table_rows(
+        os.path.join(run_dir_p, "04_aggregates", "region_channel_stats.csv"), cfg_parquet
+    )
+    c_rc = _table_rows(
+        os.path.join(run_dir_c, "04_aggregates", "region_channel_stats.csv"), cfg_csv
+    )
     rc_keys = ["region", "channel", "orders", "revenue"]
-    assert _normalize_rows(p_rc, rc_keys) == _normalize_rows(c_rc, rc_keys), \
+    assert _normalize_rows(p_rc, rc_keys) == _normalize_rows(c_rc, rc_keys), (
         "region_channel_stats 内容 parquet 与 local_csv 不一致"
+    )
 
     # customer_value 内容一致
     p_cv = _table_rows(os.path.join(run_dir_p, "04_aggregates", "customer_value.csv"), cfg_parquet)
     c_cv = _table_rows(os.path.join(run_dir_c, "04_aggregates", "customer_value.csv"), cfg_csv)
     cv_keys = ["customer_id", "tier", "city", "orders", "revenue", "rank"]
-    assert _normalize_rows(p_cv, cv_keys) == _normalize_rows(c_cv, cv_keys), \
+    assert _normalize_rows(p_cv, cv_keys) == _normalize_rows(c_cv, cv_keys), (
         "customer_value 内容 parquet 与 local_csv 不一致"
+    )
 
     # DQ Score 一致
     manifest_p = json_load(os.path.join(run_dir_p, "manifest.json"))
     manifest_c = json_load(os.path.join(run_dir_c, "manifest.json"))
     dq_p = manifest_p["quality"]["dq_score"]
     dq_c = manifest_c["quality"]["dq_score"]
-    assert dq_p == pytest.approx(dq_c, abs=1e-9), \
-        f"DQ Score parquet={dq_p} 应等于 local_csv={dq_c}"
+    assert dq_p == pytest.approx(dq_c, abs=1e-9), f"DQ Score parquet={dq_p} 应等于 local_csv={dq_c}"
 
 
 # ----------------------------------------------------------------------
 # 场景 2: S3 Parquet 等价性测试（MinIO）
 # ----------------------------------------------------------------------
-@pytest.mark.skipif(not MINIO_AVAILABLE,
-                    reason="MinIO 不可用（localhost:9000, bucket=autobatch）")
+@pytest.mark.skipif(not MINIO_AVAILABLE, reason="MinIO 不可用（localhost:9000, bucket=autobatch）")
 def test_s3_parquet_equivalence(s3_env):
     """storage.backend="parquet" + S3 路径（MinIO），五阶段产物应与 local_csv 完全一致.
 
@@ -246,48 +257,50 @@ def test_s3_parquet_equivalence(s3_env):
     assert status_c["status"] == "success", "local_csv 模式 status 应为 success"
 
     # orders_final 行数一致
-    s_final = _table_count(
-        os.path.join(run_dir_s, "05_output", "orders_final.csv"), cfg_s3)
-    c_final = _table_count(
-        os.path.join(run_dir_c, "05_output", "orders_final.csv"), cfg_csv)
-    assert s_final == c_final, \
-        f"orders_final 行数 S3={s_final} 应等于 local_csv={c_final}"
+    s_final = _table_count(os.path.join(run_dir_s, "05_output", "orders_final.csv"), cfg_s3)
+    c_final = _table_count(os.path.join(run_dir_c, "05_output", "orders_final.csv"), cfg_csv)
+    assert s_final == c_final, f"orders_final 行数 S3={s_final} 应等于 local_csv={c_final}"
 
     # daily_sales 内容一致
     s_daily = _table_rows(os.path.join(run_dir_s, "04_aggregates", "daily_sales.csv"), cfg_s3)
     c_daily = _table_rows(os.path.join(run_dir_c, "04_aggregates", "daily_sales.csv"), cfg_csv)
     daily_keys = ["order_date", "orders", "units", "revenue", "avg_order_value"]
-    assert _normalize_rows(s_daily, daily_keys) == _normalize_rows(c_daily, daily_keys), \
+    assert _normalize_rows(s_daily, daily_keys) == _normalize_rows(c_daily, daily_keys), (
         "daily_sales 内容 S3 与 local_csv 不一致"
+    )
 
     # category_stats 内容一致
     s_cat = _table_rows(os.path.join(run_dir_s, "04_aggregates", "category_stats.csv"), cfg_s3)
     c_cat = _table_rows(os.path.join(run_dir_c, "04_aggregates", "category_stats.csv"), cfg_csv)
     cat_keys = ["category", "orders", "units", "revenue", "revenue_share"]
-    assert _normalize_rows(s_cat, cat_keys) == _normalize_rows(c_cat, cat_keys), \
+    assert _normalize_rows(s_cat, cat_keys) == _normalize_rows(c_cat, cat_keys), (
         "category_stats 内容 S3 与 local_csv 不一致"
+    )
 
     # region_channel_stats 内容一致
     s_rc = _table_rows(os.path.join(run_dir_s, "04_aggregates", "region_channel_stats.csv"), cfg_s3)
-    c_rc = _table_rows(os.path.join(run_dir_c, "04_aggregates", "region_channel_stats.csv"), cfg_csv)
+    c_rc = _table_rows(
+        os.path.join(run_dir_c, "04_aggregates", "region_channel_stats.csv"), cfg_csv
+    )
     rc_keys = ["region", "channel", "orders", "revenue"]
-    assert _normalize_rows(s_rc, rc_keys) == _normalize_rows(c_rc, rc_keys), \
+    assert _normalize_rows(s_rc, rc_keys) == _normalize_rows(c_rc, rc_keys), (
         "region_channel_stats 内容 S3 与 local_csv 不一致"
+    )
 
     # customer_value 内容一致
     s_cv = _table_rows(os.path.join(run_dir_s, "04_aggregates", "customer_value.csv"), cfg_s3)
     c_cv = _table_rows(os.path.join(run_dir_c, "04_aggregates", "customer_value.csv"), cfg_csv)
     cv_keys = ["customer_id", "tier", "city", "orders", "revenue", "rank"]
-    assert _normalize_rows(s_cv, cv_keys) == _normalize_rows(c_cv, cv_keys), \
+    assert _normalize_rows(s_cv, cv_keys) == _normalize_rows(c_cv, cv_keys), (
         "customer_value 内容 S3 与 local_csv 不一致"
+    )
 
     # DQ Score 一致
     manifest_s = json_load(os.path.join(run_dir_s, "manifest.json"))
     manifest_c = json_load(os.path.join(run_dir_c, "manifest.json"))
     dq_s = manifest_s["quality"]["dq_score"]
     dq_c = manifest_c["quality"]["dq_score"]
-    assert dq_s == pytest.approx(dq_c, abs=1e-9), \
-        f"DQ Score S3={dq_s} 应等于 local_csv={dq_c}"
+    assert dq_s == pytest.approx(dq_c, abs=1e-9), f"DQ Score S3={dq_s} 应等于 local_csv={dq_c}"
 
 
 # ----------------------------------------------------------------------
@@ -323,8 +336,9 @@ def test_parquet_compression_ratio(parquet_env):
     csv_size = os.path.getsize(csv_path)
     parquet_size = os.path.getsize(parquet_path)
 
-    assert parquet_size < csv_size * 0.8, \
+    assert parquet_size < csv_size * 0.8, (
         f"Parquet 文件大小 {parquet_size} 应小于 CSV {csv_size} 的 80%（{int(csv_size * 0.8)}）"
+    )
 
     # 打印压缩比（信息性，不断言）
     ratio = csv_size / parquet_size if parquet_size > 0 else 0
@@ -366,8 +380,9 @@ def test_incremental_parquet(parquet_env):
 
     # 首次水位 = max(order_date)
     expected_orders_wm = max(r["order_date"] for r in _csv_rows(env["orders_path"]))
-    assert state1["tables"]["orders"]["watermark_value"] == expected_orders_wm, \
+    assert state1["tables"]["orders"]["watermark_value"] == expected_orders_wm, (
         "首次 orders 水位应为 max(order_date)"
+    )
 
     # 首次运行的 daily_sales 聚合（用于后续 merge 对比）
     daily1 = _table_rows(os.path.join(run_dir1, "04_aggregates", "daily_sales.csv"), cfg)
@@ -381,8 +396,9 @@ def test_incremental_parquet(parquet_env):
 
     n_new = 10
     base_date = _next_date(expected_orders_wm)
-    new_orders = _make_new_orders(n_new, start_id=100001, cid=cid, pid=pid,
-                                  base_date=base_date, unit_price="100000.00")
+    new_orders = _make_new_orders(
+        n_new, start_id=100001, cid=cid, pid=pid, base_date=base_date, unit_price="100000.00"
+    )
     _append_orders(env["orders_path"], new_orders)
 
     bid2 = _new_bid("inc-2")
@@ -390,16 +406,13 @@ def test_incremental_parquet(parquet_env):
     assert rc2 == 0, "追加新数据后增量+parquet 运行应成功"
 
     # orders_incremental 只含新增行
-    inc_count = _table_count(
-        os.path.join(run_dir2, "01_raw", "orders_incremental.csv"), cfg)
-    assert inc_count == n_new, \
-        f"orders_incremental 行数 {inc_count} 应等于新增 {n_new}"
+    inc_count = _table_count(os.path.join(run_dir2, "01_raw", "orders_incremental.csv"), cfg)
+    assert inc_count == n_new, f"orders_incremental 行数 {inc_count} 应等于新增 {n_new}"
 
     # 水位推进到新 max
     state2 = json_load(state_path)
     expected_new_wm = max(o["order_date"] for o in new_orders)
-    assert state2["tables"]["orders"]["watermark_value"] == expected_new_wm, \
-        "水位应推进到新 max"
+    assert state2["tables"]["orders"]["watermark_value"] == expected_new_wm, "水位应推进到新 max"
 
     # 聚合 merge 正确：state/aggregates/daily_sales.csv 应包含首次 + 新增的聚合
     # state/aggregates 是 StateStore 管理的 CSV（非 parquet），用 csv_read
@@ -409,5 +422,6 @@ def test_incremental_parquet(parquet_env):
 
     # 首次全量行数 + 新增行数 = state/aggregates 累计 orders 数
     expected_total = daily1_total_orders + n_new
-    assert state_daily_total_orders == expected_total, \
+    assert state_daily_total_orders == expected_total, (
         f"state/aggregates/daily_sales 累计 orders {state_daily_total_orders} 应等于 首次{daily1_total_orders} + 新增{n_new}"
+    )

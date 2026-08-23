@@ -128,7 +128,7 @@ line-ending = "lf"                # 统一 LF 行尾
 # mypy：静态类型检查
 # -----------------------------------------------------------------------------
 [tool.mypy]
-python_version = "3.9"            # 最低目标版本
+python_version = "3.10"            # mypy >= 1.15 要求 >= 3.10；运行时兼容 py39（target-version 保持 py39）
 files = ["src"]                   # 仅检查 src/ 目录（业务代码）
 exclude = [
     "tests/",

@@ -1,4 +1,4 @@
-# ── up.ps1 ─────────────────────────────────────────────────────
+﻿# ── up.ps1 ─────────────────────────────────────────────────────
 # 一键启动 AutoBatch Spark 集群
 # 步骤: build → up → 等待 Master 就绪 → 连接 MinIO
 # ───────────────────────────────────────────────────────────────
@@ -86,7 +86,7 @@ Write-Host ""
 Write-Host "==============================================" -ForegroundColor Cyan
 Write-Host "  集群启动完成！" -ForegroundColor Green
 Write-Host "  Master Web UI:  http://localhost:8080" -ForegroundColor White
-Write-Host "  Master RPC:     spark://localhost:7077" -ForegroundColor White
+Write-Host "  Master RPC:     spark://localhost:15077" -ForegroundColor White
 Write-Host "  Worker-1 UI:    http://localhost:8081" -ForegroundColor White
 Write-Host "  Worker-2 UI:    http://localhost:8082" -ForegroundColor White
 Write-Host "==============================================" -ForegroundColor Cyan

@@ -25,6 +25,7 @@ def _col_to_str_series(df: Any, col: str) -> Any:
         polars.Expr 或 Series（字符串类型），供 .to_series().to_list() 使用。
     """
     import polars as pl
+
     dtype = df.schema.get(col)
     if dtype is not None and isinstance(dtype, (pl.Datetime, pl.Date, pl.Time, pl.Duration)):
         # Datetime → "YYYY-MM-DDTHH:MM:SS"，Date → "YYYY-MM-DD"
@@ -40,8 +41,12 @@ def _col_to_str_series(df: Any, col: str) -> Any:
 class RuleEngine:
     """Run configured rules over rows; classify good/bad, flag outliers."""
 
-    def __init__(self, dataset: str, rules: dict[str, Any],
-                 ref_data: Optional[dict[str, list[dict[str, str]]]] = None):
+    def __init__(
+        self,
+        dataset: str,
+        rules: dict[str, Any],
+        ref_data: Optional[dict[str, list[dict[str, str]]]] = None,
+    ):
         self.dataset = dataset
         self.rules = rules
         self.ref_data = ref_data or {}
@@ -50,9 +55,9 @@ class RuleEngine:
         rows = self.ref_data.get(table, [])
         return {r.get(column) for r in rows if r.get(column) not in (None, "")}
 
-    def check(self, rows: Optional[list[dict[str, str]]] = None,
-              df: Any = None,
-              spark: Any = None) -> tuple[Any, Any, list[dict[str, Any]], set]:
+    def check(
+        self, rows: Optional[list[dict[str, str]]] = None, df: Any = None, spark: Any = None
+    ) -> tuple[Any, Any, list[dict[str, Any]], set]:
         """Return (good, bad, rule_stats, outlier_indices).
 
         向后兼容：仅提供 ``rows``（List[Dict]）时走 Python 逐行路径，
@@ -84,15 +89,20 @@ class RuleEngine:
         每条 stat：{rule, checked, passed, failed, pass_rate}，
         pass_rate = passed/checked（checked=0 时记 1.0）.
         """
-        return [{
-            "rule": rule,
-            "checked": c["checked"],
-            "passed": c["passed"],
-            "failed": c["checked"] - c["passed"],
-            "pass_rate": round(c["passed"] / c["checked"], 4) if c["checked"] else 1.0,
-        } for rule, c in counters.items()]
+        return [
+            {
+                "rule": rule,
+                "checked": c["checked"],
+                "passed": c["passed"],
+                "failed": c["checked"] - c["passed"],
+                "pass_rate": round(c["passed"] / c["checked"], 4) if c["checked"] else 1.0,
+            }
+            for rule, c in counters.items()
+        ]
 
-    def check_python(self, rows: list[dict[str, str]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], set]:
+    def check_python(
+        self, rows: list[dict[str, str]]
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], set]:
         """Python 逐行校验路径（原 check 逻辑，向后兼容）。"""
         rconf = self.rules
         good: list[dict[str, Any]] = []
@@ -131,8 +141,7 @@ class RuleEngine:
         # Previously _ref_keys was called per row, rebuilding the same set
         # O(rows x ref_table_size) times. Now it is O(ref_table_size) once.
         refer_keys: dict[str, set] = {
-            col: self._ref_keys(*target.split("."))
-            for col, target in refer.items()
+            col: self._ref_keys(*target.split(".")) for col, target in refer.items()
         }
 
         counters: dict[str, dict[str, int]] = {}
@@ -145,9 +154,24 @@ class RuleEngine:
 
         for i, row in enumerate(rows):
             reasons = self._python_row_reasons(
-                i, row, required, uniq_cols, dup_ids, ranges, allowed,
-                formats, date_cols, date_min, date_max, refer, refer_keys,
-                bounds, oc, counters, bump, outlier_indices,
+                i,
+                row,
+                required,
+                uniq_cols,
+                dup_ids,
+                ranges,
+                allowed,
+                formats,
+                date_cols,
+                date_min,
+                date_max,
+                refer,
+                refer_keys,
+                bounds,
+                oc,
+                counters,
+                bump,
+                outlier_indices,
             )
             if reasons:
                 row_out: dict[str, Any] = dict(row)
@@ -162,10 +186,24 @@ class RuleEngine:
 
     @staticmethod
     def _python_row_reasons(
-        i: int, row: dict[str, str], required: list[str], uniq_cols: list[str],
-        dup_ids: set, ranges: list, allowed: dict, formats: dict,
-        date_cols: list, date_min, date_max, refer: dict, refer_keys: dict,
-        bounds, oc: dict, counters: dict, bump, outlier_indices: set,
+        i: int,
+        row: dict[str, str],
+        required: list[str],
+        uniq_cols: list[str],
+        dup_ids: set,
+        ranges: list,
+        allowed: dict,
+        formats: dict,
+        date_cols: list,
+        date_min,
+        date_max,
+        refer: dict,
+        refer_keys: dict,
+        bounds,
+        oc: dict,
+        counters: dict,
+        bump,
+        outlier_indices: set,
     ) -> list[str]:
         """Python 路径单行规则校验：bump counters，返回该行 reasons 列表.
 
@@ -247,40 +285,35 @@ class RuleEngine:
         ``_polars_counters`` / ``_polars_good_bad`` 五个子方法.
         """
         import polars as pl  # noqa: F401
+
         rconf = self.rules
         n = df.height
         if not rconf:
             return df, df.head(0), [], set()
 
         # 1. 各规则 fail mask（polars Expr 或预计算 list[bool]）
-        expr_masks, precomputed, reason_specs, rule_masks = (
-            self._polars_collect_masks(df, rconf)
-        )
+        expr_masks, precomputed, reason_specs, rule_masks = self._polars_collect_masks(df, rconf)
 
         # 2. 把 mask 加到 df，合并 bad_mask
-        dfm, bad_mask, all_mask_cols = self._polars_apply_masks(
-            df, expr_masks, precomputed, n
-        )
+        dfm, bad_mask, all_mask_cols = self._polars_apply_masks(df, expr_masks, precomputed, n)
 
         # 3. outlier 检测（只标记不拒收）
         outlier_indices, outlier_count = self._polars_outlier(df, rconf)
 
         # 4. counters（与 python 路径对齐：每行每个子规则单独计数）
-        counters = self._polars_counters(
-            dfm, rule_masks, n, rconf, outlier_count
-        )
+        counters = self._polars_counters(dfm, rule_masks, n, rconf, outlier_count)
 
         # 5. good / bad + reason 文本
-        good_df, bad_df = self._polars_good_bad(
-            df, dfm, bad_mask, reason_specs
-        )
+        good_df, bad_df = self._polars_good_bad(df, dfm, bad_mask, reason_specs)
 
         stats = self._build_stats(counters)
         return good_df, bad_df, stats, outlier_indices
 
     def _polars_collect_masks(
         self, df: Any, rconf: dict[str, Any]
-    ) -> tuple[list[tuple[str, Any]], dict[str, list[bool]], list[tuple[str, str]], dict[str, list[str]]]:
+    ) -> tuple[
+        list[tuple[str, Any]], dict[str, list[bool]], list[tuple[str, str]], dict[str, list[str]]
+    ]:
         """Polars 路径：构建各规则 fail mask.
 
         遍历 completeness/uniqueness/range/allowed_values/referential/format/date_valid
@@ -294,6 +327,7 @@ class RuleEngine:
             - rule_masks:   {rule_name: [mask_col_name]} counters 计算用
         """
         import polars as pl
+
         expr_masks: list[tuple[str, Any]] = []
         precomputed: dict[str, list[bool]] = {}
         reason_specs: list[tuple[str, str]] = []
@@ -336,8 +370,11 @@ class RuleEngine:
         # allowed_values: 非空且不在允许列表
         for col, vals in (rconf.get("allowed_values", {}) or {}).items():
             vs = pl.col(col).cast(pl.Utf8)
-            add_expr_mask("allowed_values", "invalid_value:" + col,
-                          (~vs.is_in(list(vals))) & (~vs.is_null()) & (vs.str.strip_chars() != ""))
+            add_expr_mask(
+                "allowed_values",
+                "invalid_value:" + col,
+                (~vs.is_in(list(vals))) & (~vs.is_null()) & (vs.str.strip_chars() != ""),
+            )
 
         # referential: anti join 一次找出孤儿值，再 is_in 标记
         for col, target in (rconf.get("referential", {}) or {}).items():
@@ -346,11 +383,14 @@ class RuleEngine:
             vs = pl.col(col).cast(pl.Utf8)
             non_empty = (~vs.is_null()) & (vs.str.strip_chars() != "")
             if ref_rows:
-                ref_keys = [str(r.get(ref_col)) for r in ref_rows
-                            if r.get(ref_col) not in (None, "")]
+                ref_keys = [
+                    str(r.get(ref_col)) for r in ref_rows if r.get(ref_col) not in (None, "")
+                ]
                 ref_keys_df = pl.DataFrame({"__k": ref_keys}).unique()
                 keys_df = df.select(vs.alias("__k"))
-                orphan_keys = keys_df.join(ref_keys_df, on="__k", how="anti").get_column("__k").to_list()
+                orphan_keys = (
+                    keys_df.join(ref_keys_df, on="__k", how="anti").get_column("__k").to_list()
+                )
                 expr = vs.is_in(orphan_keys) & non_empty
             else:
                 expr = non_empty
@@ -364,7 +404,9 @@ class RuleEngine:
         for col, pat in (rconf.get("format", {}) or {}).items():
             pat_re = re.compile(pat)
             vals = _col_to_str_series(df, col).fill_null("").to_series().to_list()
-            mask_list = [not (str(v).strip() == "" or pat_re.match(str(v)) is not None) for v in vals]
+            mask_list = [
+                not (str(v).strip() == "" or pat_re.match(str(v)) is not None) for v in vals
+            ]
             add_list_mask("format", "format_violation:" + col, mask_list)
 
         # date_valid (python 逐行算 mask; 多格式解析 polars 不擅长)
@@ -388,8 +430,10 @@ class RuleEngine:
 
     @staticmethod
     def _polars_apply_masks(
-        df: Any, expr_masks: list[tuple[str, Any]],
-        precomputed: dict[str, list[bool]], n: int,
+        df: Any,
+        expr_masks: list[tuple[str, Any]],
+        precomputed: dict[str, list[bool]],
+        n: int,
     ) -> tuple[Any, Any, list[str]]:
         """Polars 路径：把 mask 加到 df，合并 bad_mask.
 
@@ -400,6 +444,7 @@ class RuleEngine:
             - all_mask_cols: 所有 mask 列名（counters/good_bad 用）
         """
         import polars as pl
+
         # 把所有 mask 加到 df
         if expr_masks:
             dfm = df.with_columns(*[e.alias(c) for c, e in expr_masks])
@@ -420,22 +465,22 @@ class RuleEngine:
         return dfm, bad_mask, all_mask_cols
 
     @staticmethod
-    def _polars_outlier(
-        df: Any, rconf: dict[str, Any]
-    ) -> tuple[set, int]:
+    def _polars_outlier(df: Any, rconf: dict[str, Any]) -> tuple[set, int]:
         """Polars 路径：outlier 检测（polars quantile，只标记不拒收）.
 
         Returns:
             (outlier_indices, outlier_count)
         """
         import polars as pl
+
         oc = rconf.get("outlier") or {}
         oc_col = oc.get("column")
         outlier_indices: set = set()
         outlier_count = 0
         if oc_col and oc.get("action") == "flag" and oc_col in df.columns:
-            cf_s = df.select(pl.col(oc_col).cast(pl.Utf8).str.replace_all(",", "")
-                             .cast(pl.Float64, strict=False)).to_series()
+            cf_s = df.select(
+                pl.col(oc_col).cast(pl.Utf8).str.replace_all(",", "").cast(pl.Float64, strict=False)
+            ).to_series()
             valid = cf_s.drop_nulls()
             bounds = None
             if valid.len() >= 100:
@@ -460,8 +505,11 @@ class RuleEngine:
 
     @staticmethod
     def _polars_counters(
-        dfm: Any, rule_masks: dict[str, list[str]], n: int,
-        rconf: dict[str, Any], outlier_count: int,
+        dfm: Any,
+        rule_masks: dict[str, list[str]],
+        n: int,
+        rconf: dict[str, Any],
+        outlier_count: int,
     ) -> dict[str, dict[str, int]]:
         """Polars 路径：counters 计算（与 python 路径对齐：每行每个子规则单独计数）.
 
@@ -470,6 +518,7 @@ class RuleEngine:
         注：空 DataFrame（n=0）时 select(sum).item() 返回 None，需兜底为 0.
         """
         import polars as pl
+
         oc = rconf.get("outlier") or {}
         oc_col = oc.get("column")
         counters: dict[str, dict[str, int]] = {}
@@ -490,7 +539,9 @@ class RuleEngine:
 
     @staticmethod
     def _polars_good_bad(
-        df: Any, dfm: Any, bad_mask: Any,
+        df: Any,
+        dfm: Any,
+        bad_mask: Any,
         reason_specs: list[tuple[str, str]],
     ) -> tuple[Any, Any]:
         """Polars 路径：构造 good_df / bad_df + bad 行 reason 文本.
@@ -498,14 +549,16 @@ class RuleEngine:
         bad 行 reason 文本基于已计算的 mask（顺序与 python 路径一致）.
         """
         import polars as pl
+
         good_df = df.filter(~bad_mask)
         bad_df = df.filter(bad_mask)
 
         if bad_df.height > 0:
             bad_idx = [i for i, b in enumerate(bad_mask.to_list()) if b]
             reason_mask_cols = list(dict.fromkeys(mc for _, mc in reason_specs))
-            reason_values = {mc: dfm.select(pl.col(mc)).to_series().to_list()
-                             for mc in reason_mask_cols}
+            reason_values = {
+                mc: dfm.select(pl.col(mc)).to_series().to_list() for mc in reason_mask_cols
+            }
             bad_rows = bad_df.to_dicts()
             enriched = []
             for row_idx, row in zip(bad_idx, bad_rows):
@@ -555,9 +608,7 @@ class RuleEngine:
             return df, df.limit(0), [], set()
 
         # 1. 各规则 fail mask（Spark Expr）
-        expr_masks, reason_specs, rule_masks = self._spark_collect_masks(
-            df, rconf, spark
-        )
+        expr_masks, reason_specs, rule_masks = self._spark_collect_masks(df, rconf, spark)
 
         # 2. 把 mask 加到 df，合并 bad_mask
         dfm, all_mask_cols = self._spark_apply_masks(df, expr_masks)
@@ -569,9 +620,7 @@ class RuleEngine:
         counters = self._spark_counters(dfm, rule_masks, n, rconf, outlier_count)
 
         # 5. good / bad + reason 文本
-        good_df, bad_df = self._spark_good_bad(
-            df, dfm, all_mask_cols, reason_specs
-        )
+        good_df, bad_df = self._spark_good_bad(df, dfm, all_mask_cols, reason_specs)
 
         stats = self._build_stats(counters)
         return good_df, bad_df, stats, outlier_indices
@@ -617,7 +666,7 @@ class RuleEngine:
         # 作为 orderBy 保证 partition 内行顺序确定。
         for c in (rconf.get("uniqueness") or {}).get("columns", []):
             w = Window.partitionBy(c).orderBy(F.monotonically_increasing_id())
-            expr = (F.row_number().over(w) > 1)
+            expr = F.row_number().over(w) > 1
             add_expr_mask("uniqueness", "duplicate_key:" + c, expr)
 
         # range: null 或超出 [min, max]（cast double 与 as_float 一致）
@@ -626,14 +675,16 @@ class RuleEngine:
             lo = rng.get("min", float("-inf"))
             hi = rng.get("max", float("inf"))
             cf = F.col(col).cast("double")
-            add_expr_mask("range", "range_violation:" + col,
-                          ~cf.between(lo, hi) | cf.isNull())
+            add_expr_mask("range", "range_violation:" + col, ~cf.between(lo, hi) | cf.isNull())
 
         # allowed_values: 非空且不在允许列表
         for col, vals in (rconf.get("allowed_values", {}) or {}).items():
             vs = F.col(col).cast("string")
-            add_expr_mask("allowed_values", "invalid_value:" + col,
-                          ~vs.isin(list(vals)) & ~vs.isNull() & (F.trim(vs) != ""))
+            add_expr_mask(
+                "allowed_values",
+                "invalid_value:" + col,
+                ~vs.isin(list(vals)) & ~vs.isNull() & (F.trim(vs) != ""),
+            )
 
         # referential: left_anti join 一次找出孤儿 key 集合，再 isin 标记
         # ref_data 始终为 List[Dict] 格式（validate.py 用 load_csv 读），
@@ -644,19 +695,17 @@ class RuleEngine:
             vs = F.col(col).cast("string")
             non_empty = ~vs.isNull() & (F.trim(vs) != "")
             if ref_rows:
-                ref_keys = [str(r.get(ref_col)) for r in ref_rows
-                            if r.get(ref_col) not in (None, "")]
+                ref_keys = [
+                    str(r.get(ref_col)) for r in ref_rows if r.get(ref_col) not in (None, "")
+                ]
                 if ref_keys:
                     # 用 left_anti join 找孤儿 key（分布式，避免 collect 整张 ref 表）
                     ref_keys_df = spark.createDataFrame(
                         [(k,) for k in set(ref_keys)], "k string"
                     ).withColumnRenamed("k", "__k")
                     keys_df = df.select(vs.alias("__k")).distinct()
-                    orphan_rows = keys_df.join(
-                        ref_keys_df, "__k", "left_anti"
-                    ).collect()
-                    orphan_key_list = [row["__k"] for row in orphan_rows
-                                       if row["__k"] is not None]
+                    orphan_rows = keys_df.join(ref_keys_df, "__k", "left_anti").collect()
+                    orphan_key_list = [row["__k"] for row in orphan_rows if row["__k"] is not None]
                     expr = vs.isin(orphan_key_list) & non_empty
                 else:
                     # ref 表为空：所有非空值都是孤儿
@@ -697,9 +746,7 @@ class RuleEngine:
         return expr_masks, reason_specs, rule_masks
 
     @staticmethod
-    def _spark_apply_masks(
-        df: Any, expr_masks: list[tuple[str, Any]]
-    ) -> tuple[Any, list[str]]:
+    def _spark_apply_masks(df: Any, expr_masks: list[tuple[str, Any]]) -> tuple[Any, list[str]]:
         """Spark 路径：把 mask 加到 df，合并 bad_mask.
 
         Returns:
@@ -708,6 +755,7 @@ class RuleEngine:
             - all_mask_cols: 所有 mask 列名（counters/good_bad 用）
         """
         from pyspark.sql import functions as F
+
         # 把所有 mask 加到 df
         dfm = df
         for col, expr in expr_masks:
@@ -725,9 +773,32 @@ class RuleEngine:
         return dfm, all_mask_cols
 
     @staticmethod
-    def _spark_outlier(
-        df: Any, rconf: dict[str, Any]
-    ) -> tuple[set, int]:
+    def _outlier_bounds_from_vals(vals: list, oc: dict[str, Any]) -> Optional[tuple]:
+        """由数值序列计算 outlier 边界（IQR / zscore，三引擎共用）.
+
+        与 :meth:`_outlier_bounds`（rows/cfg 签名，python 路径）不同：
+        本方法直接接收已 cast 的数值列表，供 Spark 路径与 validate 阶段复用.
+
+        Args:
+            vals: 非空数值列表（调用方保证长度足够）.
+            oc:   outlier 规则配置（method/factor）.
+
+        Returns:
+            (lower, upper) 元组；sd=0 等无法计算时返回 None.
+        """
+        factor = float(oc.get("factor", 1.5))
+        if oc.get("method", "iqr") == "zscore":
+            mean = statistics.mean(vals)
+            sd = statistics.pstdev(vals)
+            if sd > 0:
+                return (mean - factor * sd, mean + factor * sd)
+            return None
+        q1, _, q3 = statistics.quantiles(vals, n=4)
+        iqr = q3 - q1
+        return (q1 - factor * iqr, q3 + factor * iqr)
+
+    @staticmethod
+    def _spark_outlier(df: Any, rconf: dict[str, Any]) -> tuple[set, int]:
         """Spark 路径：outlier 检测（collect 到 driver 算 bounds，只标记不拒收）.
 
         注：对大数据集 collect 到 driver 有性能瓶颈；Spark 原生方式是用
@@ -739,6 +810,7 @@ class RuleEngine:
             (outlier_indices, outlier_count)
         """
         from pyspark.sql import functions as F
+
         oc = rconf.get("outlier") or {}
         oc_col = oc.get("column")
         outlier_indices: set = set()
@@ -749,18 +821,12 @@ class RuleEngine:
             vals = [row["v"] for row in vals_rows if row["v"] is not None]
             bounds = None
             if len(vals) >= 100:
-                factor = float(oc.get("factor", 1.5))
-                if oc.get("method", "iqr") == "zscore":
-                    mean = statistics.mean(vals)
-                    sd = statistics.pstdev(vals)
-                    if sd > 0:
-                        bounds = (mean - factor * sd, mean + factor * sd)
-                else:
-                    q1, _, q3 = statistics.quantiles(vals, n=4)
-                    iqr = q3 - q1
-                    bounds = (q1 - factor * iqr, q3 + factor * iqr)
+                bounds = RuleEngine._outlier_bounds_from_vals(vals, oc)
             if bounds is not None:
-                # 用 collect 后的顺序算 outlier 行索引（与 polars 路径一致）
+                # 用 collect 后的顺序算 outlier 行索引（与 polars 路径一致）。
+                # 注意：该索引只用于计数/统计，禁止跨另一次独立 collect 按索引
+                # 对齐其他列——Spark 不保证两次 action 行序一致（validate 阶段
+                # 取 order_id 用的是单次 collect + 按值判界，见 stages/validate.py）。
                 for i, row in enumerate(vals_rows):
                     v = row["v"]
                     if v is not None and (v < bounds[0] or v > bounds[1]):
@@ -770,8 +836,11 @@ class RuleEngine:
 
     @staticmethod
     def _spark_counters(
-        dfm: Any, rule_masks: dict[str, list[str]], n: int,
-        rconf: dict[str, Any], outlier_count: int,
+        dfm: Any,
+        rule_masks: dict[str, list[str]],
+        n: int,
+        rconf: dict[str, Any],
+        outlier_count: int,
     ) -> dict[str, dict[str, int]]:
         """Spark 路径：counters 计算（与 python/polars 路径对齐：每行每个子规则单独计数）.
 
@@ -779,6 +848,7 @@ class RuleEngine:
         用 F.sum(cast int) 算每个 mask_col 的 True 数（boolean cast int: true=1, false=0）.
         """
         from pyspark.sql import functions as F
+
         oc = rconf.get("outlier") or {}
         oc_col = oc.get("column")
         counters: dict[str, dict[str, int]] = {}
@@ -799,7 +869,9 @@ class RuleEngine:
 
     @staticmethod
     def _spark_good_bad(
-        df: Any, dfm: Any, all_mask_cols: list[str],
+        df: Any,
+        dfm: Any,
+        all_mask_cols: list[str],
         reason_specs: list[tuple[str, str]],
     ) -> tuple[Any, Any]:
         """Spark 路径：构造 good_df / bad_df + bad 行 reason 文本.
@@ -809,6 +881,7 @@ class RuleEngine:
         顺序与 reason_specs 一致.
         """
         from pyspark.sql import functions as F
+
         good_df = dfm.filter(~F.col("__bad")).drop(*(all_mask_cols + ["__bad"]))
         bad_df_with_masks = dfm.filter(F.col("__bad"))
 
@@ -816,9 +889,7 @@ class RuleEngine:
         if bad_count > 0:
             reason_parts = []
             for rt, mc in reason_specs:
-                reason_parts.append(
-                    F.when(F.col(mc), F.lit(rt + ";")).otherwise(F.lit(""))
-                )
+                reason_parts.append(F.when(F.col(mc), F.lit(rt + ";")).otherwise(F.lit("")))
             if reason_parts:
                 reasons_expr = F.concat(*reason_parts)
                 reasons_expr = F.regexp_replace(reasons_expr, r";$", "")
@@ -826,10 +897,11 @@ class RuleEngine:
                 reasons_expr = F.lit("")
             # _line 用 monotonically_increasing_id + 2（Spark 无文件行号概念，
             # 仅作唯一标识，不对应原文件行号；与 python/polars 的 i+2 语义近似）
-            bad_df = (bad_df_with_masks
-                      .withColumn("_reasons", reasons_expr)
-                      .withColumn("_line", F.monotonically_increasing_id() + 2)
-                      .drop(*(all_mask_cols + ["__bad"])))
+            bad_df = (
+                bad_df_with_masks.withColumn("_reasons", reasons_expr)
+                .withColumn("_line", F.monotonically_increasing_id() + 2)
+                .drop(*(all_mask_cols + ["__bad"]))
+            )
         else:
             bad_df = df.limit(0)
         return good_df, bad_df
@@ -854,8 +926,9 @@ class RuleEngine:
         return (q1 - factor * iqr, q3 + factor * iqr)
 
 
-def quality_summary(stats_by_dataset: dict[str, list[dict[str, Any]]],
-                    quarantined: dict[str, int]) -> dict[str, Any]:
+def quality_summary(
+    stats_by_dataset: dict[str, list[dict[str, Any]]], quarantined: dict[str, int]
+) -> dict[str, Any]:
     all_rules = []
     for ds, stats in stats_by_dataset.items():
         for s in stats:
@@ -878,19 +951,30 @@ def render_markdown_report(summary: dict[str, Any]) -> str:
     lines = []
     lines.append("# 数据质量报告")
     lines.append("")
-    lines.append("- DQ Score（全部规则检查项简单平均通过率）: **{:.2%}**".format(summary["dq_score"]))
-    lines.append("- 规则检查项: {} 项（通过 {} / 失败 {}）".format(
-        summary["checks_total"], summary["checks_passed"], summary["checks_failed"]))
-    lines.append("- 隔离行数: {}".format(
-        ", ".join(f"{k}={v}" for k, v in summary["quarantined_rows"].items()) or "无"))
+    lines.append(
+        "- DQ Score（全部规则检查项简单平均通过率）: **{:.2%}**".format(summary["dq_score"])
+    )
+    lines.append(
+        "- 规则检查项: {} 项（通过 {} / 失败 {}）".format(
+            summary["checks_total"], summary["checks_passed"], summary["checks_failed"]
+        )
+    )
+    lines.append(
+        "- 隔离行数: {}".format(
+            ", ".join(f"{k}={v}" for k, v in summary["quarantined_rows"].items()) or "无"
+        )
+    )
     lines.append("")
     lines.append("## 规则明细")
     lines.append("")
     lines.append("| 数据集 | 规则 | 检查数 | 通过 | 失败 | 通过率 |")
     lines.append("|---|---|---|---|---|---|")
     for r in summary["rules"]:
-        lines.append("| {} | {} | {} | {} | {} | {:.1%} |".format(
-            r["dataset"], r["rule"], r["checked"], r["passed"], r["failed"], r["pass_rate"]))
+        lines.append(
+            "| {} | {} | {} | {} | {} | {:.1%} |".format(
+                r["dataset"], r["rule"], r["checked"], r["passed"], r["failed"], r["pass_rate"]
+            )
+        )
     lines.append("")
     lines.append("> DQ Score 口径：全部规则检查项的简单平均通过率；outlier 规则仅标记不拒收；")
     lines.append("> 唯一性/引用完整性为 100% 硬阈值；阈值均可在 config/pipeline.json 调整。")

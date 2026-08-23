@@ -29,18 +29,43 @@ class Manifest:
     def set_source(self, name: str, files: list[dict[str, Any]]) -> None:
         self.source = {"name": name, "files": files}
 
-    def add_stage(self, name: str, status: str, rows_in: int, rows_out: int,
-                  duration_ms: int, log_path: str, error: Optional[str] = None) -> None:
-        self.stages.append({
-            "name": name, "status": status, "rows_in": rows_in,
-            "rows_out": rows_out, "duration_ms": duration_ms,
-            "log": log_path, "error": error,
-        })
+    def add_stage(
+        self,
+        name: str,
+        status: str,
+        rows_in: int,
+        rows_out: int,
+        duration_ms: int,
+        log_path: str,
+        error: Optional[str] = None,
+    ) -> None:
+        self.stages.append(
+            {
+                "name": name,
+                "status": status,
+                "rows_in": rows_in,
+                "rows_out": rows_out,
+                "duration_ms": duration_ms,
+                "log": log_path,
+                "error": error,
+            }
+        )
 
-    def add_artifact(self, relpath: str, kind: str, rows: Optional[int], sha256: str,
-                     extra: Optional[dict[str, Any]] = None) -> None:
-        entry = {"path": relpath, "kind": kind, "rows": rows, "sha256": sha256,
-                 "batch_id": self.batch_id}
+    def add_artifact(
+        self,
+        relpath: str,
+        kind: str,
+        rows: Optional[int],
+        sha256: str,
+        extra: Optional[dict[str, Any]] = None,
+    ) -> None:
+        entry = {
+            "path": relpath,
+            "kind": kind,
+            "rows": rows,
+            "sha256": sha256,
+            "batch_id": self.batch_id,
+        }
         if extra:
             entry.update(extra)
         self.artifacts[relpath] = entry
@@ -80,24 +105,28 @@ class Manifest:
 
 
 def save_latest_pointer(run_root: str, batch_id: str, run_dir: str) -> None:
-    json_save(os.path.join(run_root, "latest.json"), {
-        "batch_id": batch_id,
-        "run_dir": run_dir,
-        "updated_at": utc_ts(),
-    })
+    json_save(
+        os.path.join(run_root, "latest.json"),
+        {
+            "batch_id": batch_id,
+            "run_dir": run_dir,
+            "updated_at": utc_ts(),
+        },
+    )
 
 
 def lineage_view(manifest: Manifest) -> dict[str, Any]:
     """User-facing lineage: nodes (artifacts) and edges."""
     nodes = []
     for rel, info in manifest.artifacts.items():
-        nodes.append({
-            "id": rel,
-            "kind": info.get("kind", "file"),
-            "rows": info.get("rows"),
-            "sha256": (info.get("sha256") or "")[:12],
-            "batch_id": info.get("batch_id"),
-        })
-    edges = [{"from": up, "to": target}
-             for target, ups in manifest.lineage.items() for up in ups]
+        nodes.append(
+            {
+                "id": rel,
+                "kind": info.get("kind", "file"),
+                "rows": info.get("rows"),
+                "sha256": (info.get("sha256") or "")[:12],
+                "batch_id": info.get("batch_id"),
+            }
+        )
+    edges = [{"from": up, "to": target} for target, ups in manifest.lineage.items() for up in ups]
     return {"nodes": nodes, "edges": edges}

@@ -16,6 +16,7 @@
     - __str__ 返回人类可读摘要，便于 print / 简单日志输出.
     - 不破坏既有异常体系：所有异常均继承自 Exception，可被 ``except Exception`` 捕获.
 """
+
 from __future__ import annotations
 
 

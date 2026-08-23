@@ -1,14 +1,18 @@
 """共享 fixture：端到端批次、固定小数据、链式 ctx。
 
-注意：pytest 默认 tmp_path 位于系统临时目录（通常在 C: 盘），而项目根 ROOT
-位于 F: 盘。src/stages/ingest.py 使用 os.path.relpath(dst, ROOT) 计算相对
-路径，跨盘时会抛 ValueError。为绕过该 src 限制，本 conftest 将测试临时目
-录强制创建在项目所在驱动器上，确保 dst 与 ROOT 同盘。
+注意：pytest 默认 tmp_path 位于系统临时目录，而项目根 ROOT 可能在不同盘符
+（Windows）或不同挂载点（WSL/macOS）。src/stages/ingest.py 使用
+os.path.relpath(dst, ROOT) 计算相对路径，跨盘时会抛 ValueError。为绕过该
+src 限制，本 conftest 将测试临时目录强制创建在项目所在驱动器/挂载点上，
+确保 dst 与 ROOT 同盘/同挂载点。
 """
+
 from __future__ import annotations
 
 import os
+import platform
 import shutil
+import subprocess
 import tempfile
 import uuid
 from typing import Any
@@ -19,7 +23,84 @@ from src.helpers import ROOT, PipelineContext, StageLog, abs_path, csv_write, js
 from src.lineage import Manifest
 from src.pipeline import config_digest, run_pipeline
 
+
 # ----------------------------------------------------------------------
+# 跨平台 Spark / Hadoop 路径自动探测
+# ----------------------------------------------------------------------
+def detect_spark_paths() -> dict[str, str]:
+    """探测 SPARK_HOME / JAVA_HOME / HADOOP_HOME / PYSPARK_PYTHON。
+
+    优先级：环境变量 > 系统常见路径 > Windows 默认路径（回退）。
+    Linux/WSL 默认：/opt/spark, /usr/lib/jvm, /opt/hadoop
+    macOS 默认：/usr/local/opt/spark, /usr/local/opt/openjdk
+    Windows 默认：F:\\spark_home, F:\\jdk17, F:\\hadoop, F:\\Py314\\python.exe
+    """
+    env = os.environ
+    result: dict[str, str] = {}
+
+    # SPARK_HOME
+    result["SPARK_HOME"] = env.get("SPARK_HOME") or _find_path(
+        ["/opt/spark", "/usr/local/spark", "C:\\spark", "F:\\spark_home"]
+    )
+    # JAVA_HOME
+    result["JAVA_HOME"] = (
+        env.get("JAVA_HOME")
+        or env.get("JAVA_HOME_17_X64")  # Windows JDK 安装记录
+        or _find_path(
+            [
+                "/usr/lib/jvm/java-17-openjdk-amd64",
+                "/usr/lib/jvm/java-17-openjdk-x86_64",
+                "/usr/lib/jvm/default-java",
+                "/usr/local/opt/openjdk",
+                "C:\\Program Files\\Java\\jdk-17",
+                "C:\\Program Files\\Java\\jdk17",
+                "F:\\jdk17",
+            ]
+        )
+    )
+    # HADOOP_HOME
+    result["HADOOP_HOME"] = env.get("HADOOP_HOME") or _find_path(
+        ["/opt/hadoop", "/usr/local/hadoop", "C:\\hadoop", "F:\\hadoop"]
+    )
+    # PYSPARK_PYTHON（Driver 端）
+    result["PYSPARK_PYTHON"] = env.get("PYSPARK_PYTHON") or env.get("PYTHON") or _detect_python()
+    # PYSPARK_DRIVER_PYTHON
+    result["PYSPARK_DRIVER_PYTHON"] = env.get("PYSPARK_DRIVER_PYTHON") or result["PYSPARK_PYTHON"]
+
+    return result
+
+
+def _find_path(candidates: list[str]) -> str:
+    """返回第一个实际存在的路径，全部不存在则返回第一个候选（让后续测试 skip）。"""
+    for c in candidates:
+        if os.path.isdir(c):
+            return c
+    return candidates[0] if candidates else ""
+
+
+def _detect_python() -> str:
+    """检测可用 Python 解释器路径。"""
+    try:
+        return shutil.which("python3") or shutil.which("python") or ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _build_spark_env(spark_paths: dict[str, str]) -> dict[str, str]:
+    """根据探测结果设置环境变量，返回 (old_env, need_cleanup)。"""
+    old_env = dict(os.environ)
+    for key, value in spark_paths.items():
+        if value:
+            os.environ.setdefault(key, value)
+    # PATH 前置 hadoop/bin + spark/bin
+    hadoop_bin = os.path.join(os.environ.get("HADOOP_HOME", ""), "bin")
+    spark_bin = os.path.join(os.environ.get("SPARK_HOME", ""), "bin")
+    extra = os.pathsep.join(p for p in (hadoop_bin, spark_bin) if p and os.path.isdir(p))
+    if extra:
+        os.environ["PATH"] = extra + os.pathsep + os.environ.get("PATH", "")
+    return old_env
+
+
 # 精确 batch_id cleanup 机制
 # ----------------------------------------------------------------------
 # 设计：每个 env fixture 维护一个 created_batch_ids 列表，通过包装 run_pipeline
@@ -31,14 +112,22 @@ from src.pipeline import config_digest, run_pipeline
 # - 新方案只清理本 fixture 实际创建的 batch_id，不误删其他进程的临时目录
 # - fallback 仅在列表为空时启用（向后兼容，不应在正常路径触发）
 _BATCH_ID_PREFIXES = (
-    "test-inc-", "test-polars-", "test-cluster-", "test-parquet-",
-    "test-s3-", "test-iceberg-", "test-spark-", "test-spark-iceberg-",
-    "test-e2e-", "test-errhand-",
+    "test-inc-",
+    "test-polars-",
+    "test-cluster-",
+    "test-parquet-",
+    "test-s3-",
+    "test-iceberg-",
+    "test-spark-",
+    "test-spark-iceberg-",
+    "test-e2e-",
+    "test-errhand-",
 )
 
 
-def _cleanup_run_dir(run_root: str, created_batch_ids: list[str],
-                     prefix: str | None = None) -> None:
+def _cleanup_run_dir(
+    run_root: str, created_batch_ids: list[str], prefix: str | None = None
+) -> None:
     """按精确 batch_id 列表清理 run_dir.
 
     优先清理 created_batch_ids 中的批次（精确清理，不误删其他进程目录）.
@@ -64,21 +153,51 @@ def _make_run_wrapper(real_run_pipeline, created_batch_ids: list[str]):
     返回的 wrapper 签名与 run_pipeline 完全一致，仅在调用前把 batch_id
     append 到列表.测试通过 env["run"] 调用即可享受精确清理.
     """
+
     def _wrapped(cfg, batch_id, fail_at="", **kwargs):
         created_batch_ids.append(batch_id)
         return real_run_pipeline(cfg, batch_id, fail_at, **kwargs)
+
     return _wrapped
 
+
 SAMPLE_ORDERS: list[dict[str, str]] = [
-    {"order_id": "ORD-00000001", "customer_id": "CUS-000001", "product_id": "PRD-000001",
-     "order_date": "2026-01-15", "created_ts": "2026-01-15T10:00:00", "region": "华东",
-     "channel": "web", "quantity": "5", "unit_price": "100.00", "status": "completed"},
-    {"order_id": "ORD-00000002", "customer_id": "CUS-000002", "product_id": "PRD-000002",
-     "order_date": "2026-02-20", "created_ts": "2026-02-20T11:30:00", "region": "华北",
-     "channel": "app", "quantity": "3", "unit_price": "50.50", "status": "pending"},
-    {"order_id": "ORD-00000003", "customer_id": "CUS-000001", "product_id": "PRD-000001",
-     "order_date": "2026-03-10", "created_ts": "2026-03-10T09:15:00", "region": "华南",
-     "channel": "store", "quantity": "10", "unit_price": "25.00", "status": "cancelled"},
+    {
+        "order_id": "ORD-00000001",
+        "customer_id": "CUS-000001",
+        "product_id": "PRD-000001",
+        "order_date": "2026-01-15",
+        "created_ts": "2026-01-15T10:00:00",
+        "region": "华东",
+        "channel": "web",
+        "quantity": "5",
+        "unit_price": "100.00",
+        "status": "completed",
+    },
+    {
+        "order_id": "ORD-00000002",
+        "customer_id": "CUS-000002",
+        "product_id": "PRD-000002",
+        "order_date": "2026-02-20",
+        "created_ts": "2026-02-20T11:30:00",
+        "region": "华北",
+        "channel": "app",
+        "quantity": "3",
+        "unit_price": "50.50",
+        "status": "pending",
+    },
+    {
+        "order_id": "ORD-00000003",
+        "customer_id": "CUS-000001",
+        "product_id": "PRD-000001",
+        "order_date": "2026-03-10",
+        "created_ts": "2026-03-10T09:15:00",
+        "region": "华南",
+        "channel": "store",
+        "quantity": "10",
+        "unit_price": "25.00",
+        "status": "cancelled",
+    },
 ]
 SAMPLE_CUSTOMERS: list[dict[str, str]] = [
     {"customer_id": "CUS-000001", "tier": "gold", "city": "上海", "join_date": "2022-06-19"},
@@ -94,10 +213,18 @@ PRODUCT_FIELDS = list(SAMPLE_PRODUCTS[0].keys())
 
 
 def _good_order(oid="ORD-00000001", cid="CUS-000001", pid="PRD-000001"):
-    return {"order_id": oid, "customer_id": cid, "product_id": pid,
-            "order_date": "2026-01-15", "created_ts": "2026-01-15T10:00:00",
-            "region": "华东", "channel": "web", "quantity": "5",
-            "unit_price": "100.00", "status": "completed"}
+    return {
+        "order_id": oid,
+        "customer_id": cid,
+        "product_id": pid,
+        "order_date": "2026-01-15",
+        "created_ts": "2026-01-15T10:00:00",
+        "region": "华东",
+        "channel": "web",
+        "quantity": "5",
+        "unit_price": "100.00",
+        "status": "completed",
+    }
 
 
 def _load_small_config():
@@ -110,9 +237,20 @@ def _make_log(run_dir, name):
 
 @pytest.fixture(scope="session")
 def _same_drive_tmp_root():
-    """在项目所在驱动器上创建临时目录基，避免跨盘 os.path.relpath 失败。"""
-    drive = os.path.splitdrive(ROOT)[0] + os.sep
-    d = tempfile.mkdtemp(prefix="autobatch_test_", dir=drive)
+    """在项目所在驱动器/挂载点上创建临时目录基，避免跨盘 os.path.relpath 失败。
+
+    Windows: 确保 tmp 与 ROOT 同盘（如都在 F:）。
+    POSIX (Linux/macOS/WSL): 用项目父目录——与 ROOT 同一挂载点，且运行测试的
+    用户必然可写（CI 的非 root runner 对 "/" 无写权限，不能用 splitdrive
+    退化出的 "/" 作为 mkdtemp 目录）；父目录不可写时回退系统默认 tmp。
+    """
+    if os.name == "nt":
+        base = os.path.splitdrive(ROOT)[0] + os.sep
+    else:
+        base = os.path.dirname(ROOT)
+        if not os.access(base, os.W_OK):
+            base = None  # 回退 tempfile 默认目录
+    d = tempfile.mkdtemp(prefix="autobatch_test_", dir=base)
     yield d
     shutil.rmtree(d, ignore_errors=True)
 
@@ -124,6 +262,7 @@ def small_batch_dir(_same_drive_tmp_root):
     data_dir = os.path.join(tmp, "data", "raw")
     cfg["generator"]["output_dir"] = data_dir
     from src.generator import main as gen_main
+
     gen_main(cfg)
     cfg["source"]["files"] = {
         "orders": os.path.join(data_dir, "orders.csv"),
@@ -201,6 +340,7 @@ def base_ctx(_same_drive_tmp_root):
 @pytest.fixture
 def ingested_ctx(base_ctx):
     from src.stages import ingest
+
     with _make_log(base_ctx.run_dir, "ingest") as log:
         ingest.run(base_ctx, log)
     return base_ctx
@@ -209,6 +349,7 @@ def ingested_ctx(base_ctx):
 @pytest.fixture
 def validated_ctx(ingested_ctx):
     from src.stages import validate
+
     with _make_log(ingested_ctx.run_dir, "validate") as log:
         validate.run(ingested_ctx, log)
     return ingested_ctx
@@ -217,6 +358,7 @@ def validated_ctx(ingested_ctx):
 @pytest.fixture
 def cleaned_ctx(validated_ctx):
     from src.stages import clean
+
     with _make_log(validated_ctx.run_dir, "clean") as log:
         clean.run(validated_ctx, log)
     return validated_ctx
@@ -225,6 +367,7 @@ def cleaned_ctx(validated_ctx):
 @pytest.fixture
 def computed_ctx(cleaned_ctx):
     from src.stages import compute
+
     with _make_log(cleaned_ctx.run_dir, "compute") as log:
         compute.run(cleaned_ctx, log)
     return cleaned_ctx
@@ -294,6 +437,7 @@ def inc_env(inc_config_path, request):
     # 缺陷，保留其他缺陷（missing/duplicate/negative_qty/...）以维持 DQ 校验。
     cfg["generator"]["defect_rates"]["bad_date"] = 0.0
     from src.generator import main as gen_main
+
     gen_main(cfg)
 
     cfg["source"]["files"] = {
@@ -314,6 +458,7 @@ def inc_env(inc_config_path, request):
             for name in os.listdir(run_root):
                 if name.startswith("test-inc-"):
                     shutil.rmtree(os.path.join(run_root, name), ignore_errors=True)
+
     request.addfinalizer(_cleanup)
 
     return {
@@ -367,6 +512,7 @@ def polars_env(_same_drive_tmp_root, request):
     # 与 inc_env 一致：关闭 bad_date 缺陷，避免污染水位（增量测试复用本 fixture 时需要）
     cfg["generator"]["defect_rates"]["bad_date"] = 0.0
     from src.generator import main as gen_main
+
     gen_main(cfg)
 
     cfg["source"]["files"] = {
@@ -391,6 +537,7 @@ def polars_env(_same_drive_tmp_root, request):
             for name in os.listdir(run_root):
                 if name.startswith("test-polars-"):
                     shutil.rmtree(os.path.join(run_root, name), ignore_errors=True)
+
     request.addfinalizer(_cleanup)
 
     return {
@@ -408,10 +555,12 @@ def polars_env(_same_drive_tmp_root, request):
 # ----------------------------------------------------------------------
 # Spark 多机模式 fixture（cluster + S3 Parquet）
 # ----------------------------------------------------------------------
-def _spark_master_reachable(host: str = "localhost", port: int = 15077,
-                            timeout: float = 3.0) -> bool:
+def _spark_master_reachable(
+    host: str = "localhost", port: int = 15077, timeout: float = 3.0
+) -> bool:
     """检查 Spark Master 是否可达（socket 连接测试）."""
     import socket
+
     try:
         s = socket.socket()
         s.settimeout(timeout)
@@ -455,18 +604,14 @@ def spark_cluster_env(_same_drive_tmp_root, request):
     if not _spark_master_reachable():
         pytest.skip("Spark Master not reachable at localhost:15077")
 
-    # 保存并设置环境变量（与 spark_env 一致）
-    old_env = dict(os.environ)
-    os.environ["SPARK_HOME"] = r"F:\spark_home"
-    os.environ["JAVA_HOME"] = r"F:\jdk17"
+    # 跨平台探测 Spark/Hadoop 路径（环境变量优先，系统路径次之，Windows 回退）
+    spark_paths = detect_spark_paths()
+    old_env = _build_spark_env(spark_paths)
     # 多机模式：PYSPARK_PYTHON 是 Worker 端 Python 路径（Docker 容器内为 python3），
-    # PYSPARK_DRIVER_PYTHON 是 Driver 端 Python 路径（宿主机 Windows 路径）
-    os.environ["PYSPARK_PYTHON"] = "python3"
-    os.environ["PYSPARK_DRIVER_PYTHON"] = r"F:\Py314\python.exe"
-    os.environ["HADOOP_HOME"] = r"F:\hadoop"
-    hadoop_bin = os.path.join(os.environ["HADOOP_HOME"], "bin")
-    spark_bin = os.path.join(os.environ["SPARK_HOME"], "bin")
-    os.environ["PATH"] = hadoop_bin + os.pathsep + spark_bin + os.pathsep + os.environ.get("PATH", "")
+    # PYSPARK_DRIVER_PYTHON 是 Driver 端 Python 路径（宿主机路径）
+    os.environ.setdefault("PYSPARK_PYTHON", "python3")
+    if not os.environ.get("PYSPARK_DRIVER_PYTHON"):
+        os.environ["PYSPARK_DRIVER_PYTHON"] = spark_paths.get("PYSPARK_PYTHON", "python")
 
     work_dir = tempfile.mkdtemp(prefix="autobatch_cluster_", dir=_same_drive_tmp_root)
 
@@ -481,9 +626,13 @@ def spark_cluster_env(_same_drive_tmp_root, request):
     cfg["engine"]["spark"]["num_executors"] = 2
     cfg["engine"]["spark"]["driver_memory"] = "4g"
     # 多机模式：Driver ↔ Worker 反向连接
+    # WSL/macOS Docker 场景下 host.docker.internal 可能不可达，回退到 localhost
+    _driver_host = os.environ.get("SPARK_CLUSTER_DRIVER_HOST") or (
+        "host.docker.internal" if platform.system() == "Windows" else "localhost"
+    )
     cfg["engine"]["spark"]["cluster"] = {
         "enabled": True,
-        "driver_host": "host.docker.internal",
+        "driver_host": _driver_host,
         "s3_endpoint": "localhost:9000",  # Worker 通过容器内 socat 代理访问 MinIO
     }
 
@@ -506,6 +655,7 @@ def spark_cluster_env(_same_drive_tmp_root, request):
     # 关闭 bad_date 缺陷，避免污染水位（增量测试复用本 fixture 时需要）
     cfg["generator"]["defect_rates"]["bad_date"] = 0.0
     from src.generator import main as gen_main
+
     gen_main(cfg)
 
     cfg["source"]["files"] = {
@@ -533,11 +683,12 @@ def spark_cluster_env(_same_drive_tmp_root, request):
         # 清理 MinIO 中本测试前缀的数据
         try:
             from minio import Minio
-            client = Minio("localhost:9000", access_key="minioadmin",
-                           secret_key="minioadmin", secure=False)
+
+            client = Minio(
+                "localhost:9000", access_key="minioadmin", secret_key="minioadmin", secure=False
+            )
             prefix_to_clean = s3_prefix + "/"
-            objects = list(client.list_objects("autobatch", prefix=prefix_to_clean,
-                                               recursive=True))
+            objects = list(client.list_objects("autobatch", prefix=prefix_to_clean, recursive=True))
             for obj in objects:
                 client.remove_object("autobatch", obj.object_name)
         except Exception:  # noqa: BLE001
@@ -545,6 +696,7 @@ def spark_cluster_env(_same_drive_tmp_root, request):
         # 还原环境变量
         os.environ.clear()
         os.environ.update(old_env)
+
     request.addfinalizer(_cleanup)
 
     return {
@@ -605,6 +757,7 @@ def parquet_env(_same_drive_tmp_root, request):
     # 与 inc_env / polars_env 一致：关闭 bad_date 缺陷，避免污染水位
     cfg["generator"]["defect_rates"]["bad_date"] = 0.0
     from src.generator import main as gen_main
+
     gen_main(cfg)
 
     cfg["source"]["files"] = {
@@ -629,6 +782,7 @@ def parquet_env(_same_drive_tmp_root, request):
             for name in os.listdir(run_root):
                 if name.startswith("test-parquet-"):
                     shutil.rmtree(os.path.join(run_root, name), ignore_errors=True)
+
     request.addfinalizer(_cleanup)
 
     return {
@@ -688,6 +842,7 @@ def s3_env(_same_drive_tmp_root, request):
     cfg["generator"]["output_dir"] = data_dir
     cfg["generator"]["defect_rates"]["bad_date"] = 0.0
     from src.generator import main as gen_main
+
     gen_main(cfg)
 
     cfg["source"]["files"] = {
@@ -715,15 +870,17 @@ def s3_env(_same_drive_tmp_root, request):
         # 清理 MinIO 中本测试前缀的数据
         try:
             from minio import Minio
-            client = Minio("localhost:9000", access_key="minioadmin",
-                           secret_key="minioadmin", secure=False)
+
+            client = Minio(
+                "localhost:9000", access_key="minioadmin", secret_key="minioadmin", secure=False
+            )
             prefix_to_clean = s3_prefix + "/"
-            objects = list(client.list_objects("autobatch", prefix=prefix_to_clean,
-                                               recursive=True))
+            objects = list(client.list_objects("autobatch", prefix=prefix_to_clean, recursive=True))
             for obj in objects:
                 client.remove_object("autobatch", obj.object_name)
         except Exception:  # noqa: BLE001
             pass  # MinIO 不可用时忽略清理错误
+
     request.addfinalizer(_cleanup)
 
     return {
@@ -744,8 +901,10 @@ def _minio_available() -> bool:
     """检查 MinIO 是否可用（localhost:9000, bucket=autobatch）."""
     try:
         from minio import Minio
-        client = Minio("localhost:9000", access_key="minioadmin",
-                       secret_key="minioadmin", secure=False)
+
+        client = Minio(
+            "localhost:9000", access_key="minioadmin", secret_key="minioadmin", secure=False
+        )
         # 确保 bucket 存在
         if not client.bucket_exists("autobatch"):
             client.make_bucket("autobatch")
@@ -813,6 +972,7 @@ def iceberg_env(_same_drive_tmp_root, request):
     # 与 inc_env / polars_env 一致：关闭 bad_date 缺陷，避免污染水位
     cfg["generator"]["defect_rates"]["bad_date"] = 0.0
     from src.generator import main as gen_main
+
     gen_main(cfg)
 
     cfg["source"]["files"] = {
@@ -840,6 +1000,7 @@ def iceberg_env(_same_drive_tmp_root, request):
             for name in os.listdir(run_root):
                 if name.startswith("test-iceberg-"):
                     shutil.rmtree(os.path.join(run_root, name), ignore_errors=True)
+
     request.addfinalizer(_cleanup)
 
     return {
@@ -884,17 +1045,9 @@ def spark_env(_same_drive_tmp_root, request):
 
     cleanup: 测试结束后清理本 fixture 创建的 test-spark-* run_dir + 还原环境变量。
     """
-    # 保存并设置环境变量（junction 路径，避免空格/特殊字符问题）
-    old_env = dict(os.environ)
-    os.environ["SPARK_HOME"] = r"F:\spark_home"
-    os.environ["JAVA_HOME"] = r"F:\jdk17"
-    os.environ["PYSPARK_PYTHON"] = r"F:\Py314\python.exe"
-    os.environ["PYSPARK_DRIVER_PYTHON"] = r"F:\Py314\python.exe"
-    os.environ["HADOOP_HOME"] = r"F:\hadoop"
-    # PATH 前置 hadoop/bin + spark/bin，确保 winutils.exe / spark-submit 可见
-    hadoop_bin = os.path.join(os.environ["HADOOP_HOME"], "bin")
-    spark_bin = os.path.join(os.environ["SPARK_HOME"], "bin")
-    os.environ["PATH"] = hadoop_bin + os.pathsep + spark_bin + os.pathsep + os.environ.get("PATH", "")
+    # 跨平台探测 Spark/Hadoop 路径（环境变量优先，系统路径次之，Windows 回退）
+    spark_paths = detect_spark_paths()
+    old_env = _build_spark_env(spark_paths)
 
     work_dir = tempfile.mkdtemp(prefix="autobatch_spark_", dir=_same_drive_tmp_root)
 
@@ -915,6 +1068,7 @@ def spark_env(_same_drive_tmp_root, request):
     # 与 inc_env / polars_env 一致：关闭 bad_date 缺陷，避免污染水位
     cfg["generator"]["defect_rates"]["bad_date"] = 0.0
     from src.generator import main as gen_main
+
     gen_main(cfg)
 
     cfg["source"]["files"] = {
@@ -941,6 +1095,7 @@ def spark_env(_same_drive_tmp_root, request):
                     shutil.rmtree(os.path.join(run_root, name), ignore_errors=True)
         os.environ.clear()
         os.environ.update(old_env)
+
     request.addfinalizer(_cleanup)
 
     return {
@@ -987,16 +1142,9 @@ def spark_iceberg_env(_same_drive_tmp_root, request):
 
     cleanup: 测试结束后清理 test-spark-iceberg-* run_dir + 还原环境变量.
     """
-    # 保存并设置环境变量（与 spark_env 一致）
-    old_env = dict(os.environ)
-    os.environ["SPARK_HOME"] = r"F:\spark_home"
-    os.environ["JAVA_HOME"] = r"F:\jdk17"
-    os.environ["PYSPARK_PYTHON"] = r"F:\Py314\python.exe"
-    os.environ["PYSPARK_DRIVER_PYTHON"] = r"F:\Py314\python.exe"
-    os.environ["HADOOP_HOME"] = r"F:\hadoop"
-    hadoop_bin = os.path.join(os.environ["HADOOP_HOME"], "bin")
-    spark_bin = os.path.join(os.environ["SPARK_HOME"], "bin")
-    os.environ["PATH"] = hadoop_bin + os.pathsep + spark_bin + os.pathsep + os.environ.get("PATH", "")
+    # 跨平台探测 Spark/Hadoop 路径（环境变量优先，系统路径次之，Windows 回退）
+    spark_paths = detect_spark_paths()
+    old_env = _build_spark_env(spark_paths)
 
     work_dir = tempfile.mkdtemp(prefix="autobatch_spark_iceberg_", dir=_same_drive_tmp_root)
 
@@ -1039,6 +1187,7 @@ def spark_iceberg_env(_same_drive_tmp_root, request):
     cfg["generator"]["output_dir"] = data_dir
     cfg["generator"]["defect_rates"]["bad_date"] = 0.0
     from src.generator import main as gen_main
+
     gen_main(cfg)
 
     cfg["source"]["files"] = {
@@ -1068,6 +1217,7 @@ def spark_iceberg_env(_same_drive_tmp_root, request):
                     shutil.rmtree(os.path.join(run_root, name), ignore_errors=True)
         os.environ.clear()
         os.environ.update(old_env)
+
     request.addfinalizer(_cleanup)
 
     return {

@@ -5,20 +5,19 @@ Spark 原生 incremental scan 等行为，以及与 pyiceberg 路径的互操作
 设计见 docs/evolution.md §6.x（Phase 5）.
 
 环境限制（重要）：
-    1. Windows 下 Spark 写文件需要 hadoop.dll（Hadoop NativeIO$Windows.access0
-       JNI native 方法）. 当前环境 F:\\hadoop\\bin 下只有 winutils.exe，缺
-       hadoop.dll，导致 Spark 任何写文件操作抛 Py4JJavaError.
+    1. Spark 写文件需要 Hadoop native IO 库（Windows: hadoop.dll,
+       Linux: libhadoop.so, macOS: libhadoop.dylib）.
     2. Iceberg 官方 JAR 最高只支持 Spark 4.1，不支持 Spark 4.2. 当前
        SPARK_HOME 是 4.2.0，缺 iceberg-spark-runtime-4.1_2.13-1.11.0.jar，
        导致 spark.read.table("catalog.ns.tbl") 抛 ClassNotFoundException.
 
     因此本模块所有测试用 ``pytest.mark.skipif`` 跳过，条件是：
-      - hadoop.dll 不存在，或
+      - Hadoop native IO 库不存在，或
       - pyspark 未安装，或
       - iceberg-spark-runtime JAR 不在 SPARK_HOME/jars/
 
-    代码逻辑完整正确，在装齐 hadoop.dll + iceberg JAR 的 Windows 或
-    Linux/Mac 环境下可直接运行.
+    代码逻辑完整正确，在装齐 Hadoop native library + iceberg JAR 的
+    Windows/Linux/macOS 环境下可直接运行.
 
 场景:
 1. test_spark_iceberg_write_read           — Spark 写 Iceberg 表 + 读回
@@ -32,10 +31,19 @@ Spark 原生 incremental scan 等行为，以及与 pyiceberg 路径的互操作
 7. test_spark_iceberg_table_name_format    — 表名格式 catalog.ns.tbl 路由正确
 8. test_spark_iceberg_overwrite_append     — overwrite + append 模式
 """
+
 from __future__ import annotations
 
 import copy
 import os
+
+# ----------------------------------------------------------------------
+# skipif 条件：Hadoop native IO + iceberg-spark-runtime JAR（跨平台）
+# ----------------------------------------------------------------------
+# 在模块收集时求值（pytest fixture 设置环境变量是在测试运行时，太晚），
+# 因此直接检测默认路径下的 native library，或环境变量 HADOOP_HOME 指向的 bin/.
+import os as _os
+import platform as _platform
 import uuid
 from typing import Any
 
@@ -52,39 +60,54 @@ from src.helpers import (
     table_write,
 )
 
-# ----------------------------------------------------------------------
-# skipif 条件：Windows 下 Spark 写文件需要 hadoop.dll + iceberg-spark-runtime JAR
-# ----------------------------------------------------------------------
-# 在模块收集时求值（pytest fixture 设置环境变量是在测试运行时，太晚），
-# 因此直接检测默认路径 F:\hadoop\bin\hadoop.dll，或环境变量 HADOOP_HOME 指向的
-# bin/hadoop.dll. 任一存在即认为 Spark 写文件可用.
+
+def _hadoop_native_exists(hadoop_home: str) -> bool:
+    """检测 Hadoop native IO 库是否存在。"""
+    if not hadoop_home or not _os.path.isdir(hadoop_home):
+        return False
+    bin_dir = _os.path.join(hadoop_home, "bin")
+    if not _os.path.isdir(bin_dir):
+        return False
+    if _platform.system() == "Windows":
+        return _os.path.exists(_os.path.join(bin_dir, "hadoop.dll"))
+    else:
+        try:
+            for f in _os.listdir(bin_dir):
+                if f.startswith("libhadoop.") and (f.endswith(".so") or f.endswith(".dylib")):
+                    return True
+        except OSError:
+            pass
+        return False
+
+
 _HADOOP_HOME_CANDIDATES = [
-    os.environ.get("HADOOP_HOME", ""),
+    _os.environ.get("HADOOP_HOME", ""),
+    "/opt/hadoop",
+    "/usr/local/hadoop",
     r"F:\hadoop",
 ]
-_HADOOP_DLL_EXISTS = any(
-    os.path.exists(os.path.join(h, "bin", "hadoop.dll"))
-    for h in _HADOOP_HOME_CANDIDATES
-    if h
-)
+_HADOOP_DLL_EXISTS = any(_hadoop_native_exists(h) for h in _HADOOP_HOME_CANDIDATES if h)
 # 同时要求 pyspark 可 import（未安装时也跳过）
 try:
     import pyspark  # noqa: F401
+
     _PYSPARK_AVAILABLE = True
 except ImportError:
     _PYSPARK_AVAILABLE = False
 
 # 检测 iceberg-spark-runtime JAR 是否在 SPARK_HOME/jars/
 _SPARK_HOME_CANDIDATES = [
-    os.environ.get("SPARK_HOME", ""),
+    _os.environ.get("SPARK_HOME", ""),
+    "/opt/spark",
+    "/usr/local/spark",
     r"F:\spark_home",
 ]
 _ICEBERG_JAR_EXISTS = False
 for _home in _SPARK_HOME_CANDIDATES:
-    if not _home or not os.path.isdir(os.path.join(_home, "jars")):
+    if not _home or not _os.path.isdir(_os.path.join(_home, "jars")):
         continue
     try:
-        for _fname in os.listdir(os.path.join(_home, "jars")):
+        for _fname in _os.listdir(_os.path.join(_home, "jars")):
             if _fname.startswith("iceberg-spark-runtime") and _fname.endswith(".jar"):
                 _ICEBERG_JAR_EXISTS = True
                 break
@@ -93,19 +116,15 @@ for _home in _SPARK_HOME_CANDIDATES:
     if _ICEBERG_JAR_EXISTS:
         break
 
-SPARK_ICEBERG_DISABLED = (
-    not _HADOOP_DLL_EXISTS or not _PYSPARK_AVAILABLE or not _ICEBERG_JAR_EXISTS
-)
+SPARK_ICEBERG_DISABLED = not _HADOOP_DLL_EXISTS or not _PYSPARK_AVAILABLE or not _ICEBERG_JAR_EXISTS
 
 _SKIP_REASON = (
-    "hadoop.dll not found or pyspark not installed or "
+    "hadoop native IO library not found or pyspark not installed or "
     "iceberg-spark-runtime JAR missing in SPARK_HOME/jars/ - "
     "Spark+Iceberg tests require Hadoop native IO + Iceberg Spark extensions"
 )
 
-spark_iceberg_skip = pytest.mark.skipif(
-    SPARK_ICEBERG_DISABLED, reason=_SKIP_REASON
-)
+spark_iceberg_skip = pytest.mark.skipif(SPARK_ICEBERG_DISABLED, reason=_SKIP_REASON)
 
 
 # ----------------------------------------------------------------------
@@ -139,12 +158,15 @@ def test_spark_iceberg_write_read(spark_iceberg_env):
     table_write(
         "warehouse.spark_test",
         [{"id": "1", "name": "alice", "val": "a"}],
-        cfg, fields=fields, mode="append",
+        cfg,
+        fields=fields,
+        mode="append",
     )
 
     # 2. Spark 写入（需要 SparkSession；通过 table_write 内部 _get_spark_session 创建）
     # 构造 SparkDataFrame：用 spark.createDataFrame 从 List[Row]
     from src.helpers import _get_spark_session
+
     spark = _get_spark_session(cfg)
     rows_data = [("2", "bob", "b"), ("3", "carol", "c")]
     spark_df = spark.createDataFrame(rows_data, schema="id string, name string, val string")
@@ -176,13 +198,11 @@ def test_spark_iceberg_time_travel(spark_iceberg_env):
     cfg = _make_cfg(spark_iceberg_env)
     fields = ["id", "val"]
     # 第一次 append
-    table_write("warehouse.spark_tt", [{"id": "1", "val": "a"}],
-                cfg, fields=fields, mode="append")
+    table_write("warehouse.spark_tt", [{"id": "1", "val": "a"}], cfg, fields=fields, mode="append")
     snaps_1 = list_snapshots("warehouse.spark_tt", cfg)
     sid_1 = snaps_1[-1]["snapshot_id"]
     # 第二次 append
-    table_write("warehouse.spark_tt", [{"id": "2", "val": "b"}],
-                cfg, fields=fields, mode="append")
+    table_write("warehouse.spark_tt", [{"id": "2", "val": "b"}], cfg, fields=fields, mode="append")
     snaps_2 = list_snapshots("warehouse.spark_tt", cfg)
     sid_2 = snaps_2[-1]["snapshot_id"]
 
@@ -210,20 +230,26 @@ def test_spark_iceberg_snapshot_diff(spark_iceberg_env):
     cfg = _make_cfg(spark_iceberg_env)
     fields = ["id", "val"]
     # 第一次 append（建立初始 snapshot）
-    table_write("warehouse.spark_diff",
-                [{"id": "1", "val": "a"}, {"id": "2", "val": "b"}],
-                cfg, fields=fields, mode="append")
+    table_write(
+        "warehouse.spark_diff",
+        [{"id": "1", "val": "a"}, {"id": "2", "val": "b"}],
+        cfg,
+        fields=fields,
+        mode="append",
+    )
     snaps_1 = list_snapshots("warehouse.spark_diff", cfg)
     sid_1 = snaps_1[-1]["snapshot_id"]
     # 第二次 append（增量）
-    table_write("warehouse.spark_diff",
-                [{"id": "3", "val": "c"}, {"id": "4", "val": "d"}],
-                cfg, fields=fields, mode="append")
+    table_write(
+        "warehouse.spark_diff",
+        [{"id": "3", "val": "c"}, {"id": "4", "val": "d"}],
+        cfg,
+        fields=fields,
+        mode="append",
+    )
 
     # Spark 原生 incremental scan
-    spark_diff = iceberg_snapshot_diff_spark(
-        "warehouse.spark_diff", cfg, from_snapshot=sid_1
-    )
+    spark_diff = iceberg_snapshot_diff_spark("warehouse.spark_diff", cfg, from_snapshot=sid_1)
     assert spark_diff["from_snapshot"] == sid_1
     assert spark_diff["to_snapshot"] is not None
     assert spark_diff["added_rows_count"] == 2
@@ -285,19 +311,22 @@ def test_spark_iceberg_interop_spark_write_pyiceberg_read(spark_iceberg_env):
     cfg = _make_cfg(spark_iceberg_env)
     fields = ["id", "name", "val"]
     # pyiceberg 建表（写一行后 overwrite 为空，确保表存在）
-    table_write("warehouse.interop_sp2py",
-                [{"id": "0", "name": "init", "val": "x"}],
-                cfg, fields=fields, mode="append")
+    table_write(
+        "warehouse.interop_sp2py",
+        [{"id": "0", "name": "init", "val": "x"}],
+        cfg,
+        fields=fields,
+        mode="append",
+    )
     # overwrite 清空（pyiceberg overwrite 接受空 list 不行，写一行再 overwrite 空）
     # 改用：直接 append，最后读时过滤掉 init 行
 
     # Spark 写入
     from src.helpers import _get_spark_session
+
     spark = _get_spark_session(cfg)
     rows_data = [("10", "spark_row_1", "a"), ("20", "spark_row_2", "b")]
-    spark_df = spark.createDataFrame(
-        rows_data, schema="id string, name string, val string"
-    )
+    spark_df = spark.createDataFrame(rows_data, schema="id string, name string, val string")
     n = table_write("warehouse.interop_sp2py", spark_df, cfg, mode="append")
     assert n == 2
 
@@ -389,12 +418,13 @@ def test_spark_iceberg_overwrite_append(spark_iceberg_env):
     cfg = _make_cfg(spark_iceberg_env)
     fields = ["id", "val"]
     # pyiceberg 建表 + 写初始数据
-    table_write("warehouse.spark_mode",
-                [{"id": "1", "val": "init"}],
-                cfg, fields=fields, mode="append")
+    table_write(
+        "warehouse.spark_mode", [{"id": "1", "val": "init"}], cfg, fields=fields, mode="append"
+    )
 
     # Spark overwrite
     from src.helpers import _get_spark_session
+
     spark = _get_spark_session(cfg)
     df_overwrite = spark.createDataFrame(
         [("10", "overwrite_1"), ("20", "overwrite_2")],
@@ -464,6 +494,7 @@ def test_pipeline_json_has_spark_iceberg_config():
     检查 storage.iceberg.spark_extensions / spark_catalog_class 字段存在.
     """
     from src.helpers import abs_path, json_load
+
     for fname in ("config/pipeline.json", "config/pipeline_small.json"):
         cfg = json_load(abs_path(fname))
         ice = cfg.get("storage", {}).get("iceberg", {})

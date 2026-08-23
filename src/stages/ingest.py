@@ -28,6 +28,8 @@ from ..helpers import (
     ROOT,
     PipelineContext,
     _get_storage_backend,
+    _strip_bom_polars,
+    _strip_bom_spark,
     abs_path,
     copy_file,
     csv_lines,
@@ -55,26 +57,26 @@ def run(ctx: PipelineContext, log) -> dict[str, Any]:
         wm_type = table_cfg.get("watermark_type", "full_load")
 
         if ctx.incremental_enabled and wm_type != "full_load":
-            entry = _ingest_incremental(ctx, name, rel, src, raw_dir,
-                                        table_cfg, log)
+            entry = _ingest_incremental(ctx, name, rel, src, raw_dir, table_cfg, log)
         else:
-            entry = _ingest_full(ctx, name, rel, src, raw_dir, log,
-                                 incremental=ctx.incremental_enabled)
+            entry = _ingest_full(
+                ctx, name, rel, src, raw_dir, log, incremental=ctx.incremental_enabled
+            )
         source_files.append(entry)
 
     ctx.manifest.set_source(source_cfg.get("name", "unknown"), source_files)
     ctx.ingested = source_files
     # Ingest is the lineage source: 01_raw/* have no upstream products.
-    return {"rows_in": 0, "rows_out": sum(f["rows"] for f in source_files),
-            "lineage": {}}
+    return {"rows_in": 0, "rows_out": sum(f["rows"] for f in source_files), "lineage": {}}
 
 
 # ----------------------------------------------------------------------
 # full-load path (existing behaviour, used when incremental is off or the
 # table is marked full_load)
 # ----------------------------------------------------------------------
-def _ingest_full(ctx: PipelineContext, name: str, rel: str, src: str,
-                 raw_dir: str, log, incremental: bool) -> dict[str, Any]:
+def _ingest_full(
+    ctx: PipelineContext, name: str, rel: str, src: str, raw_dir: str, log, incremental: bool
+) -> dict[str, Any]:
     """全量拷贝源文件到 01_raw.
 
     backend="python"/"polars"：byte-identical copy（copy_file + csv_lines），
@@ -110,15 +112,20 @@ def _ingest_full(ctx: PipelineContext, name: str, rel: str, src: str,
         "rows": rows_count,
         "incremental": False,
     }
-    log.info("ingested", source=name, rows=rows_count,
-             sha256=sha[:12] if isinstance(sha, str) and len(sha) >= 12 else sha,
-             dest=os.path.relpath(dst, ROOT),
-             mode="incremental_full_load" if incremental else "full")
+    log.info(
+        "ingested",
+        source=name,
+        rows=rows_count,
+        sha256=sha[:12] if isinstance(sha, str) and len(sha) >= 12 else sha,
+        dest=os.path.relpath(dst, ROOT),
+        mode="incremental_full_load" if incremental else "full",
+    )
     return entry
 
 
-def _ingest_full_spark(ctx: PipelineContext, name: str, rel: str, src: str,
-                       raw_dir: str, log, incremental: bool) -> dict[str, Any]:
+def _ingest_full_spark(
+    ctx: PipelineContext, name: str, rel: str, src: str, raw_dir: str, log, incremental: bool
+) -> dict[str, Any]:
     """Spark 全量读+写路径.
 
     单机模式（cluster.enabled=false）：用 ``spark.read.csv(src)`` 直接读源 CSV
@@ -153,7 +160,7 @@ def _ingest_full_spark(ctx: PipelineContext, name: str, rel: str, src: str,
     else:
         # 单机模式：spark.read.csv 直接读源文件
         opts = cfg.get("engine", {}).get("spark", {}).get("read_options", {}) or {}
-        df = spark.read.csv(src, header=True, inferSchema=True, **opts)
+        df = _strip_bom_spark(spark.read.csv(src, header=True, inferSchema=True, **opts))
         rows = table_write(dst, df, cfg, spark=spark)
     sha = "spark_dir"  # Spark 写出的是目录，sha256 不适用
     entry = {
@@ -165,18 +172,30 @@ def _ingest_full_spark(ctx: PipelineContext, name: str, rel: str, src: str,
         "rows": rows,
         "incremental": False,
     }
-    log.info("ingested", source=name, rows=rows,
-             sha256=sha, dest=os.path.relpath(dst, ROOT),
-             mode="incremental_full_load" if incremental else "full",
-             backend="spark")
+    log.info(
+        "ingested",
+        source=name,
+        rows=rows,
+        sha256=sha,
+        dest=os.path.relpath(dst, ROOT),
+        mode="incremental_full_load" if incremental else "full",
+        backend="spark",
+    )
     return entry
 
 
 # ----------------------------------------------------------------------
 # incremental path
 # ----------------------------------------------------------------------
-def _ingest_incremental(ctx: PipelineContext, name: str, rel: str, src: str,
-                        raw_dir: str, table_cfg: dict[str, Any], log) -> dict[str, Any]:
+def _ingest_incremental(
+    ctx: PipelineContext,
+    name: str,
+    rel: str,
+    src: str,
+    raw_dir: str,
+    table_cfg: dict[str, Any],
+    log,
+) -> dict[str, Any]:
     # Phase 4: incremental.mode 路由
     #   "high_watermark"（缺省）→ 现有水位增量逻辑（_copy_incremental）
     #   "iceberg_snapshot_diff"  → Iceberg snapshot diff 增量（_copy_incremental_iceberg）
@@ -185,7 +204,6 @@ def _ingest_incremental(ctx: PipelineContext, name: str, rel: str, src: str,
         return _copy_incremental_iceberg(ctx, name, raw_dir, table_cfg, log)
 
     wm_col = table_cfg.get("watermark_column")
-    table_cfg.get("watermark_type", "date")
     if not wm_col:
         # No watermark column configured: fall back to full load.
         return _ingest_full(ctx, name, rel, src, raw_dir, log, incremental=True)
@@ -211,12 +229,13 @@ def _ingest_incremental(ctx: PipelineContext, name: str, rel: str, src: str,
                 df = spark.createDataFrame(str_rows)
             else:
                 opts = cfg.get("engine", {}).get("spark", {}).get("read_options", {}) or {}
-                df = spark.read.csv(src, header=True, inferSchema=True, **opts)
+                df = _strip_bom_spark(spark.read.csv(src, header=True, inferSchema=True, **opts))
             rows = table_write(dst, df, cfg, spark=spark)
             sha = "spark_dir"
             # 直接从已读入的 DataFrame 计算水位，避免二次读取
             # （storage.backend="parquet" 时写出的是 parquet，spark.read.csv 会失败）
             from pyspark.sql import functions as _F
+
             new_wm_raw = df.agg(_F.max(wm_col).alias("m")).collect()[0]["m"]
             new_wm = str(new_wm_raw) if new_wm_raw is not None else None
         elif _get_storage_backend(ctx.config) == "parquet":
@@ -243,16 +262,21 @@ def _ingest_incremental(ctx: PipelineContext, name: str, rel: str, src: str,
             "old_watermark": None,
             "new_watermark": new_wm,
         }
-        log.info("ingest init full load", source=name, rows=rows,
-                 watermark=new_wm, sha256=sha[:12] if isinstance(sha, str) and len(sha) >= 12 else sha,
-                 dest=os.path.relpath(dst, ROOT))
+        log.info(
+            "ingest init full load",
+            source=name,
+            rows=rows,
+            watermark=new_wm,
+            sha256=sha[:12] if isinstance(sha, str) and len(sha) >= 12 else sha,
+            dest=os.path.relpath(dst, ROOT),
+        )
         return entry
 
     # Subsequent run: stream source, keep rows where watermark > wm_value.
     dst = os.path.join(raw_dir, f"{name}_incremental.csv")
-    rows, new_wm, fields = _copy_incremental(src, dst, wm_col, wm_value,
-                                             backend=ctx.engine_backend,
-                                             ctx=ctx)
+    rows, new_wm, fields = _copy_incremental(
+        src, dst, wm_col, wm_value, backend=ctx.engine_backend, ctx=ctx
+    )
     # sha256：spark 路径用占位符；parquet 路径下实际文件是 .csv.parquet
     if ctx.engine_backend == "spark":
         sha = "spark_dir"
@@ -274,14 +298,21 @@ def _ingest_incremental(ctx: PipelineContext, name: str, rel: str, src: str,
         "new_watermark": new_wm,
         "fields": fields,
     }
-    log.info("ingest incremental", source=name, rows=rows,
-             old_watermark=wm_value, new_watermark=new_wm,
-             sha256=sha[:12], dest=os.path.relpath(dst, ROOT))
+    log.info(
+        "ingest incremental",
+        source=name,
+        rows=rows,
+        old_watermark=wm_value,
+        new_watermark=new_wm,
+        sha256=sha[:12],
+        dest=os.path.relpath(dst, ROOT),
+    )
     return entry
 
 
-def _stage_new_watermark(ctx: PipelineContext, table: str,
-                         value: Optional[str], row_count: int) -> None:
+def _stage_new_watermark(
+    ctx: PipelineContext, table: str, value: Optional[str], row_count: int
+) -> None:
     """Stage new watermark into ctx.state in memory (mirrors StateStore.set_new_watermark).
 
     Keeps existing per-table metadata (watermark_column / watermark_type) and
@@ -295,10 +326,14 @@ def _stage_new_watermark(ctx: PipelineContext, table: str,
     info["new_batch_id"] = ctx.batch_id
 
 
-def _copy_incremental(src: str, dst: str, wm_col: str,
-                      wm_value: str,
-                      backend: str = "python",
-                      ctx: Optional[PipelineContext] = None) -> tuple[int, Optional[str], list[str]]:
+def _copy_incremental(
+    src: str,
+    dst: str,
+    wm_col: str,
+    wm_value: str,
+    backend: str = "python",
+    ctx: Optional[PipelineContext] = None,
+) -> tuple[int, Optional[str], list[str]]:
     """Stream ``src``, write rows with ``wm_col > wm_value`` to ``dst``.
 
     Returns ``(new_row_count, new_watermark, fields)``. ``new_watermark`` is
@@ -343,8 +378,9 @@ def _copy_incremental(src: str, dst: str, wm_col: str,
     return len(new_rows), max_wm, fields
 
 
-def _copy_incremental_spark(ctx: PipelineContext, src: str, dst: str,
-                             wm_col: str, wm_value: str) -> tuple[int, Optional[str], list[str]]:
+def _copy_incremental_spark(
+    ctx: PipelineContext, src: str, dst: str, wm_col: str, wm_value: str
+) -> tuple[int, Optional[str], list[str]]:
     """Spark 分布式增量过滤拷贝.
 
     单机模式：用 ``spark.read.csv(src).filter(F.col(wm_col) > wm_value)``
@@ -359,6 +395,7 @@ def _copy_incremental_spark(ctx: PipelineContext, src: str, dst: str,
     参见 docs/evolution.md §4.3.2.4。
     """
     from pyspark.sql import functions as F
+
     cfg = ctx.config
     spark = ctx.spark_session
     assert spark is not None
@@ -373,7 +410,7 @@ def _copy_incremental_spark(ctx: PipelineContext, src: str, dst: str,
         df = spark.createDataFrame(str_rows)
     else:
         # 单机模式：spark.read.csv 直接读源文件
-        df = spark.read.csv(src, header=True, inferSchema=True)
+        df = _strip_bom_spark(spark.read.csv(src, header=True, inferSchema=True))
         fields = list(df.columns)
     filtered = df.filter(F.col(wm_col) > wm_value)
     rows = filtered.count()  # 触发 action 获取行数
@@ -389,8 +426,9 @@ def _copy_incremental_spark(ctx: PipelineContext, src: str, dst: str,
     return rows, new_wm, fields
 
 
-def _copy_incremental_polars(src: str, dst: str, wm_col: str,
-                             wm_value: str) -> tuple[int, Optional[str], list[str]]:
+def _copy_incremental_polars(
+    src: str, dst: str, wm_col: str, wm_value: str
+) -> tuple[int, Optional[str], list[str]]:
     """Polars 流式过滤增量拷贝.
 
     用 ``pl.scan_csv(src).filter(pl.col(wm_col) > wm_value).collect()`` 流式
@@ -398,10 +436,12 @@ def _copy_incremental_polars(src: str, dst: str, wm_col: str,
     时仍写只含 header 的空 CSV，保证下游可打开。水位用 polars max 表达式。
     """
     import polars as pl
+
     # 取 header（用 csv 模块，避免 polars 读全量；与 python 路径字段顺序一致）
     with open(src, encoding="utf-8-sig", newline="") as f:
         src_fields = next(csv.reader(f))
-    df = pl.scan_csv(src).filter(pl.col(wm_col) > wm_value).collect()
+    lf = _strip_bom_polars(pl.scan_csv(src))
+    df = lf.filter(pl.col(wm_col) > wm_value).collect()
     if df.height > 0:
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         df.write_csv(dst)
@@ -415,9 +455,9 @@ def _copy_incremental_polars(src: str, dst: str, wm_col: str,
     return df.height, new_wm, src_fields
 
 
-def _compute_watermark(path: str, wm_col: str,
-                       backend: str = "python",
-                       spark: Any = None) -> Optional[str]:
+def _compute_watermark(
+    path: str, wm_col: str, backend: str = "python", spark: Any = None
+) -> Optional[str]:
     """Scan a csv and return the max value of ``wm_col`` (string compare).
 
     ``backend="polars"`` 时用 ``pl.scan_csv(path).select(pl.col(wm_col).max())``
@@ -428,12 +468,15 @@ def _compute_watermark(path: str, wm_col: str,
     """
     if backend == "spark":
         from pyspark.sql import functions as F
-        df = spark.read.csv(path, header=True, inferSchema=True)
+
+        df = _strip_bom_spark(spark.read.csv(path, header=True, inferSchema=True))
         val = df.agg(F.max(wm_col).alias("m")).collect()[0]["m"]
         return str(val) if val is not None else None
     if backend == "polars":
         import polars as pl
-        val = pl.scan_csv(path).select(pl.col(wm_col).max()).collect().item()
+
+        lf = _strip_bom_polars(pl.scan_csv(path))
+        val = lf.select(pl.col(wm_col).max()).collect().item()
         return str(val) if val is not None else None
     rows, _ = csv_read(path)
     vals = [r[wm_col] for r in rows if r.get(wm_col)]
@@ -443,8 +486,7 @@ def _compute_watermark(path: str, wm_col: str,
 # ----------------------------------------------------------------------
 # Phase 4: Iceberg snapshot diff 增量路径
 # ----------------------------------------------------------------------
-def _iceberg_table_name(ctx: PipelineContext, name: str,
-                        table_cfg: dict[str, Any]) -> str:
+def _iceberg_table_name(ctx: PipelineContext, name: str, table_cfg: dict[str, Any]) -> str:
     """解析 Iceberg 表名.
 
     优先用 table_cfg["iceberg_table"]（显式配置），缺省用 "warehouse.<name>".
@@ -466,9 +508,9 @@ def _iceberg_table_name(ctx: PipelineContext, name: str,
     return f"{ns}.{name}"
 
 
-def _copy_incremental_iceberg(ctx: PipelineContext, name: str,
-                              raw_dir: str, table_cfg: dict[str, Any],
-                              log) -> dict[str, Any]:
+def _copy_incremental_iceberg(
+    ctx: PipelineContext, name: str, raw_dir: str, table_cfg: dict[str, Any], log
+) -> dict[str, Any]:
     """Iceberg snapshot diff 增量路径.
 
     流程：
@@ -565,9 +607,14 @@ def _copy_incremental_iceberg(ctx: PipelineContext, name: str,
         "added_data_files": added_files,
         "fields": fields,
     }
-    log.info("ingest iceberg snapshot diff", source=name, rows=rows_count,
-             old_snapshot=from_snapshot, new_snapshot=to_snapshot,
-             added_data_files=added_files,
-             sha256=sha[:12] if isinstance(sha, str) and len(sha) >= 12 else sha,
-             dest=os.path.relpath(dst, ROOT))
+    log.info(
+        "ingest iceberg snapshot diff",
+        source=name,
+        rows=rows_count,
+        old_snapshot=from_snapshot,
+        new_snapshot=to_snapshot,
+        added_data_files=added_files,
+        sha256=sha[:12] if isinstance(sha, str) and len(sha) >= 12 else sha,
+        dest=os.path.relpath(dst, ROOT),
+    )
     return entry

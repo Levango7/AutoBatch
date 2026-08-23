@@ -33,6 +33,7 @@ jobs:
           - '3.9'        # 最低支持版本（与 pyproject.toml target-version 一致）
           - '3.10'
           - '3.11'
+          - '3.12'
           - '3.13'
           - '3.14'      # 实验性：不阻塞流水线
         include:
@@ -56,7 +57,9 @@ jobs:
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
 
-      - name: Run pytest full suite (with coverage)
+      # 全量运行；重型测试（Spark 集群/MinIO/需要 hadoop native lib 的路径）
+      # 由 tests 内的 skipif 环境探测自动跳过——仓库未使用 pytest marker 标注
+      - name: Run pytest (full suite; heavy tests self-skip via skipif)
         run: |
           python -m pytest tests/ -v \
             --cov=src \

@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
+import math
 import os
 from collections.abc import Sequence
 from typing import Any, Optional
@@ -82,9 +84,9 @@ class StateStore:
         state = self.load()
         return state.get("tables", {}).get(table, {}).get("watermark_value")
 
-    def set_new_watermark(self, state: dict[str, Any], table: str,
-                          value: Optional[str], row_count: int,
-                          batch_id: str) -> None:
+    def set_new_watermark(
+        self, state: dict[str, Any], table: str, value: Optional[str], row_count: int, batch_id: str
+    ) -> None:
         """Stage a new watermark in memory (does NOT persist).
 
         Called by the ingest stage for each table. The value is promoted to
@@ -110,9 +112,7 @@ class StateStore:
                 info["watermark_value"] = info.pop("new_watermark")
                 seen = info.pop("new_seen_row_count", 0)
                 info["last_seen_row_count"] = seen
-                info["cumulative_row_count"] = (
-                    info.get("cumulative_row_count", 0) + seen
-                )
+                info["cumulative_row_count"] = info.get("cumulative_row_count", 0) + seen
                 info.pop("new_batch_id", None)
                 info["last_batch_id"] = batch_id
                 info["last_processed_at"] = now
@@ -205,9 +205,7 @@ class StateStore:
                 info["watermark_value"] = info.pop("new_watermark")
                 seen = info.pop("new_seen_row_count", 0)
                 info["last_seen_row_count"] = seen
-                info["cumulative_row_count"] = (
-                    info.get("cumulative_row_count", 0) + seen
-                )
+                info["cumulative_row_count"] = info.get("cumulative_row_count", 0) + seen
                 info.pop("new_batch_id", None)
                 info["last_batch_id"] = batch_id
                 info["last_processed_at"] = now
@@ -234,21 +232,25 @@ class StateStore:
             data = list(reader)
         return data, fields
 
-    def save_aggregate(self, name: str, fields: Sequence[str],
-                       rows: Sequence[dict[str, Any]]) -> None:
+    def save_aggregate(
+        self, name: str, fields: Sequence[str], rows: Sequence[dict[str, Any]]
+    ) -> None:
         """Write historical aggregate to ``<state_dir>/aggregates/{name}.csv``."""
         path = self.get_aggregate_path(name)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=list(fields),
-                                    extrasaction="ignore")
+            writer = csv.DictWriter(f, fieldnames=list(fields), extrasaction="ignore")
             writer.writeheader()
             for row in rows:
                 writer.writerow(row)
 
-    def merge_aggregate(self, name: str, fields: Sequence[str],
-                        new_rows: Sequence[dict[str, Any]],
-                        key_cols: Sequence[str]) -> int:
+    def merge_aggregate(
+        self,
+        name: str,
+        fields: Sequence[str],
+        new_rows: Sequence[dict[str, Any]],
+        key_cols: Sequence[str],
+    ) -> int:
         """Read history, merge ``new_rows`` by ``key_cols``, write back.
 
         Merge rules
@@ -261,7 +263,7 @@ class StateStore:
         - Derived columns recomputed after the merge:
           * ``avg_order_value`` = ``revenue`` / ``orders``
           * ``revenue_share``  = ``revenue`` / ``total_revenue``
-          * ``rank``           = dense rank by ``revenue`` desc
+          * ``rank``           = 顺序排名（revenue desc；并列值按排序稳定性取不同名次）
         - Other non-key columns (``tier`` / ``city`` / ``category`` /
           ``region`` / ``channel``): keep the new value if present, else the
           historical value.
@@ -313,24 +315,34 @@ class StateStore:
         except ValueError:
             return False
 
-    def _merge_into(self, base: dict[str, Any], new: dict[str, Any],
-                    fields: Sequence[str], key_set: set) -> None:
+    def _merge_into(
+        self, base: dict[str, Any], new: dict[str, Any], fields: Sequence[str], key_set: set
+    ) -> None:
         """Accumulate numeric cols of ``new`` into ``base``; keep non-numeric new value."""
+        log = logging.getLogger(__name__)
         for f in fields:
             if f in key_set or f in _DERIVED_COLS:
                 continue
             nv = new.get(f)
             bv = base.get(f)
             if self._is_numeric(nv) and self._is_numeric(bv):
-                assert bv is not None and nv is not None
+                # _is_numeric 已排除 None/非数值；显式窄化让静态检查器可见
+                if bv is None or nv is None:  # pragma: no cover
+                    continue
                 total = float(bv) + float(nv)
+                # inf/nan 等非有限值会让 round() 抛 OverflowError——跳过并告警，
+                # 不让单列脏数据炸掉整个增量合并
+                if not math.isfinite(total):
+                    log.warning(
+                        "skipping non-finite accumulation for column %r: %s + %s", f, bv, nv
+                    )
+                    continue
                 base[f] = int(total) if total.is_integer() else round(total, 4)
             elif nv is not None and str(nv).strip() != "":
                 base[f] = nv
 
     @staticmethod
-    def _recompute_derived(rows: list[dict[str, Any]],
-                           fields: Sequence[str]) -> None:
+    def _recompute_derived(rows: list[dict[str, Any]], fields: Sequence[str]) -> None:
         """Recompute avg_order_value / revenue_share / rank in place."""
         field_set = set(fields)
         if "avg_order_value" in field_set:
@@ -343,7 +355,6 @@ class StateStore:
             for r in rows:
                 r["revenue_share"] = round(float(r.get("revenue", 0) or 0) / total, 4)
         if "rank" in field_set:
-            indexed = sorted(range(len(rows)),
-                             key=lambda i: -float(rows[i].get("revenue", 0) or 0))
+            indexed = sorted(range(len(rows)), key=lambda i: -float(rows[i].get("revenue", 0) or 0))
             for rank, idx in enumerate(indexed, 1):
                 rows[idx]["rank"] = rank

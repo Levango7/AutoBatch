@@ -15,6 +15,7 @@
       重复运行同 batch_id 产物不重复（幂等性）.
     - 退避时间用 backoff_base=0.01 加速测试，避免真实 sleep 60s.
 """
+
 from __future__ import annotations
 
 import json
@@ -51,6 +52,7 @@ from src.pipeline import (
 # helpers / fixtures
 # ---------------------------------------------------------------------------
 
+
 def _load_small_config():
     return json_load(abs_path("config/pipeline_small.json"))
 
@@ -70,15 +72,14 @@ def fake_ctx(tmp_workdir):
     run_dir = os.path.join(tmp_workdir, "run", "test-batch")
     os.makedirs(run_dir, exist_ok=True)
     manifest = Manifest("test-batch", config_digest(cfg), run_dir)
-    ctx = PipelineContext(
-        config=cfg, run_dir=run_dir, batch_id="test-batch", manifest=manifest
-    )
+    ctx = PipelineContext(config=cfg, run_dir=run_dir, batch_id="test-batch", manifest=manifest)
     return ctx
 
 
 def _make_slog(run_dir: str, stage: str) -> StageLog:
-    return StageLog(os.path.join(run_dir, "logs", stage + ".jsonl"),
-                    batch_id="test-batch", stage=stage)
+    return StageLog(
+        os.path.join(run_dir, "logs", stage + ".jsonl"), batch_id="test-batch", stage=stage
+    )
 
 
 def _make_stage_fn(behaviour: list[Any]):
@@ -106,12 +107,14 @@ def _make_stage_fn(behaviour: list[Any]):
 
 def _logger():
     import logging
+
     return logging.getLogger("test_errhand")
 
 
 # ---------------------------------------------------------------------------
 # 1. 正常执行不受影响（max_retries=0）
 # ---------------------------------------------------------------------------
+
 
 def test_no_retry_when_max_retries_zero(fake_ctx):
     """max_retries=0（缺省）时 stage 失败立即抛 StageExecutionError，不重试."""
@@ -159,6 +162,7 @@ def test_error_handling_absent_is_backward_compatible(fake_ctx):
 # 2. 可配置重试次数
 # ---------------------------------------------------------------------------
 
+
 def test_retry_count_respected(fake_ctx):
     """max_retries=2 时 stage 失败应调用 3 次（1 + 2 重试）."""
     cfg = {
@@ -169,11 +173,13 @@ def test_retry_count_respected(fake_ctx):
             "cleanup_on_retry": False,  # mock stage 无产物，跳过清理
         }
     }
-    fn, state = _make_stage_fn([
-        RuntimeError("fail-1"),
-        RuntimeError("fail-2"),
-        RuntimeError("fail-3"),
-    ])
+    fn, state = _make_stage_fn(
+        [
+            RuntimeError("fail-1"),
+            RuntimeError("fail-2"),
+            RuntimeError("fail-3"),
+        ]
+    )
     slog = _make_slog(fake_ctx.run_dir, "compute")
 
     with pytest.raises(StageExecutionError) as ei:
@@ -207,6 +213,7 @@ def test_retry_count_one(fake_ctx):
 # 3. 重试成功场景（第一次失败第二次成功）
 # ---------------------------------------------------------------------------
 
+
 def test_retry_succeeds_on_second_attempt(fake_ctx):
     """第一次失败第二次成功 → 返回 summary，调用 2 次."""
     cfg = {
@@ -236,11 +243,13 @@ def test_retry_succeeds_on_third_attempt(fake_ctx):
         }
     }
     good_summary = {"rows_in": 7, "rows_out": 7}
-    fn, state = _make_stage_fn([
-        RuntimeError("fail-1"),
-        RuntimeError("fail-2"),
-        good_summary,
-    ])
+    fn, state = _make_stage_fn(
+        [
+            RuntimeError("fail-1"),
+            RuntimeError("fail-2"),
+            good_summary,
+        ]
+    )
     slog = _make_slog(fake_ctx.run_dir, "validate")
 
     result = _run_stage_with_retry("validate", fn, fake_ctx, slog, cfg, _logger())
@@ -253,14 +262,15 @@ def test_retry_succeeds_on_third_attempt(fake_ctx):
 # 4. 超时控制
 # ---------------------------------------------------------------------------
 
-def test_timeout_does_not_interrupt_sync_fn(fake_ctx):
-    """threading.Timer 方案对同步 fn 无法中断：fn 跑完后才检查 timer.
 
-    _run_with_timeout 在当前线程内同步执行 fn，timer 在另一线程计时.
-    fn 返回后 timer.cancel()，由于 fn 已写入 'value'，不会抛 StageTimeoutError.
-    本测试固化该固有局限：配了 timeout 但 fn 跑完 → 正常返回，不抛超时.
-    真正的墙钟中断需要子进程方案，超出本任务范围.
+def test_timeout_raises_for_slow_stage(fake_ctx):
+    """stage 超过 stage_timeouts 阈值 → 抛 StageTimeoutError.
+
+    _run_with_timeout 在 daemon 线程中执行 fn，主线程 wait(timeout)
+    超时后放弃等待并抛 StageTimeoutError（StageExecutionError 子类）.
     """
+    from src.exceptions import StageTimeoutError
+
     cfg = {
         "error_handling": {
             "max_retries": 0,
@@ -270,13 +280,32 @@ def test_timeout_does_not_interrupt_sync_fn(fake_ctx):
     }
 
     def slow_fn(ctx, slog):
-        time.sleep(0.5)  # 超过 0.2s 超时
+        time.sleep(1.0)  # 远超 0.2s 超时
         return {"rows_in": 1, "rows_out": 1}
 
     slog = _make_slog(fake_ctx.run_dir, "ingest")
 
-    result = _run_stage_with_retry("ingest", slow_fn, fake_ctx, slog, cfg, _logger())
-    # fn 跑完 0.5s 后正常返回（threading 方案不能中断同步 fn）
+    with pytest.raises(StageTimeoutError):
+        _run_stage_with_retry("ingest", slow_fn, fake_ctx, slog, cfg, _logger())
+
+
+def test_timeout_not_triggered_for_fast_stage(fake_ctx):
+    """fn 在阈值内完成 → 正常返回结果，不抛超时."""
+
+    cfg = {
+        "error_handling": {
+            "max_retries": 0,
+            "stage_timeouts": {"ingest": 5.0},
+            "cleanup_on_retry": False,
+        }
+    }
+
+    def fast_fn(ctx, slog):
+        return {"rows_in": 1, "rows_out": 1}
+
+    slog = _make_slog(fake_ctx.run_dir, "ingest")
+
+    result = _run_stage_with_retry("ingest", fast_fn, fake_ctx, slog, cfg, _logger())
     assert result == {"rows_in": 1, "rows_out": 1}
 
 
@@ -294,36 +323,45 @@ def test_timeout_none_when_not_configured(fake_ctx):
 
 def test_run_with_timeout_no_timeout_when_none():
     """timeout_seconds=None 时直接执行 fn."""
+
     def fn():
         return 42
+
     assert _run_with_timeout(fn, None, "x", "b", 0) == 42
 
 
 def test_run_with_timeout_no_timeout_when_zero():
     """timeout_seconds=0 时直接执行 fn（不限制）."""
+
     def fn():
         return "ok"
+
     assert _run_with_timeout(fn, 0, "x", "b", 0) == "ok"
 
 
 def test_run_with_timeout_propagates_exception():
     """fn 抛异常时 _run_with_timeout 原样传播."""
+
     def fn():
         raise ValueError("bad")
+
     with pytest.raises(ValueError, match="bad"):
         _run_with_timeout(fn, 1.0, "x", "b", 0)
 
 
 def test_timeout_with_quick_fn_succeeds():
     """fn 快速完成时即使配了 timeout 也不抛超时."""
+
     def fn():
         return "done"
+
     assert _run_with_timeout(fn, 10.0, "x", "b", 0) == "done"
 
 
 # ---------------------------------------------------------------------------
 # 5. 幂等性（重复运行同批次，产物不重复）
 # ---------------------------------------------------------------------------
+
 
 def test_cleanup_stage_output_removes_dir(fake_ctx):
     """_cleanup_stage_output 删除指定 stage 的输出目录."""
@@ -368,7 +406,7 @@ def test_cleanup_never_touches_state_dir(fake_ctx):
     assert os.path.exists(os.path.join(state_dir, "state.json"))
 
 
-def test_cleanup_on_retry_true_cleans_before_each_attempt(fake_ctx):
+def test_cleanup_on_retry_true_cleans_before_each_attempt(fake_ctx, monkeypatch):
     """cleanup_on_retry=true 时每次 attempt 前都清理输出目录."""
     cfg = {
         "error_handling": {
@@ -380,9 +418,17 @@ def test_cleanup_on_retry_true_cleans_before_each_attempt(fake_ctx):
     sub = "01_raw"
     target = os.path.join(fake_ctx.run_dir, sub)
 
+    call_count = 0
+
+    def mock_cleanup(stage_name, run_dir, logger):
+        nonlocal call_count
+        call_count += 1
+
+    from src.pipeline import _run_stage_with_retry
+
+    monkeypatch.setattr("src.pipeline._cleanup_stage_output", mock_cleanup)
+
     def fn(ctx, slog):
-        # 每次调用时目录应已被清理（不存在）
-        # 但 stage 执行时会创建产物目录；这里模拟创建
         os.makedirs(target, exist_ok=True)
         with open(os.path.join(target, "marker.txt"), "w") as f:
             f.write("attempt")
@@ -393,10 +439,10 @@ def test_cleanup_on_retry_true_cleans_before_each_attempt(fake_ctx):
     with pytest.raises(StageExecutionError):
         _run_stage_with_retry("ingest", fn, fake_ctx, slog, cfg, _logger())
 
-    # 重试耗尽后，最后一次 attempt 创建的产物可能仍在（清理发生在 attempt 开始前）
-    # 关键验证：每次 attempt 开始时目录被清理 → 不累积残留
-    # 这里验证最终状态：要么不存在（最后一次清理后未创建），要么存在（最后一次 fn 创建）
-    # 更重要的验证：在 fn 内部目录应不存在（被清理）.改用 spy 验证.
+    # 核心验证：cleanup 被调用 max_retries + 1 = 2 次（每次 attempt 前）
+    assert call_count == 2, f"cleanup 应被调用 2 次（attempt 0 和 1 前），实际调用 {call_count} 次"
+    # 最终目录存在是因为最后一次 fn 创建后未清理——这是设计行为
+    assert os.path.exists(target), "最后一次 attempt 的 fn 会在清理后重建目录"
 
 
 def test_cleanup_on_retry_false_keeps_dir(fake_ctx):
@@ -430,6 +476,7 @@ def test_cleanup_on_retry_false_keeps_dir(fake_ctx):
 # ---------------------------------------------------------------------------
 # 6. 异常类上下文
 # ---------------------------------------------------------------------------
+
 
 def test_stage_execution_error_context():
     """StageExecutionError 携带完整上下文."""
@@ -465,6 +512,7 @@ def test_stage_timeout_error_is_stage_execution_error():
 # ---------------------------------------------------------------------------
 # 7. 端到端：max_retries=0 行为不变 + 重复运行幂等
 # ---------------------------------------------------------------------------
+
 
 def test_e2e_default_config_unchanged(_same_drive_tmp_root, request):
     """端到端：error_handling 段缺省值（max_retries=0）跑通完整批次."""
@@ -554,8 +602,7 @@ def test_e2e_idempotent_rerun_same_batch(_same_drive_tmp_root, request):
     second_count = len(second_lines)
 
     assert second_count == first_count, (
-        "幂等性：重复运行同批次产物行数应一致 "
-        f"(first={first_count}, second={second_count})"
+        f"幂等性：重复运行同批次产物行数应一致 (first={first_count}, second={second_count})"
     )
 
     # status 仍是 success
@@ -666,6 +713,7 @@ def test_e2e_retry_exhausted_fails(_same_drive_tmp_root, request, monkeypatch):
 # 8. 退避时间计算（指数退避 + 上限）
 # ---------------------------------------------------------------------------
 
+
 def test_backoff_exponential_and_capped(fake_ctx, monkeypatch):
     """验证退避时间 = min(base * 2^attempt, max)，且 sleep 被调用."""
     sleep_calls: list[float] = []
@@ -679,12 +727,14 @@ def test_backoff_exponential_and_capped(fake_ctx, monkeypatch):
             "cleanup_on_retry": False,
         }
     }
-    fn, state = _make_stage_fn([
-        RuntimeError("f1"),
-        RuntimeError("f2"),
-        RuntimeError("f3"),
-        RuntimeError("f4"),
-    ])
+    fn, state = _make_stage_fn(
+        [
+            RuntimeError("f1"),
+            RuntimeError("f2"),
+            RuntimeError("f3"),
+            RuntimeError("f4"),
+        ]
+    )
     slog = _make_slog(fake_ctx.run_dir, "compute")
 
     with pytest.raises(StageExecutionError):

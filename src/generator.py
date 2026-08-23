@@ -22,12 +22,16 @@ CITIES = ["上海", "北京", "广州", "深圳", "杭州", "成都", "武汉", 
 def gen_customers(rng: random.Random, n: int, base_date: datetime) -> list[dict[str, str]]:
     rows = []
     for i in range(1, n + 1):
-        rows.append({
-            "customer_id": f"CUS-{i:06d}",
-            "tier": rng.choices(TIERS, weights=[50, 30, 15, 5])[0],
-            "city": rng.choice(CITIES),
-            "join_date": (base_date - timedelta(days=rng.randint(0, 1800))).strftime("%Y-%m-%d"),
-        })
+        rows.append(
+            {
+                "customer_id": f"CUS-{i:06d}",
+                "tier": rng.choices(TIERS, weights=[50, 30, 15, 5])[0],
+                "city": rng.choice(CITIES),
+                "join_date": (base_date - timedelta(days=rng.randint(0, 1800))).strftime(
+                    "%Y-%m-%d"
+                ),
+            }
+        )
     return rows
 
 
@@ -35,18 +39,26 @@ def gen_products(rng: random.Random, n: int) -> list[dict[str, Any]]:
     rows = []
     for i in range(1, n + 1):
         cat = rng.choice(CATEGORIES)
-        rows.append({
-            "product_id": f"PRD-{i:06d}",
-            "name": f"{cat}-商品{i:03d}",
-            "category": cat,
-            "cost": round(rng.uniform(5, 2000), 2),
-        })
+        rows.append(
+            {
+                "product_id": f"PRD-{i:06d}",
+                "name": f"{cat}-商品{i:03d}",
+                "category": cat,
+                "cost": round(rng.uniform(5, 2000), 2),
+            }
+        )
     return rows
 
 
-def gen_orders(rng: random.Random, n: int, customers: list[dict[str, str]],
-               products: list[dict[str, Any]], base_date: datetime,
-               defects: dict[str, float], date_days: int) -> list[dict[str, Any]]:
+def gen_orders(
+    rng: random.Random,
+    n: int,
+    customers: list[dict[str, str]],
+    products: list[dict[str, Any]],
+    base_date: datetime,
+    defects: dict[str, float],
+    date_days: int,
+) -> list[dict[str, Any]]:
     cust_ids = [c["customer_id"] for c in customers]
     prod_ids = [p["product_id"] for p in products]
     rows = []
@@ -56,8 +68,9 @@ def gen_orders(rng: random.Random, n: int, customers: list[dict[str, str]],
         product_id = rng.choice(prod_ids)
         days_ago = rng.randint(0, date_days)
         order_date = (base_date - timedelta(days=days_ago)).strftime("%Y-%m-%d")
-        created_ts = (base_date - timedelta(days=days_ago,
-                                            minutes=rng.randint(0, 1200))).strftime("%Y-%m-%dT%H:%M:%S")
+        created_ts = (base_date - timedelta(days=days_ago, minutes=rng.randint(0, 1200))).strftime(
+            "%Y-%m-%dT%H:%M:%S"
+        )
         region = rng.choice(REGIONS)
         channel = rng.choice(CHANNELS)
         quantity = rng.randint(1, 20)
@@ -89,18 +102,20 @@ def gen_orders(rng: random.Random, n: int, customers: list[dict[str, str]],
         if rng.random() < defects.get("outlier", 0):
             unit_price = round(rng.uniform(50000, 200000), 2)
 
-        rows.append({
-            "order_id": oid,
-            "customer_id": customer_id,
-            "product_id": product_id,
-            "order_date": order_date,
-            "created_ts": created_ts,
-            "region": region,
-            "channel": channel,
-            "quantity": quantity,
-            "unit_price": unit_price,
-            "status": status,
-        })
+        rows.append(
+            {
+                "order_id": oid,
+                "customer_id": customer_id,
+                "product_id": product_id,
+                "order_date": order_date,
+                "created_ts": created_ts,
+                "region": region,
+                "channel": channel,
+                "quantity": quantity,
+                "unit_price": unit_price,
+                "status": status,
+            }
+        )
 
     dup_count = int(n * defects.get("duplicate", 0))
     for _ in range(dup_count):
@@ -121,12 +136,36 @@ def main(cfg: dict[str, Any]) -> dict[str, Any]:
 
     customers = gen_customers(rng, int(gen.get("customer_count", 3000)), base_date)
     products = gen_products(rng, int(gen.get("product_count", 200)))
-    orders = gen_orders(rng, n, customers, products, base_date, defects,
-                        int(gen.get("date_range_days", 90)))
+    orders = gen_orders(
+        rng, n, customers, products, base_date, defects, int(gen.get("date_range_days", 90))
+    )
 
-    csv_write(os.path.join(out_dir, "orders.csv"), list(orders[0].keys()), orders)
-    csv_write(os.path.join(out_dir, "customers.csv"), list(customers[0].keys()), customers)
-    csv_write(os.path.join(out_dir, "products.csv"), list(products[0].keys()), products)
+    # rows=0 / 空参考表时 orders[0] 会 IndexError；用固定列序兜底
+    order_fields = (
+        list(orders[0].keys())
+        if orders
+        else [
+            "order_id",
+            "customer_id",
+            "product_id",
+            "order_date",
+            "quantity",
+            "unit_price",
+            "status",
+            "channel",
+        ]
+    )
+    csv_write(os.path.join(out_dir, "orders.csv"), order_fields, orders)
+    csv_write(
+        os.path.join(out_dir, "customers.csv"),
+        list(customers[0].keys()) if customers else ["customer_id", "tier", "city", "join_date"],
+        customers,
+    )
+    csv_write(
+        os.path.join(out_dir, "products.csv"),
+        list(products[0].keys()) if products else ["product_id", "category", "price"],
+        products,
+    )
 
     meta = {
         "name": cfg.get("source", {}).get("name", "ecommerce-demo"),

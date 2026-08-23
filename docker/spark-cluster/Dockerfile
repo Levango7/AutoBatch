@@ -171,8 +171,13 @@ RUN set -eux; \
 # 容器内 python3 用于 Worker 端执行 Python 任务（UDF 等）
 # 注意：移除 `|| true`，让 PySpark 安装失败立即暴露构建问题
 # （此前 `|| true` 会掩盖 pip 安装失败，导致 Worker 启动后才报错）
-RUN python3 -m pip install --break-system-packages pyspark==${SPARK_VERSION} || \
-    pip3 install pyspark==${SPARK_VERSION}
+# 版本取 /opt/spark/.version（下载阶段写入的**实际**安装版本）：
+# 主版本下载失败回退 3.5.5 时，若仍按 ${SPARK_VERSION} 装 pyspark 4.2.0，
+# Worker 端 Python 与集群 JVM 版本错配必然运行时报错。
+RUN PYSPARK_VER=$(cat /opt/spark/.version) && \
+    echo ">>> installing pyspark==${PYSPARK_VER}" && \
+    python3 -m pip install --break-system-packages "pyspark==${PYSPARK_VER}" || \
+    (pip3 install --break-system-packages "pyspark==${PYSPARK_VER}" || exit 1)
 
 # ── Phase 5: Iceberg Spark extensions（可选） ──────────────────
 # 当 ENABLE_ICEBERG=true 时下载 iceberg-spark-runtime + iceberg-aws-bundle JAR
@@ -232,8 +237,16 @@ RUN if [ "${ENABLE_ICEBERG}" = "true" ]; then \
     fi
 
 # ── 非 root 用户（UID/GID 1000，与 K8s/securityContext 约定一致） ─
-# Spark Master/Worker 日志写到 ${SPARK_HOME}/logs/，需对 spark 用户可写
-RUN useradd -m -u 1000 spark && \
+# Spark Master/Worker 日志写到 ${SPARK_HOME}/logs/，需对 spark 用户可写。
+# 基础镜像（Ubuntu）可能已有 UID 1000 的用户（如 ubuntu）：此时 spark 复用
+# 默认 UID 而非固定 1000，避免 useradd 冲突导致构建失败。
+RUN if ! id -u spark >/dev/null 2>&1; then \
+        if id -u 1000 >/dev/null 2>&1; then \
+            useradd -m spark; \
+        else \
+            useradd -m -u 1000 spark; \
+        fi; \
+    fi && \
     mkdir -p /opt/spark/logs /opt/spark/work && \
     chown -R spark:spark /opt/spark
 

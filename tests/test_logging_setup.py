@@ -10,6 +10,7 @@
 
 不依赖文件 IO 的测试用 LogRecord 直接构造，避免污染 root logger。
 """
+
 from __future__ import annotations
 
 import json
@@ -36,8 +37,13 @@ from src.logging_setup import (
 def _make_record(msg="hello", **extra):
     """构造一条 LogRecord，可选注入 extra 属性."""
     record = logging.LogRecord(
-        name="test", level=logging.INFO, pathname=__file__, lineno=1,
-        msg=msg, args=(), exc_info=None,
+        name="test",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg=msg,
+        args=(),
+        exc_info=None,
     )
     for k, v in extra.items():
         setattr(record, k, v)
@@ -120,6 +126,7 @@ def test_json_formatter_includes_exception_info():
         raise ValueError("test error")
     except ValueError:
         import sys
+
         record = _make_record("msg")
         record.batch_id = "B-1"
         record.stage = "ingest"
@@ -140,6 +147,7 @@ def test_json_formatter_timestamp_iso_format():
     assert ts.endswith("Z")
     # 应可被 datetime.fromisoformat 解析（去掉 Z 后）
     from datetime import datetime
+
     datetime.fromisoformat(ts[:-1])
 
 

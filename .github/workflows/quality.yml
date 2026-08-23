@@ -56,7 +56,7 @@ jobs:
       - name: Ruff lint check
         run: |
           echo "::group::Ruff lint"
-          ruff check src/ tests/ --config pyproject.toml
+          ruff check src/ tests/ scripts/ dashboard/ --config pyproject.toml
           echo "::endgroup::"
 
       # -------------------------------------------------------------------------
@@ -65,7 +65,7 @@ jobs:
       - name: Ruff format check
         run: |
           echo "::group::Ruff format"
-          ruff format --check src/ tests/ --config pyproject.toml
+          ruff format --check src/ tests/ scripts/ dashboard/ --config pyproject.toml
           echo "::endgroup::"
 
       # -------------------------------------------------------------------------

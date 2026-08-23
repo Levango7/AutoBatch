@@ -113,11 +113,11 @@ def _pyspark_jvm_exists() -> bool:
         # 若 JAVA_HOME / spark_home 未设置，直接假设为无环境
         if not _os2.environ.get("JAVA_HOME") and not _os2.environ.get("SPARK_HOME"):
             return False
-        from pyspark import SparkContext as _SC
+        from pyspark import SparkContext as _SparkCtx
 
-        sc = _SC.getOrCreate(
+        sc = _SparkCtx.getOrCreate(
             master="local[1]",
-            conf=_SC._conf.newSession(),
+            conf=_SparkCtx._conf.newSession(),
         )
         sc.stop()
         return True

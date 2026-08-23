@@ -14,7 +14,7 @@
 # 3.9 CI 跑 python engine + local_csv 核心路径。
 polars>=1.0,<2.0       # Phase 2a 列式加速（engine.backend="polars" 时需要；Python >=3.10）
 pyspark>=4.0,<5.0      # Phase 2b Spark 分布式加速（engine.backend="spark" 时需要；需 JDK17+；Python >=3.10）
-pyarrow>=14.0,<20.0    # Phase 3 湖存储（storage.backend="parquet" 时需要；Python >=3.10 因 wheel 支持）
+pyarrow>=23.0.1,<25.0   # Phase 3 湖存储（storage.backend="parquet" 时需要；Python >=3.10 因 wheel 支持；>=23.0.1 修复 PYSEC-2026-113）
 minio>=7.0,<8.0        # Phase 3 湖存储（MinIO SDK；bucket 初始化与迁移脚本用）
 psutil>=5.9,<7.0       # 任务41 监控告警（monitoring.enabled=true 时可选；不可用则降级返回 None）
 pydantic>=2.10.6,<2.14.0b1 # 配置校验（src/config_schema.py；pipeline.py 导入失败时自动降级跳过校验；

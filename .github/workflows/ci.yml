@@ -60,8 +60,8 @@ jobs:
           # 核心依赖：pydantic pin >=2.10.6 以提供 linux cp39 wheel（CI 3.10+ 全覆盖）
           pip install -r requirements.txt
           # optional 引擎依赖：pyspark / polars / pyarrow / pyiceberg 均要求 Python >=3.10
-          # 在 CI 当前矩阵（3.10–3.12）中均可安装
-          pip install "pyspark>=4.0,<5.0" "polars>=1.0,<2.0" "pyarrow>=14.0,<20.0" "pyiceberg==0.12.0rc1"
+          # 在 CI 当前矩阵（3.10–3.12）中均可安装；pyarrow>=23.0.1 修复 PYSEC-2026-113
+          pip install "pyspark>=4.0,<5.0" "polars>=1.0,<2.0" "pyarrow>=23.0.1,<25.0" "pyiceberg==0.12.0rc1"
           pip install -r requirements-dev.txt
 
       # 全量运行；重型测试（Spark 集群/MinIO/需要 hadoop native lib 的路径）

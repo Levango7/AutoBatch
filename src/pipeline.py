@@ -22,6 +22,7 @@ except ImportError:  # pragma: no cover - 仅在无 pydantic 的最小环境触�
     validate_config = None  # type: ignore[assignment]
 from .exceptions import StageExecutionError, StageTimeoutError
 from .helpers import (
+    VERSION,
     PipelineContext,
     StageLog,
     _apply_spark_base_config,
@@ -38,6 +39,7 @@ from .lineage import Manifest, save_latest_pointer
 from .logging_setup import close_logging, setup_logging
 from .metrics import MetricsRecorder
 from .monitoring import HealthServer, MetricsSampler, check_alerts, load_monitoring_config
+from .openlineage import OpenLineageEmitter
 from .state import StateStore
 
 STAGES = ["ingest", "validate", "clean", "compute", "output"]
@@ -517,6 +519,83 @@ def _run_stage_with_retry(
     )
 
 
+# ---------------------------------------------------------------------------
+# 断点续跑（resume）：同 batch_id 失败重跑时跳过已成功且产物仍在的 stage.
+#
+# 前置条件（全部满足才启用，否则静默走全量路径）：
+#   1. error_handling.resume=true（缺省 false，向后兼容 100%）
+#   2. 显式传入 batch_id（非 auto）且 run/<batch_id>/manifest.json 存在
+#   3. 上次 manifest status=="failed"（成功的批次重跑视为全新执行）
+#   4. pipeline_version 与 config_digest 与上次一致（配置漂移禁止续跑）
+#
+# 跳过判据：上次该 stage status=="success" 且其输出目录存在且非空
+# （_STAGE_OUTPUT_DIRS 定义；output 阶段永不跳过——它是血缘/产物登记的
+# 汇总点，重跑成本低且必须基于最新 ctx 重建 dashboard 与 lineage 边）。
+#
+# 恢复的状态：quality（validate 写入 manifest）、source、lineage 边
+# （output 的 _register_edges 按 target 键覆盖写，恢复旧边后重跑 output
+# 会幂等重建）。水位不涉及——失败路径本就不推进水位（两阶段提交），
+# 续跑成功后由 _advance_and_merge 正常推进一次。
+# ---------------------------------------------------------------------------
+_RESUME_MIN_FILES = {"validate": ["quality_summary.json"]}
+
+
+def _load_resume_plan(
+    cfg: dict[str, Any],
+    batch_id: str,
+    run_dir: str,
+    digest: str,
+    logger,
+) -> Optional[dict[str, Any]]:
+    """返回可续跑的上次 manifest dict；不可续跑返回 None 并说明原因."""
+    eh = cfg.get("error_handling", {}) or {}
+    if not bool(eh.get("resume", False)):
+        return None
+    if not batch_id or batch_id == "auto":
+        return None
+    manifest_path = os.path.join(run_dir, "manifest.json")
+    if not os.path.isfile(manifest_path):
+        return None
+    prev = json_load(manifest_path)
+    if not isinstance(prev, dict) or prev.get("status") != "failed":
+        return None
+    if prev.get("pipeline_version") != VERSION:
+        if logger is not None:
+            logger.info(
+                "resume skipped: pipeline version changed",
+                extra={"stage": "pipeline", "batch": batch_id},
+            )
+        return None
+    if prev.get("config_digest") != digest:
+        if logger is not None:
+            logger.info(
+                "resume skipped: config changed since failed run",
+                extra={"stage": "pipeline", "batch": batch_id},
+            )
+        return None
+    return prev
+
+
+def _stage_outputs_intact(stage: str, run_dir: str) -> bool:
+    """stage 的全部输出目录存在且非空（含额外必需文件检查）→ True.
+
+    _RESUME_MIN_FILES 的键值是针对 stage 第一个输出子目录（主数据目录）的
+    必需文件名；其余辅目录（如 validate 的 quarantine/report）只需非空即可。
+    """
+    dirs = _STAGE_OUTPUT_DIRS.get(stage, [])
+    for d in dirs:
+        base = os.path.join(run_dir, d)
+        if not os.path.isdir(base) or not os.listdir(base):
+            return False
+    # 只在第一个（主）输出子目录里检查必需文件
+    if dirs and _RESUME_MIN_FILES.get(stage):
+        main_dir = os.path.join(run_dir, dirs[0])
+        for f in _RESUME_MIN_FILES[stage]:
+            if not os.path.isfile(os.path.join(main_dir, f)):
+                return False
+    return True
+
+
 def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
     run_root = abs_path(cfg["pipeline"].get("run_dir", "run"))
     os.makedirs(run_root, exist_ok=True)
@@ -540,6 +619,63 @@ def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
     # 见 docs/evolution.md §4.3.1.1（polars）/ §4.3.2.1（spark）。缺省 "python"
     # 保持向后兼容；"polars" 走列式路径；"spark" 走分布式路径。
     ctx.engine_backend = _get_engine_backend(cfg)
+
+    # --- Resume (断点续跑) ---
+    resumed_stages = set()
+    resume_active = False
+    digest = config_digest(cfg)
+    prev = _load_resume_plan(cfg, batch_id, run_dir, digest, logger)
+    if prev is not None:
+        resume_active = True
+        # 恢复 source
+        if prev.get("source"):
+            manifest.set_source(prev["source"].get("name", ""), prev["source"].get("files", []))
+        # 恢复 quality
+        if prev.get("quality"):
+            manifest.set_quality(prev["quality"])
+        # 恢复已成功的 stages（除 output 外）
+        for st in prev.get("stages", []):
+            if st.get("status") == "success" and st.get("name") != "output":
+                stage_name = st["name"]
+                # 检查产物是否完整
+                if _stage_outputs_intact(stage_name, run_dir):
+                    resumed_stages.add(stage_name)
+                    # 复制 stage 记录到当前 manifest
+                    extra = st.get("extra", {}) or {}
+                    extra["resumed"] = True
+                    # lineage_decl 由 add_stage(extra={...}) 平铺到 stage entry 顶层，
+                    # 也可能嵌套在 extra 里（两种写法都兼容）.
+                    lineage_decl = st.get("lineage_decl") or extra.get("lineage_decl", {})
+                    if lineage_decl:
+                        for target, ups in lineage_decl.items():
+                            ctx.lineage_decls.setdefault(target, []).extend(ups)
+                    manifest.add_stage(
+                        stage_name,
+                        st["status"],
+                        st.get("rows_in", 0),
+                        st.get("rows_out", 0),
+                        st.get("duration_ms", 0),
+                        st.get("log", ""),
+                        st.get("error"),
+                        extra=extra,
+                    )
+                else:
+                    # 产物不完整，不能续跑，回退全量执行
+                    resume_active = False
+                    resumed_stages.clear()
+                    # 重置 manifest 为全新状态
+                    manifest = Manifest(batch_id, digest, run_dir)
+                    ctx = PipelineContext(config=cfg, run_dir=run_dir, batch_id=batch_id, manifest=manifest)
+                    ctx.engine_backend = _get_engine_backend(cfg)
+                    # 后续 spark 初始化会使用新的 ctx
+                    break
+        if resume_active:
+            logger.info("resume enabled, skipping stages", extra={"stage": "pipeline", "resumed": list(resumed_stages)})
+        else:
+            logger.info("resume disabled, full run", extra={"stage": "pipeline"})
+    else:
+        logger.info("full run (no resume)", extra={"stage": "pipeline"})
+
     # Phase 2b: backend="spark" 时初始化 SparkSession 并存入 ctx.spark_session，
     # 各 stage 通过 ctx.spark_session 访问，避免重复创建。结尾 finally 块中
     # spark.stop() 确保总是停止。参见 docs/evolution.md §4.4.2.2。
@@ -548,6 +684,20 @@ def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
         spark = _init_spark_session(cfg, logger)
         ctx.spark_session = spark
     metrics = MetricsRecorder(batch_id)
+
+    # OpenLineage：默认关闭（openlineage.enabled=false），启用后不影响主流程.
+    ol_cfg = cfg.get("openlineage", {}) or {}
+    ol_enabled = bool(ol_cfg.get("enabled", False))
+    ol_namespace = str(ol_cfg.get("namespace", "autobatch"))
+    ol_endpoint = str(ol_cfg.get("endpoint", "")).strip()
+    ol_out_path = os.path.join(run_dir, "openlineage.ndjson") if ol_enabled else None
+    emitter: Optional[OpenLineageEmitter] = (
+        OpenLineageEmitter(batch_id, namespace=ol_namespace, endpoint=ol_endpoint, out_path=ol_out_path, logger=logger)
+        if ol_enabled
+        else None
+    )
+    if emitter is not None:
+        emitter.pipeline_event("START")
 
     # Incremental mode: load cross-batch state.json into ctx.state. The store
     # is constructed unconditionally so the success path can commit even if
@@ -593,7 +743,16 @@ def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
 
     try:
         for name in STAGES:
+            # 断点续跑：跳过已成功的 stage（output 永不跳过）
+            if resume_active and name in resumed_stages:
+                logger.info("stage resumed (skipped)", extra={"stage": "pipeline", "resumed_stage": name})
+                if emitter is not None:
+                    emitter.stage_event(name, "COMPLETE")
+                continue
+
             log_path = os.path.join("logs", name + ".jsonl")
+            if emitter is not None:
+                emitter.stage_event(name, "START")
             if fail_at == name:
                 overall = "failed"
                 error_msg = "demo failure injected at stage " + name
@@ -623,6 +782,8 @@ def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
                 # Collect lineage declarations from this stage into the shared map.
                 for target, ups in summary.get("lineage", {}).items():
                     ctx.lineage_decls[target] = list(ups)
+                if emitter is not None:
+                    emitter.stage_event(name, "COMPLETE")
                 logger.info(
                     "stage done",
                     extra={"stage": name, "rows_in": rows_in, "rows_out": rows_out, "dur_ms": dur},
@@ -647,6 +808,8 @@ def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
                 dur = int((time.monotonic() - start) * 1000)
                 manifest.add_stage(name, "failed", 0, 0, dur, log_path, error_msg)
                 metrics.record_stage(name, "failed", dur, 0, 0)
+                if emitter is not None:
+                    emitter.stage_event(name, "FAILED", error_message=error_msg)
                 logger.error(
                     "stage failed (after retries)",
                     extra={
@@ -668,10 +831,18 @@ def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
                 dur = int((time.monotonic() - start) * 1000)
                 manifest.add_stage(name, "failed", 0, 0, dur, log_path, error_msg)
                 metrics.record_stage(name, "failed", dur, 0, 0)
+                if emitter is not None:
+                    emitter.stage_event(name, "FAILED", error_message=error_msg)
                 logger.error("stage failed", extra={"stage": name, "error": error_msg})
 
                 break
 
+        # 把本轮收集的 lineage_decls 快照写回各 stage 条目，供下次 resume 恢复.
+        # 只覆盖成功或失败（已记录）的 stage；output 是最后一个必然执行的 stage.
+        for entry in manifest.stages:
+            declared = entry.get("extra", {}) or {}
+            declared["lineage_decl"] = dict(ctx.lineage_decls)
+            entry["extra"] = declared
         manifest.finish(overall, error_msg)
         manifest.save()
         save_latest_pointer(run_root, batch_id, run_dir)

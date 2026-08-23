@@ -38,18 +38,20 @@ class Manifest:
         duration_ms: int,
         log_path: str,
         error: Optional[str] = None,
+        extra: Optional[dict[str, Any]] = None,
     ) -> None:
-        self.stages.append(
-            {
-                "name": name,
-                "status": status,
-                "rows_in": rows_in,
-                "rows_out": rows_out,
-                "duration_ms": duration_ms,
-                "log": log_path,
-                "error": error,
-            }
-        )
+        entry = {
+            "name": name,
+            "status": status,
+            "rows_in": rows_in,
+            "rows_out": rows_out,
+            "duration_ms": duration_ms,
+            "log": log_path,
+            "error": error,
+        }
+        if extra:
+            entry.update(extra)
+        self.stages.append(entry)
 
     def add_artifact(
         self,

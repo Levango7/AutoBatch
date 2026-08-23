@@ -141,6 +141,15 @@ class MonitoringSection(_AllowExtra):
     health_check: dict[str, Any] = Field(default_factory=dict)
 
 
+class ErrorHandlingSection(_AllowExtra):
+    max_retries: int = 0
+    backoff_base_seconds: float = 2.0
+    backoff_max_seconds: float = 60.0
+    cleanup_on_retry: bool = True
+    resume: bool = False
+    stage_timeouts: dict[str, float] = Field(default_factory=dict)
+
+
 class Config(_AllowExtra):
     pipeline: PipelineSection = Field(default_factory=PipelineSection)
     engine: EngineSection = Field(default_factory=EngineSection)
@@ -150,6 +159,7 @@ class Config(_AllowExtra):
     incremental: IncrementalSection = Field(default_factory=IncrementalSection)
     logging: LoggingSection = Field(default_factory=LoggingSection)
     monitoring: MonitoringSection = Field(default_factory=MonitoringSection)
+    error_handling: ErrorHandlingSection = Field(default_factory=ErrorHandlingSection)
 
     # Sections consumed verbatim by stages — passthrough maps.
     source: dict[str, Any] = Field(default_factory=dict)
@@ -157,7 +167,6 @@ class Config(_AllowExtra):
     clean: dict[str, Any] = Field(default_factory=dict)
     compute: dict[str, Any] = Field(default_factory=dict)
     output: dict[str, Any] = Field(default_factory=dict)
-    error_handling: dict[str, Any] = Field(default_factory=dict)
     monitoring_config: str = "config/monitoring.json"
 
 

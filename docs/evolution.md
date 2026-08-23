@@ -5,6 +5,8 @@
 > 阅读对象：架构评审委员会、数据平台负责人、AutoBatch 维护者。读者假定不熟悉 Iceberg / Spark / MinIO，因此原理部分自包含。
 >
 > 撰写依据：`readme.md`、`docs/runbook.md` 第 12 节、`docs/design.html` 第 6/8 章、`src/pipeline.py`、`src/helpers.py`、`src/state.py`、`src/stages/*.py`、`tests/test_storage_parquet.py`、`config/pipeline.json` 实际代码与配置。
+>
+> **时点说明（2026-08-24）**：① 本文档按演进日志体例保留各 Phase 完成时的历史快照，文中测试数量（如"112 个测试全部通过"）为**撰写时点**的套件规模，当前全套件为 **298 个用例**；② 历史章节中的多机模式 Master 地址 `spark://localhost:7077` 为当时的宿主机端口映射，2026-08 起因 Windows 动态端口范围冲突已改为 **宿主机 15077 → 容器内 7077**（commit 55f17d9），当前配置请以 `docker/spark-cluster/docker-compose.yml` 与 `readme.md` 为准。
 
 ---
 
@@ -78,7 +80,7 @@ AutoBatch 当前是一个**可演进的大数据批处理工作流骨架——�
 | 能力维度 | 当前是否具备 | 当前实现 | 演进目标 | 缺口严重度 |
 |---|---|---|---|---|
 | 增量处理 | ✅（Phase 1 + Phase 4） | Phase 1 高水位（`incremental.enabled=true` + `mode="high_watermark"`，2026-08-15 已实现）；Phase 4 Iceberg snapshot diff（`mode="iceberg_snapshot_diff"`，2026-08-16 已实现） | 水位/snapshot diff/CDC | 已具备（CDC 远期） |
-| 分布式并行 | ✅（Phase 2a + Phase 2b 本地 + 多机） | Phase 2a Polars 单机多线程 + SIMD 向量化（`engine.backend="polars"`，2026-08-15 已实现）；Phase 2b Spark 本地模式 `master="local[*]"` 已实现（`engine.backend="spark"`，2026-08-15）；Phase 2b 多机模式 `master="spark://localhost:7077"` Docker Compose Standalone 集群 + MinIO 共享存储 + S3A connector + socat 代理已实现（2026-08-16） | 分区并行（Polars 单机/Spark 多机） | 已具备 |
+| 分布式并行 | ✅（Phase 2a + Phase 2b 本地 + 多机） | Phase 2a Polars 单机多线程 + SIMD 向量化（`engine.backend="polars"`，2026-08-15 已实现）；Phase 2b Spark 本地模式 `master="local[*]"` 已实现（`engine.backend="spark"`，2026-08-15）；Phase 2b 多机模式 `master="spark://localhost:15077"`（宿主机端口，容器内 7077）Docker Compose Standalone 集群 + MinIO 共享存储 + S3A connector + socat 代理已实现（2026-08-16，端口映射 2026-08 迁移见顶部时点说明） | 分区并行（Polars 单机/Spark 多机） | 已具备 |
 | ACID 事务 | ✅（Phase 4） | Iceberg 湖表原子提交 + 乐观并发控制（`storage.backend="iceberg"`，2026-08-16 已实现） | 湖表 commit 原子化 | 已具备 |
 | time travel | ✅（Phase 4） | Iceberg 按 snapshot id 读历史快照 `read_history_snapshot(snapshot_id)`（`storage.backend="iceberg"`，2026-08-16 已实现） | snapshot 快照回滚 | 已具备 |
 | schema evolution | ✅（Phase 4） | Iceberg 加列 / 改名 / 改类型无需重写数据，metadata 仅改 schema 元信息（`storage.backend="iceberg"`，2026-08-16 已实现） | 湖表 schema 合并 | 已具备 |

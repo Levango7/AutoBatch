@@ -24,13 +24,13 @@
 - **湖存储能力（Phase 3，MinIO + Parquet 列式存储）**：`storage.backend="parquet"` 切换至 Parquet 列式存储路径，已落地于 `src/io/_s3_parquet.py`（`_get_storage_backend` / `_resolve_s3_path` / `_get_s3_filesystem` / `_build_polars_s3_options` / `_is_s3_target` / `_s3_uri_to_bucket_key` / `_get_parquet_compression` / `_table_read_parquet` / `_table_write_parquet`，经 `src/helpers.py` re-export 保持兼容）+ `src/helpers.py`（`table_read` / `table_write` 统一路由）+ `src/stages/{ingest,validate,clean,compute,output}.py`（各 stage python 路径改走 `table_read` / `table_write`，使 `storage.backend="parquet"` 在 python engine 下也生效）+ `config/pipeline.json` + `pipeline_small.json`（新增 `storage` 段：backend / bucket / endpoint / access_key / secret_key / secure / region / warehouse / prefix / compression）+ `requirements.txt`（加 `pyarrow>=14.0` + `minio>=7.0`）。`storage.backend` 与 `engine.backend` **正交解耦**——`engine.backend` 决定计算引擎（python / polars / spark），`storage.backend` 决定存储介质（local_csv / parquet），任意组合生效；`storage.backend="parquet"` 时支持本地 `.parquet` 文件与 S3/MinIO 远端存储（自动按 bucket + endpoint 配置判定），Parquet 列式压缩（zstd / snappy / gzip）获得 3-6 倍压缩 + 谓词下推；与 Phase 1 增量正交叠加（水位 + Parquet row group 统计协同，增量 IO 量与增量行数成正比）；`pyarrow` / `minio` 采用 lazy import，`storage.backend="local_csv"`（缺省）路径零额外依赖，向后兼容 100%
 - **湖表能力（Phase 4，MinIO + Iceberg）**：`storage.backend="iceberg"` 切换至 Iceberg 湖表路径，已落地于 `src/iceberg.py`（`_get_iceberg_catalog` / `_table_read_iceberg` / `_table_write_iceberg` / `iceberg_snapshot_diff` / `read_history_snapshot` / `list_snapshots` 等 Iceberg 全部逻辑，经 `src/helpers.py` re-export 保持兼容）+ `src/stages/ingest.py`（`_copy_incremental_iceberg` 分支，按 snapshot diff 直接读 added_data_files）+ `src/pipeline.py`（Iceberg 配置注入 + snapshot id 推进）+ `src/state.py`（snapshot id 两阶段提交，失败不推进，重跑幂等）+ `config/pipeline.json`（新增 `iceberg` 子段：catalog_type / catalog_uri / warehouse / catalog_name 等）。获得 **ACID**（原子提交 + 乐观并发控制，并发写入冲突自动 retry / 抛 `CommitFailedException`）、**time travel**（按 snapshot id 读历史快照 `read_history_snapshot(table_name, cfg, snapshot_id)`，回滚审计与时间点查询）、**schema evolution**（加列 / 改名 / 改类型无需重写数据，Iceberg metadata 仅改 schema 元信息）、**snapshot diff 增量**（`incremental.mode="iceberg_snapshot_diff"` 替代 Phase 1 自建水位，直接读 `added_data_files`，IO 量与增量行数严格成正比，零自建水位维护成本）；pyiceberg 0.12.0rc1 集成（Python 3.14 兼容），SQL catalog + SQLite 开发零额外服务，REST catalog 生产部署；与 Phase 1-3 正交叠加（`incremental.mode` 缺省 `high_watermark` 走 Phase 1 自建水位路径）；`pyiceberg` 采用 lazy import，`storage.backend="local_csv"`（缺省）路径零额外依赖，向后兼容 100%
 - **Spark + Iceberg 三合一终态（Phase 5）**：Spark（分布式计算）+ Iceberg（湖表 ACID + time travel + snapshot diff）+ MinIO（对象存储）三者合一终态。`engine.backend="spark"` + `storage.backend="iceberg"` 时 `spark.read.table("autobatch.orders")` 原生读写 Iceberg 表（经 Spark Iceberg connector 把 DataFrame 操作下推为 Iceberg snapshot commit），分布式 snapshot diff（`iceberg_snapshot_diff_spark` 跨 executor 并行扫描 added_data_files，对比单机 pyiceberg 路径在亿行规模显著加速）。已落地于 `src/helpers.py`（新增 `iceberg_snapshot_diff_spark` 分布式 snapshot diff）+ `src/pipeline.py`（Spark Iceberg 配置注入：`spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions` + `spark.sql.catalog.autobatch=org.apache.iceberg.spark.SparkCatalog` + `spark.sql.catalog.autobatch.type=rest` + package 坐标）+ `docker/spark-cluster/Dockerfile`（`ENABLE_ICEBERG` ARG 开关，缺省 `false`，因 Iceberg JAR 最高支持 Spark 4.1 而 Docker 镜像用 Spark 4.2，需显式 `--build-arg ENABLE_ICEBERG=true` 启用 Iceberg JAR 打入，**并需把 Spark 降级到 4.1**（`--build-arg SPARK_VERSION=4.1.0` + driver 端 `pip install pyspark==4.1.0`，否则 JAR 版本不匹配抛 `ClassNotFoundException`）。新增 `tests/test_spark_iceberg.py`（10 个测试：8 个 `skipif` 守护环境前置 + 2 个 config 验证 Spark Iceberg connector 配置正确注入）；与 Phase 1-4 正交叠加，`engine.backend="python"` / `"polars"` 缺省走原路径，向后兼容 100%
-- **测试套件**：tests/ 下 21 个测试文件共 297 个 pytest 用例，覆盖 8 类质量规则正反例、referential 性能回归、5 个 stage 单测、端到端冒烟、5 个增量场景（首次=全量、零增量、追加、失败重跑、全量回归）、Polars/Spark/Parquet/Iceberg/Spark+Iceberg 等价性与组合场景、配置 schema 校验（`tests/test_config_schema.py` 12 个用例）。全量回归（Windows 本地，Python 3.14）：273 passed + 23 skipped + 1 xpassed——skip 为环境相关用例（Spark 集群 / MinIO / Iceberg JAR 未就绪时由 `skipif` 自动跳过）
+- **测试套件**：tests/ 下 20 个测试模块（+conftest.py 共 21 个文件）共 298 个 pytest 用例，覆盖 8 类质量规则正反例、referential 性能回归、5 个 stage 单测、端到端冒烟、5 个增量场景（首次=全量、零增量、追加、失败重跑、全量回归）、Polars/Spark/Parquet/Iceberg/Spark+Iceberg 等价性与组合场景、配置 schema 校验（`tests/test_config_schema.py` 12 个用例）。全量回归（Windows 本地，Python 3.14）：275 passed + 23 skipped——skip 为环境相关用例（Spark 集群 / MinIO / Iceberg JAR 未就绪时由 `skipif` 自动跳过）
 - **Polars 等价性测试（Phase 2a）**：`tests/test_engine_polars.py` 4 个用例覆盖 Polars 全量等价性（产物与 python 路径一致）、DQ Score 落区间、增量 + Polars 组合、Parquet 格式（条件 skip）
 - **Spark 等价性测试（Phase 2b）**：`tests/test_engine_spark.py` 覆盖 Spark 全量等价性（产物与 python 路径一致）、DQ Score 落区间 + lineage/metrics 正确、增量 + Spark 组合（首次建水位 + 二跑零增量 + 追加只处理新增）、多机模式 S3 等价性（`test_cluster_spark_s3_equivalence`，Docker Compose Standalone 集群 + MinIO 共享存储，验证多机产物与 python 路径一致）。Windows 环境因缺 `hadoop.dll` 用 `pytest.mark.skipif` 跳过本地模式用例（代码逻辑完整，装齐 `hadoop.dll` + `winutils.exe` 后可直接运行）；多机模式用例在 Docker Desktop / MinIO 不可用时跳过
 - **Parquet 湖存储测试（Phase 3）**：`tests/test_storage_parquet.py` 4 个用例覆盖本地 Parquet 等价性（产物与 local_csv 路径一致）、S3（MinIO）Parquet 等价性（远端读写产物一致，MinIO 不可用时 `skipif` 跳过）、Parquet 压缩比基准（同数据 CSV vs Parquet 文件大小对比）、增量 + Parquet 组合（首次建水位 + 追加只处理新增）。`conftest.py` 新增 `parquet_env` + `s3_env` fixture 隔离测试环境。合计 38 个用例（34 passed + 4 skipped，skip = 1 Polars Parquet + 3 Spark Windows）
 - **Iceberg 湖表测试（Phase 4）**：`tests/test_storage_iceberg.py` 13 个用例覆盖 Iceberg 等价性（全量产物与 local_csv 路径一致）、ACID（原子提交 + 并发写入冲突检测）、time travel（按 snapshot id 读历史快照产物正确）、schema evolution（加列 / 改名 / 改类型无需重写数据）、snapshot diff 增量（`incremental.mode="iceberg_snapshot_diff"` 直接读 added_data_files，IO 量与增量行数成正比，对比 Phase 1 自建水位路径产物一致）、增量 + Iceberg 组合（首次建 snapshot + 追加只处理新增 snapshot）、SQL catalog + SQLite 开发环境零额外服务、REST catalog 生产配置验证。`conftest.py` 新增 `iceberg_env` fixture 隔离测试环境，pyiceberg 未安装或 Python 版本不兼容时 `skipif` 跳过
 - **Spark + Iceberg 三合一测试（Phase 5）**：`tests/test_spark_iceberg.py` 10 个用例覆盖 Spark Iceberg connector 配置注入验证（`spark.sql.extensions` + `spark.sql.catalog.*` 正确设置）、`spark.read.table()` 原生读写 Iceberg 表等价性、分布式 snapshot diff 与单机 pyiceberg 路径产物一致。8 个用例用 `skipif` 守护环境前置（pyiceberg / pyspark / Docker / MinIO / Iceberg JAR 不可用时跳过），2 个用例做 config 验证（不依赖外部环境，纯配置注入检查）
-- **CI**：.github/workflows/ci.yml 在 push（main/master/release/*）/ PR 时自动跑 pytest 全量 + 流水线冒烟（Python 3.9–3.14 矩阵，3.14 实验性；Spark 集群/MinIO 等环境相关用例由 skipif 自动跳过），另含 coverage 上报与 pip-audit 依赖安全扫描；.github/workflows/quality.yml 跑 ruff + mypy + 覆盖率 60% 门禁
+- **CI**：.github/workflows/ci.yml 在 push（main/master/release/*）/ PR 时自动跑 pytest 全量 + 流水线冒烟（Python 3.10–3.12 矩阵；Spark 集群用例需本地 Docker 集群，CI 中以 `-k "not cluster"` 排除；MinIO/Iceberg JAR 等环境相关用例由 skipif 自动跳过），另含 coverage 上报与 pip-audit 依赖安全扫描；.github/workflows/quality.yml 跑 ruff + mypy + 覆盖率 60% 门禁
 
 ## 快速开始
 
@@ -271,22 +271,29 @@ AutoBatch/
 │   ├── state.py             # StateStore：跨批次水位 + 聚合持久化（state.json + state/aggregates/）
 │   ├── generator.py         # 示例数据生成器（注入缺陷）
 │   └── stages/              # 五阶段：ingest/validate/clean/compute/output（各 stage 声明 lineage，前三个含增量分支）
-├── tests/                   # pytest 测试套件（21 个文件，297 个用例）
+├── tests/                   # pytest 测试套件（20 个测试模块，298 个用例）
 │   ├── conftest.py                   # 公共夹具（临时 run_dir / 配置 / inc_env 增量 / polars_env / parquet_env / s3_env / iceberg_env 隔离夹具）
 │   ├── test_benchmark.py             # 基准测试（6 个用例，4 个 engine × storage 组合，默认 skip 需 --runslow 启用）
+│   ├── test_config_schema.py         # 配置 schema 校验（12 个用例：合法/非法 backend、fail_at、多余键、最小配置）
+│   ├── test_edge_cases.py            # 边界条件（34 个用例：零行/单行数据、空值 CSV、空 state/manifest/metrics、聚合边界）
 │   ├── test_engine_polars.py         # Polars 等价性测试（4 个用例：全量等价 / DQ Score / 增量+Polars / Parquet）
 │   ├── test_engine_spark.py          # Spark 等价性测试（3 个用例：全量等价 / DQ Score / 增量+Spark，Windows 缺 hadoop.dll 时 skipif）
-│   ├── test_engine_spark_cluster.py  # Spark 多机模式测试（4 个用例：多机+S3 全量等价 / 增量+多机+S3，Docker/MinIO 不可用时跳过）
-│   ├── test_error_handling.py        # 错误处理加固测试（27 个用例：重试 / 超时 / 幂等 / StageExecutionError / 清理不碰 state）
+│   ├── test_engine_spark_cluster.py  # Spark 多机模式测试（4 个用例：多机+S3 全量等价 / 多 executor 并行 / 增量+多机+S3 / Worker 数量，Docker 集群不可用时跳过）
+│   ├── test_error_handling.py        # 错误处理加固测试（28 个用例：重试 / 超时 / 幂等 / StageExecutionError / 清理不碰 state）
+│   ├── test_generator.py             # 数据生成器测试（26 个用例：行数/字段/ID 格式/值域/缺陷注入/同 seed 可复现）
 │   ├── test_incremental.py           # 5 个增量场景（首次=全量 / 零增量 / 追加 / 失败重跑 / 全量回归）
+│   ├── test_lineage.py               # 血缘 manifest 测试（23 个用例：set_source / add_stage/artifact/edge / finish / JSON 往返 / lineage_view）
+│   ├── test_logging_setup.py         # 日志测试（22 个用例：BatchLogFilter / JSON Formatter / 级别解析 / handler 幂等）
+│   ├── test_metrics.py               # 指标测试（14 个用例：recorder / record_stage / finish / to_dict 扁平化 / save 往返）
 │   ├── test_monitoring.py            # 监控告警测试（28 个用例：MetricsSampler / AlertChecker / DQ Score 阈值 / stage duration 超阈值 / HealthServer）
-│   ├── test_pipeline_e2e.py          # 端到端冒烟（success / DQ Score / 血缘 / metrics.json）
+│   ├── test_pipeline_e2e.py          # 端到端冒烟（14 个用例：success / DQ Score / 血缘 / metrics.json / 各表行数 / KPI 一致性）
 │   ├── test_quality.py               # 8 类规则正反例 + referential 性能回归
 │   ├── test_spark_iceberg.py         # Spark+Iceberg 三合一测试（10 个用例：8 个 skipif 环境守护 + 2 个 config 验证 Spark Iceberg connector 注入）
 │   ├── test_stages.py                # 5 个 stage 单测
+│   ├── test_state.py                 # StateStore 测试（26 个用例：水位/snapshot 两阶段提交 / 失败不推进 / 聚合 merge / 原子写）
 │   ├── test_storage_iceberg.py       # Iceberg 湖表测试（13 个用例：等价性 / ACID / time travel / schema evolution / snapshot diff 增量 / 增量+Iceberg / SQL catalog / REST catalog，pyiceberg 未安装时 skipif）
 │   └── test_storage_parquet.py       # Parquet 湖存储测试（4 个用例：本地 Parquet 等价 / S3 Parquet 等价 / 压缩比 / 增量+Parquet，MinIO 不可用时 skipif）
-├── .github/workflows/ci.yml # GitHub Actions CI（Python 3.9–3.14 矩阵，pytest + 冒烟 + pip-audit）
+├── .github/workflows/ci.yml # GitHub Actions CI（Python 3.10–3.12 矩阵，pytest + 冒烟 + pip-audit）
 ├── .github/workflows/quality.yml # ruff + mypy + coverage 60% 门禁
 ├── data/raw/                # 生成的原始数据（模拟外部数据源）
 ├── run/                     # 运行产物（每批次一个目录）
@@ -396,7 +403,7 @@ Phase 3 性能优势：
 python -m pytest tests/ -v
 ```
 
-297 个用例（21 个测试文件；Windows 本地 Python 3.14 基线：273 passed + 23 skipped + 1 xpassed——skip 为环境相关用例，Spark 集群 / MinIO / Iceberg JAR 未就绪时由 `skipif` 自动跳过），覆盖：
+298 个用例（20 个测试模块；Windows 本地 Python 3.14 基线：275 passed + 23 skipped——skip 为环境相关用例，Spark 集群 / MinIO / Iceberg JAR 未就绪时由 `skipif` 自动跳过），覆盖：
 
 - `test_quality.py`：8 类质量规则的正例与反例（completeness / uniqueness / range / allowed_values / format / date_valid / referential / outlier）+ referential 性能回归（2 万行外键检查应在秒级完成）
 - `test_stages.py`：ingest / validate / clean / compute / output 五个 stage 单测
@@ -410,10 +417,10 @@ python -m pytest tests/ -v
 
 ## CI
 
-`.github/workflows/ci.yml` 配置了 GitHub Actions：在 push（main / master / release/*）或提交 PR 时自动触发，于 ubuntu-latest 上以 Python 3.9–3.14 矩阵并行执行（3.14 为实验性，`continue-on-error` 不阻塞）：
+`.github/workflows/ci.yml` 配置了 GitHub Actions：在 push（main / master / release/*）或提交 PR 时自动触发，于 ubuntu-latest 上以 Python 3.10–3.12 矩阵并行执行：
 
-1. `pip install -r requirements.txt -r requirements-dev.txt`
-2. `python -m pytest tests/ -v --cov=src`（全量测试套件 + 覆盖率；环境相关用例由 skipif 自动跳过）
+1. 安装依赖（runtime + dev，另加 pyspark / polars / pyarrow / pyiceberg 可选引擎）
+2. `python -m pytest tests/ -v -k "not cluster" --cov=src`（全量测试套件 + 覆盖率；Spark 集群用例需本地 Docker 集群故在 CI 中排除，其余环境相关用例由 skipif 自动跳过）
 3. `python main.py --config config/pipeline_small.json`（流水线冒烟，失败时上传 run/ 便于诊断）
 4. 独立 security-audit job：`pip-audit` 扫描运行时与 dev 依赖
 

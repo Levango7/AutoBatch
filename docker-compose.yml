@@ -1,5 +1,5 @@
 # ── AutoBatch Pipeline 编排 ─────────────────────────────────────
-# 单服务：pipeline（python:3.13-slim + 多阶段构建）
+# 单服务：pipeline（python:3.13.1-slim + 多阶段构建）
 # 挂载 run/data/state/config 卷：run=批次产物，data=源/输出数据，
 # state=增量水位 + Iceberg SQL catalog（不挂载则容器重建后增量元数据丢失）
 # ────────────────────────────────────────────────────────────────

@@ -275,7 +275,7 @@ def _init_spark_session(cfg: dict[str, Any], logger) -> Any:
 #   2. max_retries>0 时，stage 失败后按指数退避 sleep 后重试，重试前可选
 #      清理该 stage 输出目录（cleanup_on_retry=true）确保幂等.
 #   3. stage_timeouts[stage] 限制单次 stage 执行墙钟时间，超时抛 StageTimeoutError.
-#      用 threading.Timer + threading.Event 实现（Windows 不支持 signal.alarm）.
+#      用工作线程 + threading.Event.wait(timeout) 实现（Windows 不支持 signal.alarm）.
 #   4. 重试耗尽后抛 StageExecutionError，携带 stage_name/batch_id/attempt/
 #      original_error/traceback_str 上下文，由 run_pipeline 捕获并记录 failed 状态.
 #

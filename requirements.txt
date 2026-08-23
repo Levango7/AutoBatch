@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # AutoBatch 运行时依赖清单
 # 任务61 修复：
 #   - 仅保留运行时可选依赖（按 engine / storage backend 按需启用）
@@ -17,8 +17,8 @@ pyspark>=4.0,<5.0      # Phase 2b Spark 分布式加速（engine.backend="spark"
 pyarrow>=14.0,<20.0    # Phase 3 湖存储（storage.backend="parquet" 时需要；Python >=3.10 因 wheel 支持）
 minio>=7.0,<8.0        # Phase 3 湖存储（MinIO SDK；bucket 初始化与迁移脚本用）
 psutil>=5.9,<7.0       # 任务41 监控告警（monitoring.enabled=true 时可选；不可用则降级返回 None）
-pydantic>=2.10.6,<2.23 # 配置校验（src/config_schema.py；pipeline.py 导入失败时自动降级跳过校验；
-                       # 2.22+ 提供 linux cp39 wheel，避免 CI 3.9 装不上）
+pydantic>=2.10.6,<2.14.0b1 # 配置校验（src/config_schema.py；pipeline.py 导入失败时自动降级跳过校验；
+                       # 2\.10\.6 起提供 linux cp39 wheel，避免 CI 3.9 装不上）
 # 注意：iceberg 增量扫描用的 incremental_append_scan API 仅存在于 0.12 系列，
 # 当前只有预发布版。精确 pin 预发布版本 pip 可直接安装（无需 --pre）。
 # 0.12 正式版发布后应改为 pyiceberg>=0.12.0,<0.13。

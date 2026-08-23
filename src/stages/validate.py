@@ -229,20 +229,20 @@ def run(ctx: PipelineContext, log) -> dict[str, Any]:
             total_in += df.height
             # _derive_amount 的 polars 等价：total_amount = str(round(qty*price, 2)) 或 ""
             if "quantity" in df.columns and "unit_price" in df.columns:
-                qty = (
+                pl_qty = (
                     pl.col("quantity")
                     .cast(pl.Utf8)
                     .str.replace_all(",", "")
                     .cast(pl.Int64, strict=False)
                 )
-                price = (
+                pl_price = (
                     pl.col("unit_price")
                     .cast(pl.Utf8)
                     .str.replace_all(",", "")
                     .cast(pl.Float64, strict=False)
                 )
-                amt = (qty * price).round(2).cast(pl.Utf8).fill_null("")
-                df = df.with_columns(amt.alias("total_amount"))
+                pl_amt = pl_qty * pl_price
+                df = df.with_columns(pl_amt.round(2).cast(pl.Utf8).fill_null("").alias("total_amount"))
             else:
                 df = df.with_columns(pl.lit("").alias("total_amount"))
             engine = RuleEngine(name, rules[name], ref_data)

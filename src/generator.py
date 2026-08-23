@@ -73,8 +73,8 @@ def gen_orders(
         )
         region = rng.choice(REGIONS)
         channel = rng.choice(CHANNELS)
-        quantity = rng.randint(1, 20)
-        unit_price = round(rng.uniform(5, 1500), 2)
+        quantity: float | str = rng.randint(1, 20)
+        unit_price: float | str = round(rng.uniform(5, 1500), 2)
         status = rng.choices(STATUSES, weights=[70, 15, 10, 5])[0]
 
         if rng.random() < defects.get("missing", 0):

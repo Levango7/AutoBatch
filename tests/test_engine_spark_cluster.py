@@ -56,8 +56,10 @@ def _jvm_available() -> bool:
     """检验 JVM 是否可用（pyspark 需要）。"""
     try:
         from pyspark import SparkContext as _SparkCtx
+        from pyspark.conf import SparkConf
 
-        sc = _SparkCtx.getOrCreate(master="local[1]", conf=_SparkCtx._conf.newSession())
+        conf = SparkConf().setMaster("local[1]")
+        sc = _SparkCtx.getOrCreate(conf=conf)
         sc.stop()
         return True
     except Exception:  # noqa: BLE001

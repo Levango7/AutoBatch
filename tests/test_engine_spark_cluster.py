@@ -36,7 +36,7 @@ from src.pipeline import run_pipeline
 
 
 # ----------------------------------------------------------------------
-# skipif 条件：Spark Master 不可达 或 pyspark 未安装
+# skipif 条件：Spark Master 不可达 或 pyspark 未安装 或 JVM 不可用
 # （多机模式 Worker 在 Docker Linux 容器中运行，不需要 Windows hadoop.dll）
 # ----------------------------------------------------------------------
 def _spark_master_reachable(
@@ -52,6 +52,18 @@ def _spark_master_reachable(
         return False
 
 
+def _jvm_available() -> bool:
+    """检验 JVM 是否可用（pyspark 需要）。"""
+    try:
+        from pyspark import SparkContext as _SparkCtx
+
+        sc = _SparkCtx.getOrCreate(master="local[1]", conf=_SparkCtx._conf.newSession())
+        sc.stop()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 try:
     import pyspark  # noqa: F401
 
@@ -59,11 +71,12 @@ try:
 except ImportError:
     _PYSPARK_AVAILABLE = False
 
-CLUSTER_SKIP = not _spark_master_reachable() or not _PYSPARK_AVAILABLE
+_CLUSTER_JVM_OK = _jvm_available() if _PYSPARK_AVAILABLE else False
+CLUSTER_SKIP = not _spark_master_reachable() or not _PYSPARK_AVAILABLE or not _CLUSTER_JVM_OK
 
 _CLUSTER_SKIP_REASON = (
-    "Spark Master not reachable at localhost:7077, or pyspark not installed"
-    " - cluster mode tests require Docker Spark cluster running"
+    "Spark Master not reachable at localhost:15077, or pyspark not installed, "
+    "or JVM unavailable - cluster mode tests require Docker Spark cluster running"
 )
 
 cluster_skip = pytest.mark.skipif(CLUSTER_SKIP, reason=_CLUSTER_SKIP_REASON)

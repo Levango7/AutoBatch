@@ -98,23 +98,6 @@ _HADOOP_HOME_CANDIDATES = [
     r"F:\hadoop",
 ]
 _HADOOP_DLL_EXISTS = any(_hadoop_native_exists(h) for h in _HADOOP_HOME_CANDIDATES if h)
-# 同时要求 pyspark 可 import（未安装时也跳过）
-try:
-    import pyspark  # noqa: F401
-
-    _PYSPARK_AVAILABLE = True
-except ImportError:
-    _PYSPARK_AVAILABLE = False
-
-PYSPARK_JVM_OK = _pyspark_jvm_exists()
-SPARK_WRITE_DISABLED = not _HADOOP_DLL_EXISTS or not _PYSPARK_AVAILABLE or not PYSPARK_JVM_OK
-
-_SKIP_REASON = (
-    "hadoop native IO library not found or pyspark not installed - "
-    "Spark cannot write files without Hadoop native IO library"
-)
-
-spark_skip = pytest.mark.skipif(SPARK_WRITE_DISABLED, reason=_SKIP_REASON)
 
 
 def _pyspark_jvm_exists() -> bool:
@@ -125,21 +108,40 @@ def _pyspark_jvm_exists() -> bool:
     这里用轻量 SparkContext.getOrCreate 探测（超时 2s 视为不可用）。
     """
     try:
-        import os as _os
+        import os as _os2
 
         # 若 JAVA_HOME / spark_home 未设置，直接假设为无环境
-        if not _os.environ.get("JAVA_HOME") and not _os.environ.get("SPARK_HOME"):
+        if not _os2.environ.get("JAVA_HOME") and not _os2.environ.get("SPARK_HOME"):
             return False
-        from pyspark.context import SparkContext as _SparkCtx
+        from pyspark import SparkContext as _SC
 
-        sc = _SparkCtx.getOrCreate(
+        sc = _SC.getOrCreate(
             master="local[1]",
-            conf=_SparkCtx._conf.newSession(),
+            conf=_SC._conf.newSession(),
         )
         sc.stop()
         return True
     except Exception:  # noqa: BLE001
         return False
+
+
+PYSPARK_JVM_OK = _pyspark_jvm_exists()
+# 同时要求 pyspark 可 import（未安装时也跳过）
+try:
+    import pyspark  # noqa: F401
+
+    _PYSPARK_AVAILABLE = True
+except ImportError:
+    _PYSPARK_AVAILABLE = False
+
+SPARK_WRITE_DISABLED = not _HADOOP_DLL_EXISTS or not _PYSPARK_AVAILABLE or not PYSPARK_JVM_OK
+
+_SKIP_REASON = (
+    "hadoop native IO library not found or pyspark not installed - "
+    "Spark cannot write files without Hadoop native IO library"
+)
+
+spark_skip = pytest.mark.skipif(SPARK_WRITE_DISABLED, reason=_SKIP_REASON)
 
 
 # ----------------------------------------------------------------------

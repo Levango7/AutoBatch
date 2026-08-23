@@ -67,9 +67,12 @@ jobs:
       # 全量运行；重型测试（Spark 集群/MinIO/需要 hadoop native lib 的路径）
       # 由 tests 内的 skipif 环境探测自动跳过——仓库未使用 pytest marker 标注
       # Spark 本地模式在 Linux CI 缺 hadoop native lib 时自动 skipif，不阻塞流水线
+      # 注意：Spark cluster 测试需要 Docker Spark 集群（localhost:15077），CI 环境无此条件，
+      #       通过 -k "not cluster" 显式排除以避免 JVM 初始化失败导致整个 suite 失败
       - name: Run pytest (full suite; heavy tests self-skip via skipif)
         run: |
           python -m pytest tests/ -v \
+            -k "not cluster" \
             --cov=src \
             --cov-report=term-missing \
             --cov-report=xml:coverage.xml \

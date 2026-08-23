@@ -82,10 +82,13 @@ jobs:
       # 4. 收集覆盖率数据（pytest --cov，唯一目的是为阈值门禁提供数据）
       #    注意：此处不重复跑测试逻辑，测试矩阵由 ci.yml 负责
       #    此步骤仅生成 .coverage + coverage.xml 供下一步门禁使用
+      #    排除 cluster 测试：CI 无 Docker Spark 集群，JVM 检查可能通过但
+      #    SparkContext 初始化会失败，导致整个 suite 非零退出
       # -------------------------------------------------------------------------
       - name: Collect coverage data
         run: |
           python -m pytest tests/ \
+            -k "not cluster" \
             --cov=src \
             --cov-report=xml:coverage.xml \
             --cov-report=html \

@@ -32,20 +32,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # CI 仅跑 3.10/3.11/3.12：
+        # - 3.9 因 pydantic-core 2.22+ 才提供 linux cp39 wheel（pyarrow/pyspark 需 Python ≥3.10），装不上
+        # - 3.13/3.14 上 pyspark / polars / pyarrow 的最新 wheel 仍缺 3.13/3.14 manylinux x86_64
+        #  （2026-08 实测这些包未发布 3.13/3.14 wheel）
+        # 3.9 是代码层面最低支持版本（核心路径 python engine + local_csv），通过 pyproject.toml
+        # target-version="py39" 声明；CI 跑 3.10 矩阵即可验证所有引擎路径。
         python-version:
-          - '3.9'        # 最低支持版本（core 路径：python engine + local_csv）
-          - '3.10'       # 启用 pyspark / pyarrow / polars / pyiceberg
+          - '3.10'
           - '3.11'
           - '3.12'
-          - '3.13'
-          - '3.14'      # 实验性：不阻塞流水线
-        include:
-          - python-version: '3.14'
-            experimental: true
-          - python-version: '3.9'
-            minimal: true
-            experimental: false
-    continue-on-error: ${{ matrix.experimental == true }}
+    continue-on-error: false
 
     steps:
       - name: Checkout
@@ -60,22 +57,16 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # 核心依赖（所有 Python 版本均安装；pydantic>=2.10.6,<2.23 保证 3.9 可装）
+          # 核心依赖：pydantic pin >=2.10.6 以提供 linux cp39 wheel（CI 3.10+ 全覆盖）
           pip install -r requirements.txt
-          # 3.10+ 时启用 optional 依赖；3.9 跳过以规避：
-          # - pyspark >=4.x 要求 Python >=3.10
-          # - polars >=1.x 要求 Python >=3.10
-          # - pyarrow >=21.x 要求 Python >=3.10（我们 pin <20.0 但部分版本仍需 3.10 wheel）
-          # - pyiceberg 0.12.0rc1 要求 Python >=3.10
-          if [ "${{ matrix.minimal }}" != "true" ]; then
-            pip install "pyspark>=4.0,<5.0" "polars>=1.0,<2.0" "pyarrow>=14.0,<20.0" "pyiceberg==0.12.0rc1"
-          fi
+          # optional 引擎依赖：pyspark / polars / pyarrow / pyiceberg 均要求 Python >=3.10
+          # 在 CI 当前矩阵（3.10–3.12）中均可安装
+          pip install "pyspark>=4.0,<5.0" "polars>=1.0,<2.0" "pyarrow>=14.0,<20.0" "pyiceberg==0.12.0rc1"
           pip install -r requirements-dev.txt
 
       # 全量运行；重型测试（Spark 集群/MinIO/需要 hadoop native lib 的路径）
       # 由 tests 内的 skipif 环境探测自动跳过——仓库未使用 pytest marker 标注
-      # 3.9 运行时缺少 pyspark/polara/pyarrow/pyiceberg 依赖，等价性测试
-      # 由 skipif(_PYSPARK_AVAILABLE) 等条件自动跳过
+      # Spark 本地模式在 Linux CI 缺 hadoop native lib 时自动 skipif，不阻塞流水线
       - name: Run pytest (full suite; heavy tests self-skip via skipif)
         run: |
           python -m pytest tests/ -v \

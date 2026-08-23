@@ -71,12 +71,16 @@ jobs:
       #       通过 -k "not cluster" 显式排除以避免 JVM 初始化失败导致整个 suite 失败
       - name: Run pytest (full suite; heavy tests self-skip via skipif)
         run: |
+          set -e
           python -m pytest tests/ -v \
             -k "not cluster" \
             --cov=src \
             --cov-report=term-missing \
             --cov-report=xml:coverage.xml \
-            --cov-report=html
+            --cov-report=html \
+            --tb=short \
+            2>&1 | tee /tmp/pytest-ci.log
+          echo "pytest exit code: ${PIPESTATUS[0]}"
 
       - name: Upload coverage report (artifacts)
         if: always()

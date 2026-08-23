@@ -87,12 +87,15 @@ jobs:
       # -------------------------------------------------------------------------
       - name: Collect coverage data
         run: |
+          set -e
           python -m pytest tests/ \
             -k "not cluster" \
             --cov=src \
             --cov-report=xml:coverage.xml \
             --cov-report=html \
-            -q
+            --tb=short -q \
+            2>&1 | tee /tmp/pytest-quality.log
+          echo "pytest exit code: ${PIPESTATUS[0]}"
 
       # -------------------------------------------------------------------------
       # 5. 上传覆盖率 artifacts（保留 14 天）

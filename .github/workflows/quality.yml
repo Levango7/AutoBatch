@@ -99,6 +99,16 @@ jobs:
             --tb=short -q \
             2>&1 | tee /tmp/pytest-quality.log
 
+      # 失败诊断：FAILED 用例转 ::error:: 注解（公开 API 可读，见 ci.yml 同名步骤）
+      - name: Surface failed tests as annotations
+        if: failure()
+        shell: bash
+        run: |
+          grep -E "^(FAILED|ERROR) " /tmp/pytest-quality.log | head -30 | while IFS= read -r line; do
+            echo "::error::${line:0:180}"
+          done
+          grep -E "^(FAILED|ERROR) " /tmp/pytest-quality.log | head -30 || echo "::error::no FAILED lines parsed (crash before summary?)"
+
       # -------------------------------------------------------------------------
       # 5. 上传覆盖率 artifacts（保留 14 天）
       # -------------------------------------------------------------------------

@@ -83,6 +83,17 @@ jobs:
             --tb=short \
             2>&1 | tee /tmp/pytest-ci.log
 
+      # 失败诊断：把 FAILED/ERROR 用例转成 ::error:: 注解——注解经 check-runs
+      # 公开 API 可读，弥补 job 日志需要鉴权、无法匿名排查的问题.
+      - name: Surface failed tests as annotations
+        if: failure()
+        shell: bash
+        run: |
+          grep -E "^(FAILED|ERROR) " /tmp/pytest-ci.log | head -30 | while IFS= read -r line; do
+            echo "::error::${line:0:180}"
+          done
+          grep -E "^(FAILED|ERROR) " /tmp/pytest-ci.log | head -30 || echo "::error::no FAILED lines parsed (crash before summary?)"
+
       - name: Upload coverage report (artifacts)
         if: always()
         uses: actions/upload-artifact@v4

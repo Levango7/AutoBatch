@@ -137,6 +137,39 @@
 | validate 隔离行很多 | 检查 defect_rates 是否调大；隔离行在 quarantine\ 目录，原因码在 _reasons 列 |
 | 想用真实数据 | generator.enabled=false，并把文件放好、配置 source.files 指向真实文件 |
 
+### 8.1 断点续跑（resume）
+
+失败批次可从断点继续，不必整批重跑。启用方式（`config/pipeline.json`）：
+
+```json
+"error_handling": { "resume": true, "...": "其余字段不变" }
+```
+
+触发条件（全部满足才生效，否则静默走全量路径）：
+
+1. 显式指定 batch_id 重跑（`python main.py --batch-id <上次失败的ID>` 或配置固定 `pipeline.batch_id`），`auto` 不续跑；
+2. `run/<batch_id>/manifest.json` 存在且 `status=="failed"`（成功批次重跑视为全新执行）；
+3. pipeline 版本与 config 摘要（config_digest）与上次一致——改了配置就禁止续跑；
+4. 各已成功 stage 的**主输出目录**非空（validate 另要求 `02_valid/quality_summary.json` 在位；quarantine/report 等终端产物目录不参与判据，干净数据下 quarantine 为空是正常态）。
+
+跳过的 stage 在新 manifest 中带 `"resumed": true` 标记；output 永不跳过。
+
+### 8.2 OpenLineage 血缘事件
+
+每次批次与各 stage 的执行以 OpenLineage v1 RunEvent 发射：
+
+```json
+"openlineage": {
+  "enabled": true,
+  "namespace": "autobatch",
+  "endpoint": ""
+}
+```
+
+- `enabled=true` 后事件追加写入 `run/<batch_id>/openlineage.ndjson`（每行一个 JSON）；
+- `endpoint` 填 Marquez 等 OpenLineage 兼容服务地址（如 `http://localhost:5000/api/v1/lineage`）即同步 HTTP POST，上报失败仅记 warning 不影响主流程；
+- pipeline 整批为一个父 Run，stage 为子 Run（parent facet 关联）；runId 由 batch_id/stage 经 uuid5 确定性派生，同批次重跑产生相同 runId，下游可幂等去重；终态 COMPLETE/FAILED 与 START 配对完整。
+
 ## 9. 测试运行方式
 
 项目内置 pytest 测试套件（336 个用例），位于 `tests/`：

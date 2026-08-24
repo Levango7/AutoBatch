@@ -150,6 +150,14 @@ class ErrorHandlingSection(_AllowExtra):
     stage_timeouts: dict[str, float] = Field(default_factory=dict)
 
 
+class OpenLineageSection(_AllowExtra):
+    """OpenLineage 血缘事件发射配置（缺省关闭，启用不改变计算行为）."""
+
+    enabled: bool = False
+    namespace: str = "autobatch"
+    endpoint: str = ""
+
+
 class Config(_AllowExtra):
     pipeline: PipelineSection = Field(default_factory=PipelineSection)
     engine: EngineSection = Field(default_factory=EngineSection)
@@ -160,6 +168,7 @@ class Config(_AllowExtra):
     logging: LoggingSection = Field(default_factory=LoggingSection)
     monitoring: MonitoringSection = Field(default_factory=MonitoringSection)
     error_handling: ErrorHandlingSection = Field(default_factory=ErrorHandlingSection)
+    openlineage: OpenLineageSection = Field(default_factory=OpenLineageSection)
 
     # Sections consumed verbatim by stages — passthrough maps.
     source: dict[str, Any] = Field(default_factory=dict)

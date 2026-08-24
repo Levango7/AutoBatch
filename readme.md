@@ -399,6 +399,12 @@ Phase 3 性能优势：
 
 **AutoBatch 差异化定位**：五阶段骨架 + 配置驱动 + 逐 Phase 演进，从零依赖单机原型到分布式湖平台**同一套代码 + 同一套配置**，每步可回退。不同于 Airflow（调度器，不含计算/存储）、dbt（仅 SQL 变换，不含数据接入/质量校验）、纯 Spark（无质量规则引擎/台账/血缘自动推导），AutoBatch 把数据接入 → 质量校验 → 清洗 → 计算 → 输出全流程内置为五阶段，演进只换实现不换骨架。
 
+## 可观测性与断点续跑
+
+**OpenLineage 血缘事件**（缺省关闭）：在 `config/pipeline.json` 加 `"openlineage": {"enabled": true, "namespace": "autobatch", "endpoint": ""}` 即把批次/各 stage 的 START / COMPLETE / FAILED 以 OpenLineage v1 RunEvent 写入 `run/<batch_id>/openlineage.ndjson`；`endpoint` 填 Marquez 地址则同步 HTTP POST（失败仅告警）。runId 由 batch_id/stage 经 uuid5 确定性派生——同批次重跑 runId 相同，下游可幂等去重。
+
+**断点续跑 resume**（缺省关闭）：加 `"error_handling": {"resume": true, ...}` 后，对失败批次用显式 batch_id 重跑（`python main.py --batch-id <失败批次ID>`），已成功且主输出目录完整的 stage 自动跳过（manifest 中带 `resumed: true` 标记），output 阶段永不跳过。版本或 config_digest 漂移会禁止续跑（防配置漂移污染产物）。详见 docs/runbook.md §8.1/§8.2。
+
 ## 测试
 
 ```

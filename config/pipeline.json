@@ -117,7 +117,13 @@
       "compute": 600,
       "output": 300
     },
-    "cleanup_on_retry": true
+    "cleanup_on_retry": true,
+    "resume": false
+  },
+  "openlineage": {
+    "enabled": false,
+    "namespace": "autobatch",
+    "endpoint": ""
   },
   "incremental": {
     "enabled": false,

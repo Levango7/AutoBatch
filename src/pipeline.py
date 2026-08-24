@@ -528,15 +528,18 @@ def _run_stage_with_retry(
 #   3. 上次 manifest status=="failed"（成功的批次重跑视为全新执行）
 #   4. pipeline_version 与 config_digest 与上次一致（配置漂移禁止续跑）
 #
-# 跳过判据：上次该 stage status=="success" 且其输出目录存在且非空
-# （_STAGE_OUTPUT_DIRS 定义；output 阶段永不跳过——它是血缘/产物登记的
-# 汇总点，重跑成本低且必须基于最新 ctx 重建 dashboard 与 lineage 边）。
+# 跳过判据：上次该 stage status=="success" 且其**主输出目录**存在且非空
+# （_STAGE_OUTPUT_DIRS 第一项；quarantine/report 等终端产物目录不参与判据，
+# 干净数据下 quarantine 为空是正常态）。output 阶段永不跳过——它是血缘/产物
+# 登记的汇总点，重跑成本低且必须基于最新 ctx 重建 dashboard 与 lineage 边。
 #
 # 恢复的状态：quality（validate 写入 manifest）、source、lineage 边
 # （output 的 _register_edges 按 target 键覆盖写，恢复旧边后重跑 output
 # 会幂等重建）。水位不涉及——失败路径本就不推进水位（两阶段提交），
 # 续跑成功后由 _advance_and_merge 正常推进一次。
 # ---------------------------------------------------------------------------
+# 必需文件相对 run_dir 根目录（quality_summary.json 由 validate 写在批次根，
+# 见 stages/validate.py 的 json_save(ctx.run_dir, ...)）
 _RESUME_MIN_FILES = {"validate": ["quality_summary.json"]}
 
 
@@ -577,22 +580,24 @@ def _load_resume_plan(
 
 
 def _stage_outputs_intact(stage: str, run_dir: str) -> bool:
-    """stage 的全部输出目录存在且非空（含额外必需文件检查）→ True.
+    """stage 的主输出目录非空且必需文件在位 → True.
 
-    _RESUME_MIN_FILES 的键值是针对 stage 第一个输出子目录（主数据目录）的
-    必需文件名；其余辅目录（如 validate 的 quarantine/report）只需非空即可。
+    只校验第一个（主）输出子目录——下游 stage 仅消费它；其余子目录是终端
+    产物（如 validate 的 quarantine/report），不参与续跑判据：干净数据下
+    quarantine 为空目录是正常态，若据此回退全量，resume 会在最常见的
+    零坏行场景静默失效（2026-08 审计 P0）。
+    _RESUME_MIN_FILES 的路径相对 **run_dir 根目录**（如 quality_summary.json
+    由 validate 写在批次根目录，见 stages/validate.py），而非主输出子目录内。
     """
     dirs = _STAGE_OUTPUT_DIRS.get(stage, [])
-    for d in dirs:
-        base = os.path.join(run_dir, d)
-        if not os.path.isdir(base) or not os.listdir(base):
+    if not dirs:
+        return True
+    base = os.path.join(run_dir, dirs[0])
+    if not os.path.isdir(base) or not os.listdir(base):
+        return False
+    for f in _RESUME_MIN_FILES.get(stage, []):
+        if not os.path.isfile(os.path.join(run_dir, f)):
             return False
-    # 只在第一个（主）输出子目录里检查必需文件
-    if dirs and _RESUME_MIN_FILES.get(stage):
-        main_dir = os.path.join(run_dir, dirs[0])
-        for f in _RESUME_MIN_FILES[stage]:
-            if not os.path.isfile(os.path.join(main_dir, f)):
-                return False
     return True
 
 
@@ -613,8 +618,13 @@ def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
     log_level = logging_cfg.get("level", cfg.get("monitoring", {}).get("log_level", "INFO"))
     logger = setup_logging(batch_id, run_dir, fmt=log_fmt, level=log_level)
 
-    manifest = Manifest(batch_id, config_digest(cfg), run_dir)
+    # config_digest 只算一次：Manifest 与 resume 校验共用同一摘要
+    digest = config_digest(cfg)
+    manifest = Manifest(batch_id, digest, run_dir)
     ctx = PipelineContext(config=cfg, run_dir=run_dir, batch_id=batch_id, manifest=manifest)
+    # 指标记录器前移到 resume 逻辑之前：续跑恢复的 stage 也要写入本轮 metrics，
+    # 否则 metrics.json 缺这些阶段的行数/耗时，跨批次对比失真.
+    metrics = MetricsRecorder(batch_id)
     # Phase 2a/2b: 从 cfg 同步 engine_backend 到 ctx，使各 stage 据此走 python/polars/spark 路径。
     # 见 docs/evolution.md §4.3.1.1（polars）/ §4.3.2.1（spark）。缺省 "python"
     # 保持向后兼容；"polars" 走列式路径；"spark" 走分布式路径。
@@ -623,7 +633,6 @@ def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
     # --- Resume (断点续跑) ---
     resumed_stages = set()
     resume_active = False
-    digest = config_digest(cfg)
     prev = _load_resume_plan(cfg, batch_id, run_dir, digest, logger)
     if prev is not None:
         resume_active = True
@@ -648,7 +657,17 @@ def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
                     lineage_decl = st.get("lineage_decl") or extra.get("lineage_decl", {})
                     if lineage_decl:
                         for target, ups in lineage_decl.items():
-                            ctx.lineage_decls.setdefault(target, []).extend(ups)
+                            # 快照是全量累积视图：按 target 覆盖写，与正常运行期
+                            # 的合并语义一致。用 extend 会因多个续跑 stage 携带
+                            # 同一份快照而把每条边的上游重复叠加 N 次.
+                            ctx.lineage_decls[target] = list(ups)
+                    metrics.record_stage(
+                        stage_name,
+                        st.get("status", "success"),
+                        st.get("duration_ms", 0),
+                        st.get("rows_in", 0),
+                        st.get("rows_out", 0),
+                    )
                     manifest.add_stage(
                         stage_name,
                         st["status"],
@@ -663,10 +682,12 @@ def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
                     # 产物不完整，不能续跑，回退全量执行
                     resume_active = False
                     resumed_stages.clear()
-                    # 重置 manifest 为全新状态
+                    # 重置 manifest/ctx/metrics 为全新状态——恢复循环可能已把
+                    # 前序 stage 写进 metrics，不重置会导致全量重跑后 stages 重复
                     manifest = Manifest(batch_id, digest, run_dir)
                     ctx = PipelineContext(config=cfg, run_dir=run_dir, batch_id=batch_id, manifest=manifest)
                     ctx.engine_backend = _get_engine_backend(cfg)
+                    metrics = MetricsRecorder(batch_id)
                     # 后续 spark 初始化会使用新的 ctx
                     break
         if resume_active:
@@ -676,65 +697,87 @@ def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
     else:
         logger.info("full run (no resume)", extra={"stage": "pipeline"})
 
-    # Phase 2b: backend="spark" 时初始化 SparkSession 并存入 ctx.spark_session，
-    # 各 stage 通过 ctx.spark_session 访问，避免重复创建。结尾 finally 块中
-    # spark.stop() 确保总是停止。参见 docs/evolution.md §4.4.2.2。
+    # --- 初始化窗口（spark / OpenLineage / 增量状态 / 监控健康服务）---
+    # 统一包进内层 try：此窗口内任何异常都必须先释放已建资源再原样抛出——
+    # 外层主 try 的 finally 此时还未进入，不清理会泄漏 SparkSession /
+    # HealthServer 线程，且 OpenLineage 会留下悬空 START（2026-08 审计 P1）。
     spark: Optional[Any] = None
-    if ctx.engine_backend == "spark":
-        spark = _init_spark_session(cfg, logger)
-        ctx.spark_session = spark
-    metrics = MetricsRecorder(batch_id)
-
-    # OpenLineage：默认关闭（openlineage.enabled=false），启用后不影响主流程.
-    ol_cfg = cfg.get("openlineage", {}) or {}
-    ol_enabled = bool(ol_cfg.get("enabled", False))
-    ol_namespace = str(ol_cfg.get("namespace", "autobatch"))
-    ol_endpoint = str(ol_cfg.get("endpoint", "")).strip()
-    ol_out_path = os.path.join(run_dir, "openlineage.ndjson") if ol_enabled else None
-    emitter: Optional[OpenLineageEmitter] = (
-        OpenLineageEmitter(batch_id, namespace=ol_namespace, endpoint=ol_endpoint, out_path=ol_out_path, logger=logger)
-        if ol_enabled
-        else None
-    )
-    if emitter is not None:
-        emitter.pipeline_event("START")
-
-    # Incremental mode: load cross-batch state.json into ctx.state. The store
-    # is constructed unconditionally so the success path can commit even if
-    # state.json did not exist yet (first run builds the watermark). When
-    # incremental is disabled we never touch state, preserving the legacy
-    # full-load behaviour exactly. See docs/evolution.md §3.3.1 / §3.3.5.
-    inc_cfg = cfg.get("incremental", {})
-    incremental_enabled = bool(inc_cfg.get("enabled", False))
-    store: StateStore | None = None
-    if incremental_enabled:
-        state_dir = abs_path(inc_cfg.get("state_dir", "state"))
-        store = StateStore(state_dir)
-        ctx.state = store.load()
-        ctx.state_path = store.state_path
-        ctx.incremental_enabled = True
-        logger.info("incremental mode enabled", extra={"stage": "pipeline", "state_dir": state_dir})
-
-    # 任务41 监控告警：加载 config/monitoring.json（缺省 disabled）.
-    # enabled=false 时 health_server 保持 None，行为 100% 不变.
-    monitoring_cfg = load_monitoring_config(
-        abs_path(cfg.get("monitoring_config", "config/monitoring.json"))
-    )
-    monitoring_enabled = bool(monitoring_cfg.get("enabled", False))
     health_server: Optional[HealthServer] = None
-    if monitoring_enabled:
-        hc_cfg = monitoring_cfg.get("health_check", {}) or {}
-        if hc_cfg.get("enabled", False):
-            health_server = HealthServer(
-                host=hc_cfg.get("host", "0.0.0.0"),
-                port=int(hc_cfg.get("port", 8086)),
-                run_dir=run_root,
+    emitter: Optional[OpenLineageEmitter] = None
+    store: StateStore | None = None
+    try:
+        # Phase 2b: backend="spark" 时初始化 SparkSession 并存入 ctx.spark_session，
+        # 各 stage 通过 ctx.spark_session 访问，避免重复创建。参见 §4.4.2.2。
+        if ctx.engine_backend == "spark":
+            spark = _init_spark_session(cfg, logger)
+            ctx.spark_session = spark
+
+        # OpenLineage：默认关闭（openlineage.enabled=false），启用后不影响主流程.
+        ol_cfg = cfg.get("openlineage", {}) or {}
+        if bool(ol_cfg.get("enabled", False)):
+            emitter = OpenLineageEmitter(
+                batch_id,
+                namespace=str(ol_cfg.get("namespace", "autobatch")),
+                endpoint=str(ol_cfg.get("endpoint", "")).strip(),
+                out_path=os.path.join(run_dir, "openlineage.ndjson"),
+                logger=logger,
             )
-            health_server.start()
-            logger.info(
-                "health server started",
-                extra={"stage": "pipeline", "host": health_server.host, "port": health_server.port},
-            )
+            emitter.pipeline_event("START")
+
+        # Incremental mode: load cross-batch state.json into ctx.state. The store
+        # is constructed unconditionally so the success path can commit even if
+        # state.json did not exist yet (first run builds the watermark). See
+        # docs/evolution.md §3.3.1 / §3.3.5.
+        inc_cfg = cfg.get("incremental", {})
+        incremental_enabled = bool(inc_cfg.get("enabled", False))
+        if incremental_enabled:
+            state_dir = abs_path(inc_cfg.get("state_dir", "state"))
+            store = StateStore(state_dir)
+            ctx.state = store.load()
+            ctx.state_path = store.state_path
+            ctx.incremental_enabled = True
+            logger.info("incremental mode enabled", extra={"stage": "pipeline", "state_dir": state_dir})
+
+        # 任务41 监控告警：加载 config/monitoring.json（缺省 disabled）.
+        monitoring_cfg = load_monitoring_config(
+            abs_path(cfg.get("monitoring_config", "config/monitoring.json"))
+        )
+        monitoring_enabled = bool(monitoring_cfg.get("enabled", False))
+        if monitoring_enabled:
+            hc_cfg = monitoring_cfg.get("health_check", {}) or {}
+            if hc_cfg.get("enabled", False):
+                health_server = HealthServer(
+                    host=hc_cfg.get("host", "0.0.0.0"),
+                    port=int(hc_cfg.get("port", 8086)),
+                    run_dir=run_root,
+                )
+                health_server.start()
+                logger.info(
+                    "health server started",
+                    extra={"stage": "pipeline", "host": health_server.host, "port": health_server.port},
+                )
+    except Exception:
+        # 尽力清理后原样抛出：emitter 已发 START 则补 FAILED 配对终态
+        init_error = f"{type(sys.exc_info()[1]).__name__}: {sys.exc_info()[1]}"
+        if emitter is not None:
+            emitter.pipeline_event("FAILED", error_message=init_error)
+        if health_server is not None:
+            try:
+                health_server.stop()
+            except Exception:  # noqa: BLE001 - 清理路径不再叠加异常
+                pass
+        if spark is not None:
+            try:
+                spark.stop()
+            except Exception:  # noqa: BLE001 - 清理路径不再叠加异常
+                pass
+        logger.error(
+            "pipeline failed during initialization",
+            extra={"stage": "pipeline", "error": init_error},
+            exc_info=True,
+        )
+        close_logging()
+        raise
 
     logger.info("pipeline start", extra={"stage": "pipeline", "batch": batch_id})
     overall = "success"
@@ -762,6 +805,8 @@ def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
                     slog.error(error_msg, injected=True)
                 manifest.add_stage(name, "failed", 0, 0, 0, log_path, error_msg)
                 metrics.record_stage(name, "failed", 0, 0, 0)
+                if emitter is not None:
+                    emitter.stage_event(name, "FAILED", error_message=error_msg)
                 logger.error("stage failed (demo injection)", extra={"stage": name})
                 break
             stage_mod = load_stage(name)
@@ -922,11 +967,25 @@ def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
                     "monitoring check failed, ignoring", extra={"stage": "pipeline"}, exc_info=True
                 )
 
+        # OpenLineage 批次终态：与初始化窗口发出的 START 配对（runId 相同，
+        # 下游按幂等去重后得到完整的 running→COMPLETE/FAILED 生命周期）。
+        if emitter is not None:
+            if overall == "success":
+                emitter.pipeline_event("COMPLETE")
+            else:
+                emitter.pipeline_event("FAILED", error_message=error_msg)
+
         logger.info(
             "pipeline finished",
             extra={"stage": "pipeline", "batch": batch_id, "status": overall, "run_dir": run_dir},
         )
         return 0 if overall == "success" else 1
+    except Exception as exc:
+        # 逃逸异常（如 stage 模块加载失败、水位提交崩溃）：先补发 OL FAILED
+        # 与 START 配对，避免下游看到悬空 running；随后保持原传播语义不变.
+        if emitter is not None:
+            emitter.pipeline_event("FAILED", error_message=f"{type(exc).__name__}: {exc}")
+        raise
     finally:
         # 任务41：停止 HealthServer（若已启动）
         if health_server is not None:

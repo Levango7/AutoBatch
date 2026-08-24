@@ -9,12 +9,13 @@
 - 正常可续跑返回 prev dict
 
 _stage_outputs_intact 分支：
-- validate 要求 quality_summary.json
-- ingest 要求 01_raw/ 非空
-- 目录不存在 / 为空 → False
-- 其他 stage（无额外文件要求）→ dirs 非空即可
+- validate 要求 02_valid 非空 + quality_summary.json（主产物判据）
+- quarantine/report 等终端目录为空/缺失不影响判定（干净数据正常态）
+- ingest/clean/compute/output 主目录非空即可
 
-集成：pipeline 在 resume 模式下正确跳过 stage 并恢复 lineage_decls.
+端到端：真实失败 → 同 batch_id 续跑（干净数据 + OpenLineage 启用），
+锁定 P0 回归：quarantine 为空不得阻断续跑；血缘边不得重复叠加；
+OL 批次级 START→FAILED / START→COMPLETE 终态配对完整.
 """
 
 from __future__ import annotations
@@ -23,15 +24,17 @@ import json
 import os
 import shutil
 import tempfile
+import uuid
 from typing import Any
 
 import pytest
 
-from src.helpers import VERSION, abs_path, json_load, json_save
+from src.helpers import ROOT, VERSION, abs_path, json_load, json_save
 from src.lineage import Manifest
 from src.pipeline import (
     _load_resume_plan,
     _stage_outputs_intact,
+    run_pipeline,
 )
 
 
@@ -128,18 +131,19 @@ def test_valid_resume_plan_returns_prev(workdir):
 # _stage_outputs_intact
 # ----------------------------------------------------------------------
 def test_validate_intact_when_quality_exists(workdir):
-    # validate 写 02_valid/ + quarantine/ + report/，三者都必须非空
+    # 主判据 = 02_valid 非空 + 批次根目录的 quality_summary.json 在位；
+    # quarantine/report 是终端产物，不参与判定（干净数据下可为空）
     for sub in ["02_valid", "quarantine", "report"]:
         d = os.path.join(workdir, sub)
         os.makedirs(d, exist_ok=True)
         with open(os.path.join(d, "placeholder"), "w") as f:
             f.write("x")
-    json_save(os.path.join(workdir, "02_valid", "quality_summary.json"), {"dq_score": 95})
+    json_save(os.path.join(workdir, "quality_summary.json"), {"dq_score": 95})
     assert _stage_outputs_intact("validate", workdir) is True
 
 
 def test_validate_missing_quality_summary_fails(workdir):
-    # 创建必要目录但缺少 quality_summary.json
+    # 02_valid 非空但批次根目录缺 quality_summary.json → 判产物不完整
     for sub in ["02_valid", "quarantine", "report"]:
         os.makedirs(os.path.join(workdir, sub), exist_ok=True)
         with open(os.path.join(workdir, sub, "placeholder"), "w"):
@@ -206,3 +210,115 @@ def test_lineage_decl_stored_in_stage_extra(workdir):
     stage_entry = next(s for s in saved["stages"] if s["name"] == "validate")
     # add_stage 把 extra 平铺到 entry 顶层，pipeline resume 同时兼容顶层和嵌套两种写法
     assert stage_entry.get("lineage_decl") == {"orders": ["02_valid"]}
+
+
+# ----------------------------------------------------------------------
+# 主产物判据：终端目录（quarantine/report）不参与续跑判定（P0 回归锁）
+# ----------------------------------------------------------------------
+def test_validate_intact_allows_empty_quarantine(workdir):
+    """干净数据下 quarantine 为空目录不应阻断续跑判定."""
+    for sub, fname in [("02_valid", "orders_valid.csv"), ("report", "quality_report.md")]:
+        d = os.path.join(workdir, sub)
+        os.makedirs(d)
+        with open(os.path.join(d, fname), "w", encoding="utf-8") as f:
+            f.write("x")
+    os.makedirs(os.path.join(workdir, "quarantine"))  # 故意为空
+    json_save(os.path.join(workdir, "quality_summary.json"), {"dq_score": 100})
+    assert _stage_outputs_intact("validate", workdir) is True
+
+
+def test_validate_intact_ignores_missing_aux_dirs(workdir):
+    """quarantine/report 目录整个不存在也不影响主产物判据."""
+    d = os.path.join(workdir, "02_valid")
+    os.makedirs(d)
+    with open(os.path.join(d, "orders_valid.csv"), "w", encoding="utf-8") as f:
+        f.write("x")
+    json_save(os.path.join(workdir, "quality_summary.json"), {"dq_score": 100})
+    assert _stage_outputs_intact("validate", workdir) is True
+
+
+# ----------------------------------------------------------------------
+# 端到端：真实失败 → 同 batch_id 续跑（干净数据 + OpenLineage）
+# ----------------------------------------------------------------------
+def test_e2e_resume_clean_data_with_openlineage(_same_drive_tmp_root, request):
+    """P0 回归锁：compute 真实失败后续跑成功.
+
+    - 干净数据（缺陷率全 0）→ quarantine/ 为空目录，不得阻断续跑
+    - 续跑 stage 带 resumed 标记；血缘边无重复；恢复 stage 计入 metrics
+    - OL 批次级 START→FAILED / START→COMPLETE 配对完整
+    """
+    import src.stages.compute as compute_mod
+    from src.generator import main as gen_main
+
+    work_dir = tempfile.mkdtemp(prefix="resume_e2e_", dir=_same_drive_tmp_root)
+    cfg = json_load(abs_path("config/pipeline_small.json"))
+    data_dir = os.path.join(work_dir, "data", "raw")
+    cfg["generator"]["output_dir"] = data_dir
+    for k in cfg["generator"]["defect_rates"]:
+        cfg["generator"]["defect_rates"][k] = 0.0
+    gen_main(cfg)
+    cfg["generator"]["enabled"] = False
+    cfg["source"]["files"] = {
+        "orders": os.path.join(data_dir, "orders.csv"),
+        "customers": os.path.join(data_dir, "customers.csv"),
+        "products": os.path.join(data_dir, "products.csv"),
+    }
+    run_root = os.path.join(ROOT, "run")
+    os.makedirs(run_root, exist_ok=True)
+    cfg["pipeline"]["run_dir"] = run_root
+    cfg["error_handling"]["resume"] = True
+    cfg["openlineage"] = {"enabled": True, "namespace": "testns", "endpoint": ""}
+    batch_id = "test-resume-e2e-" + uuid.uuid4().hex[:6]
+    run_dir = os.path.join(run_root, batch_id)
+    request.addfinalizer(lambda: shutil.rmtree(run_dir, ignore_errors=True))
+
+    # 第一次：compute 模块函数注入一次性失败（不改配置 → config_digest 保持一致）
+    orig_run = compute_mod.run
+
+    def _boom(ctx, log):
+        raise RuntimeError("boom-for-resume")
+
+    compute_mod.run = _boom
+    try:
+        rc1 = run_pipeline(cfg, batch_id, "")
+    finally:
+        compute_mod.run = orig_run
+    assert rc1 == 1
+    status1 = json_load(os.path.join(run_dir, "status.json"))
+    assert status1["status"] == "failed"
+    # 前置确认：干净数据下 quarantine 目录存在但为空（旧实现据此回退全量）
+    qu_dir = os.path.join(run_dir, "quarantine")
+    assert os.path.isdir(qu_dir) and not os.listdir(qu_dir)
+
+    # 第二次：同 cfg 同 batch_id → ingest/validate/clean 应被跳过
+    rc2 = run_pipeline(cfg, batch_id, "")
+    assert rc2 == 0
+    status2 = json_load(os.path.join(run_dir, "status.json"))
+    assert status2["status"] == "success"
+    assert len(status2["stages"]) == 5
+    by_name = {s["name"]: s for s in status2["stages"]}
+    for skipped in ("ingest", "validate", "clean"):
+        assert by_name[skipped].get("resumed") is True, skipped
+    assert "resumed" not in by_name["compute"]
+    assert "resumed" not in by_name["output"]
+
+    # 血缘边无重复叠加（旧实现 extend 会把上游重复 N 次）
+    manifest2 = json_load(os.path.join(run_dir, "manifest.json"))
+    for target, ups in manifest2["lineage"].items():
+        assert len(ups) == len(set(ups)), f"duplicated upstreams for {target}: {ups}"
+
+    # 恢复的 stage 也计入本轮 metrics（5 个阶段齐全）
+    metrics2 = json_load(os.path.join(run_dir, "metrics.json"))
+    assert len(metrics2.get("stages", [])) == 5
+
+    # OpenLineage 事件流：批次级与 compute 级生命周期配对完整
+    ol_path = os.path.join(run_dir, "openlineage.ndjson")
+    with open(ol_path, encoding="utf-8") as f:
+        events = [json.loads(line) for line in f if line.strip()]
+    pipe_events = [e for e in events if e["job"]["name"] == "testns.pipeline"]
+    assert [e["eventType"] for e in pipe_events] == ["START", "FAILED", "START", "COMPLETE"]
+    compute_events = [e for e in events if e["job"]["name"] == "testns.compute"]
+    assert [e["eventType"] for e in compute_events] == ["START", "FAILED", "START", "COMPLETE"]
+    # validate：第一次运行真实执行（START→COMPLETE），续跑批次跳过时补发 COMPLETE
+    validate_events = [e for e in events if e["job"]["name"] == "testns.validate"]
+    assert [e["eventType"] for e in validate_events] == ["START", "COMPLETE", "COMPLETE"]

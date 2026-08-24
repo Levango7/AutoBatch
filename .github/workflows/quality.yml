@@ -3,7 +3,7 @@
 # Phase 6 CI/CD 加固 + 任务61 修复：
 #   - 与 ci.yml 分工：ci.yml 跑测试矩阵 + smoke test；quality.yml 跑 lint + type-check + coverage 门禁
 #   - mypy 目标 python_version="3.10"（pyproject.toml；mypy 2.x 最低只支持 target 3.10，
-#     运行时也用 3.10 保证工具链一致。3.9 运行时兼容由 ci.yml 的 3.9 矩阵腿验证）
+#     运行时也用 3.10 保证工具链一致。3.9 仅代码层支持：引擎依赖要求 >=3.10）
 #   - 覆盖率阈值门禁用 `coverage report --fail-under=60` 替代手写 XML 解析（更稳健）
 #   - coverage 数据收集合并为单一步骤（目的是门禁数据来源，非重复测试）
 #   - 顶层 concurrency 取消同分支旧任务，节省 CI 资源
@@ -36,7 +36,7 @@ jobs:
 
       # -------------------------------------------------------------------------
       # Python 3.10：mypy 2.x 最低支持 target/run 均为 3.10（见 pyproject.toml
-      # mypy python_version="3.10"）。3.9 运行时兼容性由 ci.yml 矩阵的 3.9 腿验证。
+      # mypy python_version="3.10"）。3.9 仅代码层支持（引擎依赖要求 >=3.10）。
       # -------------------------------------------------------------------------
       - name: Set up Python 3.10
         uses: actions/setup-python@v5
@@ -85,9 +85,12 @@ jobs:
       #    排除 cluster 测试：CI 无 Docker Spark 集群，JVM 检查可能通过但
       #    SparkContext 初始化会失败，导致整个 suite 非零退出
       # -------------------------------------------------------------------------
+      # 显式 shell: bash 使 GHA 以 `bash --noprofile --norc -eo pipefail` 运行：
+      # 默认的 `bash -e {0}` 不含 pipefail，pytest 经 tee 管道后失败会被掩蔽.
       - name: Collect coverage data
+        shell: bash
         run: |
-          set -e
+          set -eo pipefail
           python -m pytest tests/ \
             -k "not cluster" \
             --cov=src \
@@ -95,7 +98,6 @@ jobs:
             --cov-report=html \
             --tb=short -q \
             2>&1 | tee /tmp/pytest-quality.log
-          echo "pytest exit code: ${PIPESTATUS[0]}"
 
       # -------------------------------------------------------------------------
       # 5. 上传覆盖率 artifacts（保留 14 天）

@@ -339,3 +339,61 @@ def test_metrics_recorder_negative_quarantined_not_validated():
     d = r.to_dict()
     # sum 不校验语义，仅算术求和
     assert d["quarantined_total"] == -5
+
+
+# ----------------------------------------------------------------------
+# s3_credentials：配置显式凭证 > 环境变量回退（安全收敛，2026-08）
+# ----------------------------------------------------------------------
+_ENV_KEYS = (
+    "MINIO_ROOT_USER",
+    "MINIO_ROOT_PASSWORD",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+)
+
+
+@pytest.fixture
+def _clean_s3_env(monkeypatch):
+    for k in _ENV_KEYS:
+        monkeypatch.delenv(k, raising=False)
+    return monkeypatch
+
+
+def test_s3_credentials_explicit_config_wins(_clean_s3_env):
+    from src.io._s3_parquet import s3_credentials
+
+    _clean_s3_env.setenv("MINIO_ROOT_USER", "envuser")
+    _clean_s3_env.setenv("MINIO_ROOT_PASSWORD", "envpass")
+    cfg = {"storage": {"access_key": "ak", "secret_key": "sk"}}
+    assert s3_credentials(cfg) == ("ak", "sk")
+
+
+def test_s3_credentials_env_fallback_minio(_clean_s3_env):
+    from src.io._s3_parquet import s3_credentials
+
+    _clean_s3_env.setenv("MINIO_ROOT_USER", "envuser")
+    _clean_s3_env.setenv("MINIO_ROOT_PASSWORD", "envpass")
+    assert s3_credentials({"storage": {}}) == ("envuser", "envpass")
+
+
+def test_s3_credentials_env_fallback_aws(_clean_s3_env):
+    from src.io._s3_parquet import s3_credentials
+
+    _clean_s3_env.setenv("AWS_ACCESS_KEY_ID", "awsid")
+    _clean_s3_env.setenv("AWS_SECRET_ACCESS_KEY", "awskey")
+    assert s3_credentials({"storage": {}}) == ("awsid", "awskey")
+
+
+def test_s3_credentials_partial_config_backfills_from_env(_clean_s3_env):
+    """只配了 access_key 时 secret 从环境回补（逐字段回退）."""
+    from src.io._s3_parquet import s3_credentials
+
+    _clean_s3_env.setenv("MINIO_ROOT_PASSWORD", "envpass")
+    cfg = {"storage": {"access_key": "ak"}}
+    assert s3_credentials(cfg) == ("ak", "envpass")
+
+
+def test_s3_credentials_absent_everywhere(_clean_s3_env):
+    from src.io._s3_parquet import s3_credentials
+
+    assert s3_credentials({"storage": {}}) == ("", "")

@@ -13,6 +13,27 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def s3_credentials(cfg: dict[str, Any]) -> tuple[str, str]:
+    """解析 S3/MinIO 凭证，返回 (access_key, secret_key).
+
+    优先级：storage.access_key/secret_key 显式配置 > 环境变量 > 空串。
+    环境变量依次尝试 MINIO_ROOT_USER / MINIO_ROOT_PASSWORD（本地 MinIO
+    惯例，与 docker/iceberg/docker-compose.yml 注入的变量一致）和
+    AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY（AWS 通用惯例）。凭证经
+    环境注入即可跑通 S3 路径，避免 secret 写进配置文件进版本库.
+    """
+    storage = cfg.get("storage", {}) or {}
+    access = storage.get("access_key", "") or ""
+    secret = storage.get("secret_key", "") or ""
+    if access and secret:
+        return access, secret
+    env_access = os.environ.get("MINIO_ROOT_USER") or os.environ.get("AWS_ACCESS_KEY_ID") or ""
+    env_secret = (
+        os.environ.get("MINIO_ROOT_PASSWORD") or os.environ.get("AWS_SECRET_ACCESS_KEY") or ""
+    )
+    return access or env_access, secret or env_secret
+
+
 def _get_storage_backend(cfg: dict[str, Any]) -> str:
     """从 cfg 读 storage.backend，缺省 'local_csv'."""
     return cfg.get("storage", {}).get("backend", "local_csv")
@@ -83,8 +104,7 @@ def _get_s3_filesystem(cfg: dict[str, Any]) -> Any:
 
     storage = cfg.get("storage", {})
     endpoint = storage.get("endpoint", "localhost:9000")
-    access_key = storage.get("access_key", "")
-    secret_key = storage.get("secret_key", "")
+    access_key, secret_key = s3_credentials(cfg)
     secure = storage.get("secure", False)
     region = storage.get("region", "us-east-1")
     return fs.S3FileSystem(
@@ -103,8 +123,7 @@ def _build_polars_s3_options(cfg: dict[str, Any]) -> dict[str, Any]:
     """
     storage = cfg.get("storage", {})
     endpoint = storage.get("endpoint", "localhost:9000")
-    access_key = storage.get("access_key", "")
-    secret_key = storage.get("secret_key", "")
+    access_key, secret_key = s3_credentials(cfg)
     secure = storage.get("secure", False)
     opts: dict[str, Any] = {"endpoint_url": f"http{'s' if secure else ''}://{endpoint}"}
     if access_key:

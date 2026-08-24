@@ -420,7 +420,7 @@ class HealthServer:
     返回最近批次状态的 JSON.**仅用标准库**，不引入 Flask/FastAPI.
 
     Usage:
-        server = HealthServer(host="0.0.0.0", port=8086, run_dir="/path/to/run")
+        server = HealthServer(host="127.0.0.1", port=8086, run_dir="/path/to/run")
         server.start()   # 后台线程启动
         ...
         server.stop()    # 停止服务器
@@ -432,6 +432,8 @@ class HealthServer:
     """
 
     def __init__(self, host: str, port: int, run_dir: str) -> None:
+        # host 缺省应由调用方传 127.0.0.1（回环）：0.0.0.0 会把健康端点暴露到
+        # 所有网卡，公网/办公网部署时成为信息泄露面；确需容器外探活时显式配置.
         self.host = host
         self.port = int(port)
         self.run_dir = run_dir
@@ -540,7 +542,7 @@ def load_monitoring_config(path: str) -> dict[str, Any]:
     default = {
         "enabled": False,
         "alerts": {},
-        "health_check": {"enabled": False, "port": 8086, "host": "0.0.0.0"},
+        "health_check": {"enabled": False, "port": 8086, "host": "127.0.0.1"},
         "history_window": 10,
     }
     if not os.path.isfile(path):

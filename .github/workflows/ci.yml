@@ -26,7 +26,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
@@ -36,10 +36,16 @@ jobs:
         #  （2026-08 实测这些包未发布 3.13/3.14 wheel）
         # 3.9 是代码层面最低支持版本（核心路径 python engine + local_csv），通过 pyproject.toml
         # target-version="py39" 声明；CI 跑 3.10 矩阵即可验证所有引擎路径。
+        os: [ubuntu-latest]
         python-version:
           - '3.10'
           - '3.11'
           - '3.12'
+        include:
+          # macOS 平台腿：单版本（3.12）验证 POSIX 兼容性，控制矩阵规模。
+          # Spark 本地用例因缺 hadoop native 库由 skipif 自动跳过，与 Linux 一致.
+          - os: macos-latest
+            python-version: '3.12'
     continue-on-error: false
 
     steps:

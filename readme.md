@@ -389,7 +389,7 @@ Phase 3 性能优势：
 | 维度 | AutoBatch（单机原型） | AutoBatch（Phase 5 终态） | Airflow + Spark + Iceberg | dbt + Snowflake | 纯 Spark |
 |---|---|---|---|---|---|
 | 部署复杂度 | 零依赖，`python main.py` 即跑 | Docker Compose 一键集群 | 多组件编排（Airflow + Spark + Iceberg + MinIO） | 云托管，零运维 | 集群部署 + JDK + 网络配置 |
-| 规模上限 | 百万行级（单机内存） | 亿行级（多机线性扩展） | 亿行级+ | 亿行级（云弹性） | 亿行级+ |
+| 规模上限 | 百万行级实测（Windows 单机 32GB：python 1M 行≈350s/1.8GB 峰值，polars 1M 行≈80s/1.0GB；详见 benchmarks/report.md）；亿行级为 Spark 多机设计目标，未在本仓库验证 | 亿行级（多机线性扩展，设计目标） | 亿行级+ | 亿行级（云弹性） | 亿行级+ |
 | 增量处理 | Phase 1 高水位（零依赖） | Iceberg snapshot diff | 需自建或依赖湖表 | 增量模型（dbt incremental） | 需自建或依赖湖表 |
 | 湖表能力 | ❌（CSV 文件） | ✅ ACID + time travel + schema evolution | ✅（Iceberg/Delta/Hudi） | ✅（Snowflake 内置） | ✅（Iceberg/Delta/Hudi） |
 | 质量规则 | 8 类配置驱动，内置 | 同左 + Spark SQL 向量化 | Great Expectations / Deequ | dbt tests | Deequ |

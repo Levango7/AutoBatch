@@ -35,6 +35,7 @@ from .helpers import (
     table_read,
     table_write,
 )
+from .io._s3_parquet import s3_credentials
 from .lineage import Manifest, save_latest_pointer
 from .logging_setup import close_logging, setup_logging
 from .metrics import MetricsRecorder
@@ -149,8 +150,9 @@ def _init_spark_session(cfg: dict[str, Any], logger) -> Any:
         s3a_endpoint_clean = s3a_endpoint.replace("http://", "").replace("https://", "")
         scheme = "https" if storage.get("secure") else "http"
         builder = builder.config("spark.hadoop.fs.s3a.endpoint", f"{scheme}://{s3a_endpoint_clean}")
-        builder = builder.config("spark.hadoop.fs.s3a.access.key", storage.get("access_key", ""))
-        builder = builder.config("spark.hadoop.fs.s3a.secret.key", storage.get("secret_key", ""))
+        _access, _secret = s3_credentials(cfg)
+        builder = builder.config("spark.hadoop.fs.s3a.access.key", _access)
+        builder = builder.config("spark.hadoop.fs.s3a.secret.key", _secret)
         builder = builder.config("spark.hadoop.fs.s3a.path.style.access", "true")
         builder = builder.config(
             "spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem"
@@ -240,12 +242,9 @@ def _init_spark_session(cfg: dict[str, Any], logger) -> Any:
                 "spark.hadoop.fs.s3a.endpoint",
                 f"{scheme}://{s3a_endpoint_clean}",
             )
-            builder = builder.config(
-                "spark.hadoop.fs.s3a.access.key", storage.get("access_key", "")
-            )
-            builder = builder.config(
-                "spark.hadoop.fs.s3a.secret.key", storage.get("secret_key", "")
-            )
+            _access, _secret = s3_credentials(cfg)
+            builder = builder.config("spark.hadoop.fs.s3a.access.key", _access)
+            builder = builder.config("spark.hadoop.fs.s3a.secret.key", _secret)
             builder = builder.config("spark.hadoop.fs.s3a.path.style.access", "true")
             builder = builder.config(
                 "spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem"
@@ -754,7 +753,9 @@ def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
             hc_cfg = monitoring_cfg.get("health_check", {}) or {}
             if hc_cfg.get("enabled", False):
                 health_server = HealthServer(
-                    host=hc_cfg.get("host", "0.0.0.0"),
+                    # 缺省绑定回环地址：健康端点含批次/数据概况，暴露到所有网卡
+                    # 会成为信息泄露面；容器外探活场景显式配置 host.
+                    host=hc_cfg.get("host", "127.0.0.1"),
                     port=int(hc_cfg.get("port", 8086)),
                     run_dir=run_root,
                 )

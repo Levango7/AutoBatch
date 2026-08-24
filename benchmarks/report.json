@@ -1,244 +1,244 @@
 {
-  "generated_at": "2026-08-24 19:05:54",
-  "started_at": "2026-08-24 19:05:36",
+  "generated_at": "2026-08-25 02:48:01",
+  "started_at": "2026-08-25 02:39:45",
   "base_config": "config/pipeline_small.json",
   "rows_per_run": null,
   "scales": [
-    10000,
-    30000
+    100000,
+    1000000
   ],
   "combinations": [
     {
       "engine": "python",
       "storage": "local_csv",
-      "batch_id": "bench-python-local_csv-dccee2",
-      "wall_time_ms": 2979,
-      "peak_memory_mb": 22.641,
-      "run_dir": "F:\\Nexus\\Workflow\\AutoBatch\\run\\bench-python-local_csv-dccee2",
+      "batch_id": "bench-python-local_csv-bff205",
+      "wall_time_ms": 28890,
+      "peak_memory_mb": 187.541,
+      "run_dir": "F:\\Nexus\\Workflow\\AutoBatch\\run\\bench-python-local_csv-bff205",
       "status": "success",
       "error": null,
-      "pipeline_duration_ms": 2922,
-      "dq_score": 0.9966,
-      "total_rows_in": 42043,
-      "total_rows_out": 48534,
+      "pipeline_duration_ms": 28239,
+      "dq_score": 0.996,
+      "total_rows_in": 391672,
+      "total_rows_out": 398163,
       "stages": [
         {
           "name": "ingest",
           "status": "success",
-          "duration_ms": 102,
+          "duration_ms": 563,
           "rows_in": 0,
-          "rows_out": 13300,
-          "throughput_rows_per_sec": 130392.2
+          "rows_out": 104200,
+          "throughput_rows_per_sec": 185079.9
         },
         {
           "name": "validate",
           "status": "success",
-          "duration_ms": 1391,
-          "rows_in": 13300,
-          "rows_out": 12781,
-          "throughput_rows_per_sec": 9188.4
+          "duration_ms": 13606,
+          "rows_in": 104200,
+          "rows_out": 99024,
+          "throughput_rows_per_sec": 7278.0
         },
         {
           "name": "clean",
           "status": "success",
-          "duration_ms": 413,
-          "rows_in": 9581,
-          "rows_out": 12781,
-          "throughput_rows_per_sec": 30946.7
+          "duration_ms": 4209,
+          "rows_in": 95824,
+          "rows_out": 99024,
+          "throughput_rows_per_sec": 23526.7
+        },
+        {
+          "name": "compute",
+          "status": "success",
+          "duration_ms": 4017,
+          "rows_in": 95824,
+          "rows_out": 91,
+          "throughput_rows_per_sec": 22.7
+        },
+        {
+          "name": "output",
+          "status": "success",
+          "duration_ms": 5795,
+          "rows_in": 95824,
+          "rows_out": 95824,
+          "throughput_rows_per_sec": 16535.6
+        }
+      ],
+      "overall_throughput_rows_per_sec": 13782.0,
+      "rows": 100000
+    },
+    {
+      "engine": "polars",
+      "storage": "local_csv",
+      "batch_id": "bench-polars-local_csv-f6a6fc",
+      "wall_time_ms": 16349,
+      "peak_memory_mb": 119.429,
+      "run_dir": "F:\\Nexus\\Workflow\\AutoBatch\\run\\bench-polars-local_csv-f6a6fc",
+      "status": "success",
+      "error": null,
+      "pipeline_duration_ms": 15624,
+      "dq_score": 0.996,
+      "total_rows_in": 391672,
+      "total_rows_out": 398163,
+      "stages": [
+        {
+          "name": "ingest",
+          "status": "success",
+          "duration_ms": 625,
+          "rows_in": 0,
+          "rows_out": 104200,
+          "throughput_rows_per_sec": 166720.0
+        },
+        {
+          "name": "validate",
+          "status": "success",
+          "duration_ms": 10140,
+          "rows_in": 104200,
+          "rows_out": 99024,
+          "throughput_rows_per_sec": 9765.7
+        },
+        {
+          "name": "clean",
+          "status": "success",
+          "duration_ms": 1658,
+          "rows_in": 95824,
+          "rows_out": 99024,
+          "throughput_rows_per_sec": 59725.0
+        },
+        {
+          "name": "compute",
+          "status": "success",
+          "duration_ms": 150,
+          "rows_in": 95824,
+          "rows_out": 91,
+          "throughput_rows_per_sec": 606.7
+        },
+        {
+          "name": "output",
+          "status": "success",
+          "duration_ms": 3031,
+          "rows_in": 95824,
+          "rows_out": 95824,
+          "throughput_rows_per_sec": 31614.6
+        }
+      ],
+      "overall_throughput_rows_per_sec": 24354.0,
+      "rows": 100000
+    },
+    {
+      "engine": "python",
+      "storage": "local_csv",
+      "batch_id": "bench-python-local_csv-8a2743",
+      "wall_time_ms": 350062,
+      "peak_memory_mb": 1833.601,
+      "run_dir": "F:\\Nexus\\Workflow\\AutoBatch\\run\\bench-python-local_csv-8a2743",
+      "status": "success",
+      "error": null,
+      "pipeline_duration_ms": 345543,
+      "dq_score": 0.9959,
+      "total_rows_in": 3886030,
+      "total_rows_out": 3892521,
+      "stages": [
+        {
+          "name": "ingest",
+          "status": "success",
+          "duration_ms": 5615,
+          "rows_in": 0,
+          "rows_out": 1013200,
+          "throughput_rows_per_sec": 180445.2
+        },
+        {
+          "name": "validate",
+          "status": "success",
+          "duration_ms": 147817,
+          "rows_in": 1013200,
+          "rows_out": 960810,
+          "throughput_rows_per_sec": 6500.0
+        },
+        {
+          "name": "clean",
+          "status": "success",
+          "duration_ms": 64178,
+          "rows_in": 957610,
+          "rows_out": 960810,
+          "throughput_rows_per_sec": 14971.0
+        },
+        {
+          "name": "compute",
+          "status": "success",
+          "duration_ms": 60485,
+          "rows_in": 957610,
+          "rows_out": 91,
+          "throughput_rows_per_sec": 1.5
+        },
+        {
+          "name": "output",
+          "status": "success",
+          "duration_ms": 67423,
+          "rows_in": 957610,
+          "rows_out": 957610,
+          "throughput_rows_per_sec": 14203.0
+        }
+      ],
+      "overall_throughput_rows_per_sec": 11119.5,
+      "rows": 1000000
+    },
+    {
+      "engine": "polars",
+      "storage": "local_csv",
+      "batch_id": "bench-polars-local_csv-ba45fe",
+      "wall_time_ms": 79898,
+      "peak_memory_mb": 1050.315,
+      "run_dir": "F:\\Nexus\\Workflow\\AutoBatch\\run\\bench-polars-local_csv-ba45fe",
+      "status": "success",
+      "error": null,
+      "pipeline_duration_ms": 76830,
+      "dq_score": 0.9959,
+      "total_rows_in": 3886030,
+      "total_rows_out": 3892521,
+      "stages": [
+        {
+          "name": "ingest",
+          "status": "success",
+          "duration_ms": 4499,
+          "rows_in": 0,
+          "rows_out": 1013200,
+          "throughput_rows_per_sec": 225205.6
+        },
+        {
+          "name": "validate",
+          "status": "success",
+          "duration_ms": 42115,
+          "rows_in": 1013200,
+          "rows_out": 960810,
+          "throughput_rows_per_sec": 22814.0
+        },
+        {
+          "name": "clean",
+          "status": "success",
+          "duration_ms": 9604,
+          "rows_in": 957610,
+          "rows_out": 960810,
+          "throughput_rows_per_sec": 100042.7
         },
         {
           "name": "compute",
           "status": "success",
           "duration_ms": 387,
-          "rows_in": 9581,
+          "rows_in": 957610,
           "rows_out": 91,
           "throughput_rows_per_sec": 235.1
         },
         {
           "name": "output",
           "status": "success",
-          "duration_ms": 596,
-          "rows_in": 9581,
-          "rows_out": 9581,
-          "throughput_rows_per_sec": 16075.5
+          "duration_ms": 20209,
+          "rows_in": 957610,
+          "rows_out": 957610,
+          "throughput_rows_per_sec": 47385.3
         }
       ],
-      "overall_throughput_rows_per_sec": 16292.0,
-      "rows": 10000
-    },
-    {
-      "engine": "polars",
-      "storage": "local_csv",
-      "batch_id": "bench-polars-local_csv-a16b09",
-      "wall_time_ms": 3484,
-      "peak_memory_mb": 25.731,
-      "run_dir": "F:\\Nexus\\Workflow\\AutoBatch\\run\\bench-polars-local_csv-a16b09",
-      "status": "success",
-      "error": null,
-      "pipeline_duration_ms": 3433,
-      "dq_score": 0.9966,
-      "total_rows_in": 42043,
-      "total_rows_out": 48534,
-      "stages": [
-        {
-          "name": "ingest",
-          "status": "success",
-          "duration_ms": 103,
-          "rows_in": 0,
-          "rows_out": 13300,
-          "throughput_rows_per_sec": 129126.2
-        },
-        {
-          "name": "validate",
-          "status": "success",
-          "duration_ms": 2493,
-          "rows_in": 13300,
-          "rows_out": 12781,
-          "throughput_rows_per_sec": 5126.8
-        },
-        {
-          "name": "clean",
-          "status": "success",
-          "duration_ms": 248,
-          "rows_in": 9581,
-          "rows_out": 12781,
-          "throughput_rows_per_sec": 51536.3
-        },
-        {
-          "name": "compute",
-          "status": "success",
-          "duration_ms": 102,
-          "rows_in": 9581,
-          "rows_out": 91,
-          "throughput_rows_per_sec": 892.2
-        },
-        {
-          "name": "output",
-          "status": "success",
-          "duration_ms": 471,
-          "rows_in": 9581,
-          "rows_out": 9581,
-          "throughput_rows_per_sec": 20341.8
-        }
-      ],
-      "overall_throughput_rows_per_sec": 13930.5,
-      "rows": 10000
-    },
-    {
-      "engine": "python",
-      "storage": "local_csv",
-      "batch_id": "bench-python-local_csv-1367e5",
-      "wall_time_ms": 7488,
-      "peak_memory_mb": 57.769,
-      "run_dir": "F:\\Nexus\\Workflow\\AutoBatch\\run\\bench-python-local_csv-1367e5",
-      "status": "success",
-      "error": null,
-      "pipeline_duration_ms": 7340,
-      "dq_score": 0.9962,
-      "total_rows_in": 119804,
-      "total_rows_out": 126295,
-      "stages": [
-        {
-          "name": "ingest",
-          "status": "success",
-          "duration_ms": 221,
-          "rows_in": 0,
-          "rows_out": 33500,
-          "throughput_rows_per_sec": 151583.7
-        },
-        {
-          "name": "validate",
-          "status": "success",
-          "duration_ms": 3619,
-          "rows_in": 33500,
-          "rows_out": 31968,
-          "throughput_rows_per_sec": 8833.4
-        },
-        {
-          "name": "clean",
-          "status": "success",
-          "duration_ms": 1059,
-          "rows_in": 28768,
-          "rows_out": 31968,
-          "throughput_rows_per_sec": 30187.0
-        },
-        {
-          "name": "compute",
-          "status": "success",
-          "duration_ms": 984,
-          "rows_in": 28768,
-          "rows_out": 91,
-          "throughput_rows_per_sec": 92.5
-        },
-        {
-          "name": "output",
-          "status": "success",
-          "duration_ms": 1441,
-          "rows_in": 28768,
-          "rows_out": 28768,
-          "throughput_rows_per_sec": 19963.9
-        }
-      ],
-      "overall_throughput_rows_per_sec": 16866.3,
-      "rows": 30000
-    },
-    {
-      "engine": "polars",
-      "storage": "local_csv",
-      "batch_id": "bench-polars-local_csv-9d2986",
-      "wall_time_ms": 3444,
-      "peak_memory_mb": 31.703,
-      "run_dir": "F:\\Nexus\\Workflow\\AutoBatch\\run\\bench-polars-local_csv-9d2986",
-      "status": "success",
-      "error": null,
-      "pipeline_duration_ms": 3316,
-      "dq_score": 0.9962,
-      "total_rows_in": 119804,
-      "total_rows_out": 126295,
-      "stages": [
-        {
-          "name": "ingest",
-          "status": "success",
-          "duration_ms": 189,
-          "rows_in": 0,
-          "rows_out": 33500,
-          "throughput_rows_per_sec": 177248.7
-        },
-        {
-          "name": "validate",
-          "status": "success",
-          "duration_ms": 1695,
-          "rows_in": 33500,
-          "rows_out": 31968,
-          "throughput_rows_per_sec": 18860.2
-        },
-        {
-          "name": "clean",
-          "status": "success",
-          "duration_ms": 414,
-          "rows_in": 28768,
-          "rows_out": 31968,
-          "throughput_rows_per_sec": 77217.4
-        },
-        {
-          "name": "compute",
-          "status": "success",
-          "duration_ms": 107,
-          "rows_in": 28768,
-          "rows_out": 91,
-          "throughput_rows_per_sec": 850.5
-        },
-        {
-          "name": "output",
-          "status": "success",
-          "duration_ms": 895,
-          "rows_in": 28768,
-          "rows_out": 28768,
-          "throughput_rows_per_sec": 32143.0
-        }
-      ],
-      "overall_throughput_rows_per_sec": 36671.0,
-      "rows": 30000
+      "overall_throughput_rows_per_sec": 48718.6,
+      "rows": 1000000
     }
   ]
 }

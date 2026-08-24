@@ -21,6 +21,7 @@ Phase 2b 增加 Spark 分布式分支（``ctx.engine_backend == "spark"``）：
 from __future__ import annotations
 
 import os
+from datetime import date, datetime
 from typing import Any
 
 from ..helpers import (
@@ -33,6 +34,22 @@ from ..helpers import (
     table_write,
     utc_ts,
 )
+
+
+def _jsonify(value: Any) -> Any:
+    """递归把 date/datetime 转 ISO 字符串，保证 dashboard JSON 可序列化.
+
+    Spark 路径下 parquet inferSchema 会把 order_date 读成 datetime.date，
+    直接 json.dump 抛 TypeError（python/polars 路径全为字符串故从未暴露，
+    2026-08 亿行基准实测发现）。
+    """
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {k: _jsonify(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonify(v) for v in value]
+    return value
 
 
 def _register_artifacts(ctx: PipelineContext) -> None:
@@ -134,7 +151,7 @@ def run(ctx: PipelineContext, log) -> dict[str, Any]:
     else:
         rows_in, rows_out = _write_orders_final_python(ctx, out_dir)
 
-    dashboard_data = _build_dashboard(ctx)
+    dashboard_data = _jsonify(_build_dashboard(ctx))
     json_save(os.path.join(out_dir, "dashboard_data.json"), dashboard_data)
 
     lineage = _declare_lineage(ctx)

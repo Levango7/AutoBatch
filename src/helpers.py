@@ -67,6 +67,10 @@ def batch_id_new(prefix: str = "B") -> str:
 
 
 def abs_path(p: str) -> str:
+    # 对象存储 URI（s3a:// 等）不是文件系统路径，原样返回；
+    # 否则会被 join(ROOT, ...) 拼成非法路径（2026-08 亿行基准实测踩坑）.
+    if p.startswith(("s3a://", "s3://", "s3n://", "gs://", "abfs://", "wasbs://")):
+        return p
     if os.path.isabs(p):
         return p
     return os.path.join(ROOT, p)
@@ -453,6 +457,69 @@ def copy_file(src: str, dst: str) -> str:
     _ensure_parent_dir(dst)
     shutil.copy2(src, dst)
     return sha256_of(dst)
+
+
+def detect_spark_paths() -> dict[str, str]:
+    """探测 SPARK_HOME / JAVA_HOME / HADOOP_HOME / PYSPARK_PYTHON.
+
+    优先级：环境变量 > 系统常见路径 > 平台默认路径（回退）。
+    从 tests/conftest.py 下沉为产品工具函数：Spark 集群基准等非 pytest
+    入口（如 tools/bench_scale_cluster.py）需要同样的 Driver 环境引导.
+    """
+    env = os.environ
+
+    def find_path(candidates: list[str]) -> str:
+        for c in candidates:
+            if os.path.isdir(c):
+                return c
+        return candidates[0] if candidates else ""
+
+    result: dict[str, str] = {}
+    result["SPARK_HOME"] = env.get("SPARK_HOME") or find_path(
+        ["/opt/spark", "/usr/local/spark", "C:\\spark", "F:\\spark_home"]
+    )
+    result["JAVA_HOME"] = (
+        env.get("JAVA_HOME")
+        or env.get("JAVA_HOME_17_X64")
+        or find_path(
+            [
+                "/usr/lib/jvm/java-17-openjdk-amd64",
+                "/usr/lib/jvm/java-17-openjdk-x86_64",
+                "/usr/lib/jvm/default-java",
+                "/usr/local/opt/openjdk",
+                "C:\\Program Files\\Java\\jdk-17",
+                "C:\\Program Files\\Java\\jdk17",
+                "F:\\jdk17",
+            ]
+        )
+    )
+    result["HADOOP_HOME"] = env.get("HADOOP_HOME") or find_path(
+        ["/opt/hadoop", "/usr/local/hadoop", "C:\\hadoop", "F:\\hadoop"]
+    )
+    result["PYSPARK_PYTHON"] = (
+        env.get("PYSPARK_PYTHON")
+        or env.get("PYTHON")
+        or shutil.which("python3")
+        or shutil.which("python")
+        or ""
+    )
+    result["PYSPARK_DRIVER_PYTHON"] = env.get("PYSPARK_DRIVER_PYTHON") or result["PYSPARK_PYTHON"]
+    return result
+
+
+def apply_spark_env(spark_paths: dict[str, str]) -> None:
+    """按探测结果设置环境变量（setdefault 不覆盖已有值），PATH 前置 bin 目录.
+
+    探测回退会给出不存在的占位路径（如 POSIX 风格 /opt/hadoop）——这类值一旦
+    注入会让 Driver JVM 以 'Hadoop home directory ... is not an absolute path'
+    拒绝写文件（2026-08 亿行基准实测），故目录不存在时跳过不设.
+    """
+    for key, value in spark_paths.items():
+        if not value:
+            continue
+        if key in ("SPARK_HOME", "HADOOP_HOME", "JAVA_HOME") and not os.path.isdir(value):
+            continue
+        os.environ.setdefault(key, value)
 
 
 def rmtree_retry(path: str, attempts: int = 4, base_delay: float = 0.3) -> bool:

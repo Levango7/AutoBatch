@@ -1,0 +1,4 @@
+FROM spark-cluster-spark-master:latest
+USER root
+RUN pip3 install --break-system-packages polars pyarrow numpy pandas
+ENV SPARK_MODE=master

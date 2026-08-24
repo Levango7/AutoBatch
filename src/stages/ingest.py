@@ -131,10 +131,15 @@ def _ingest_full_spark(
     单机模式（cluster.enabled=false）：用 ``spark.read.csv(src)`` 直接读源 CSV
     为 SparkDataFrame，``table_write(dst, df, cfg, spark=...)`` 写到 01_raw。
 
-    多机模式（cluster.enabled=true）：Worker 在 Docker 容器中无法访问宿主机
-    文件路径，因此 Driver 端先用 ``csv_read(src)`` 读取源 CSV 为 List[Dict]，
-    再 ``spark.createDataFrame(rows)`` 转为 SparkDataFrame，最后
-    ``table_write`` 写到 01_raw（S3/MinIO）。
+    S3 源（src 为 s3a:// / s3:// URI）：executor 经已注入的 fs.s3a 配置直读
+    对象存储，单机/多机同路——多机模式下 Worker 无法访问宿主机路径，把大
+    规模源数据预置到 MinIO 后走本分支，避免 Driver 端 csv_read 全量进内存
+    （亿行级会 OOM）。
+
+    多机模式 + 本地源（cluster.enabled=true）：Worker 在 Docker 容器中无法
+    访问宿主机文件路径，因此 Driver 端先用 ``csv_read(src)`` 读取源 CSV 为
+    List[Dict]，再 ``spark.createDataFrame(rows)`` 转为 SparkDataFrame，最后
+    ``table_write`` 写到 01_raw（S3/MinIO）。仅适合小规模源数据。
 
     Spark 写出的是目录（多分区 part-00000-* 文件），sha256 不适用，用
     ``"spark_dir"`` 占位符。rows 由 table_write 返回（内部 df.count()）。
@@ -144,7 +149,13 @@ def _ingest_full_spark(
     assert spark is not None
     dst = os.path.join(raw_dir, os.path.basename(rel))
     cluster = cfg.get("engine", {}).get("spark", {}).get("cluster", {})
-    if cluster.get("enabled"):
+    if src.startswith(("s3a://", "s3://")):
+        # S3 源：executor 直读对象存储（fs.s3a.* 已在 session 构建时注入），
+        # 单机/多机同路；Driver 不经手数据面.
+        opts = cfg.get("engine", {}).get("spark", {}).get("read_options", {}) or {}
+        df = _strip_bom_spark(spark.read.csv(src, header=True, inferSchema=True, **opts))
+        rows = table_write(dst, df, cfg, spark=spark)
+    elif cluster.get("enabled"):
         # 多机模式：Driver 端读本地 CSV → createDataFrame → table_write
         # Worker 无法访问宿主机文件路径，必须由 Driver 读入数据再分发
         rows_data, fields = csv_read(src)

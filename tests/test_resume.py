@@ -50,7 +50,13 @@ def _mkcfg(resume: bool = False, **overrides) -> dict[str, Any]:
     return cfg
 
 
-def _write_manifest(run_dir: str, status: str = "failed", stages: list | None = None, pipeline_version: str | None = None, **extra) -> str:
+def _write_manifest(
+    run_dir: str,
+    status: str = "failed",
+    stages: list | None = None,
+    pipeline_version: str | None = None,
+    **extra,
+) -> str:
     m = Manifest("b-resume", "digest-ok", run_dir)
     if pipeline_version is not None:
         m.pipeline_version = pipeline_version
@@ -203,7 +209,9 @@ def test_missing_dir_returns_false(workdir):
 def test_lineage_decl_stored_in_stage_extra(workdir):
     """manifest.add_stage(extra={"lineage_decl": {...}}) 正确写入磁盘（平铺到顶层）."""
     m = Manifest("b-lineage", "d", workdir)
-    m.add_stage("validate", "success", 100, 90, 50, "", extra={"lineage_decl": {"orders": ["02_valid"]}})
+    m.add_stage(
+        "validate", "success", 100, 90, 50, "", extra={"lineage_decl": {"orders": ["02_valid"]}}
+    )
     m.finish("success")
     m.save()
     saved = json_load(os.path.join(workdir, "manifest.json"))

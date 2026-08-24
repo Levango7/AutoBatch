@@ -685,13 +685,18 @@ def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
                     # 重置 manifest/ctx/metrics 为全新状态——恢复循环可能已把
                     # 前序 stage 写进 metrics，不重置会导致全量重跑后 stages 重复
                     manifest = Manifest(batch_id, digest, run_dir)
-                    ctx = PipelineContext(config=cfg, run_dir=run_dir, batch_id=batch_id, manifest=manifest)
+                    ctx = PipelineContext(
+                        config=cfg, run_dir=run_dir, batch_id=batch_id, manifest=manifest
+                    )
                     ctx.engine_backend = _get_engine_backend(cfg)
                     metrics = MetricsRecorder(batch_id)
                     # 后续 spark 初始化会使用新的 ctx
                     break
         if resume_active:
-            logger.info("resume enabled, skipping stages", extra={"stage": "pipeline", "resumed": list(resumed_stages)})
+            logger.info(
+                "resume enabled, skipping stages",
+                extra={"stage": "pipeline", "resumed": list(resumed_stages)},
+            )
         else:
             logger.info("resume disabled, full run", extra={"stage": "pipeline"})
     else:
@@ -736,7 +741,9 @@ def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
             ctx.state = store.load()
             ctx.state_path = store.state_path
             ctx.incremental_enabled = True
-            logger.info("incremental mode enabled", extra={"stage": "pipeline", "state_dir": state_dir})
+            logger.info(
+                "incremental mode enabled", extra={"stage": "pipeline", "state_dir": state_dir}
+            )
 
         # 任务41 监控告警：加载 config/monitoring.json（缺省 disabled）.
         monitoring_cfg = load_monitoring_config(
@@ -754,7 +761,11 @@ def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
                 health_server.start()
                 logger.info(
                     "health server started",
-                    extra={"stage": "pipeline", "host": health_server.host, "port": health_server.port},
+                    extra={
+                        "stage": "pipeline",
+                        "host": health_server.host,
+                        "port": health_server.port,
+                    },
                 )
     except Exception:
         # 尽力清理后原样抛出：emitter 已发 START 则补 FAILED 配对终态
@@ -788,7 +799,9 @@ def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
         for name in STAGES:
             # 断点续跑：跳过已成功的 stage（output 永不跳过）
             if resume_active and name in resumed_stages:
-                logger.info("stage resumed (skipped)", extra={"stage": "pipeline", "resumed_stage": name})
+                logger.info(
+                    "stage resumed (skipped)", extra={"stage": "pipeline", "resumed_stage": name}
+                )
                 if emitter is not None:
                     emitter.stage_event(name, "COMPLETE")
                 continue

@@ -53,6 +53,7 @@ def test_stable_runid_deterministic():
     assert r1 != r4
     # 标准 UUID v5 格式
     import uuid as _uuid
+
     _uuid.UUID(r1)  # 不会抛即合法
 
 
@@ -228,7 +229,9 @@ def test_emitter_http_post_failure_ignored(monkeypatch, tmp_path):
         raise urllib.error.HTTPError("http://x", 500, "boom", {}, None)
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
-    e = OpenLineageEmitter("b", endpoint="http://bad-host:9999", out_path=str(tmp_path / "out.ndjson"))
+    e = OpenLineageEmitter(
+        "b", endpoint="http://bad-host:9999", out_path=str(tmp_path / "out.ndjson")
+    )
     e.pipeline_event("START")  # 不应抛
     assert tmp_path.joinpath("out.ndjson").exists()
     lines = tmp_path.joinpath("out.ndjson").read_text(encoding="utf-8").strip().splitlines()

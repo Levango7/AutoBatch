@@ -53,13 +53,27 @@ F:\Py314\python.exe benchmarks/run_benchmark.py --rows 20000
 
 默认用 `config/pipeline_small.json` 的 `generator.rows = 5000`。
 
+### 多规模扫描（观察吞吐随规模的变化）
+
+```bash
+F:\Py314\python.exe benchmarks/run_benchmark.py --scales 10000,30000,100000
+```
+
+`--scales` 接逗号分隔的正整数列表，每个规模**独立生成一份数据**再跑全部组合，
+报告中所有表格带 `rows` 列，可直接对比同一组合在不同规模下的 wall time 与
+吞吐量（判断引擎是线性退化还是近恒定）。与 `--rows` 互斥，同时给出会报错退出。
+典型结论参考 report.md：python 路径耗时随规模近似线性增长，polars 在万行级后
+反超并保持近恒定。
+
 ### 保留 run_dir 用于排查
 
 ```bash
 F:\Py314\python.exe benchmarks/run_benchmark.py --no-cleanup
 ```
 
-默认会清理 `run/bench-*/` 目录；加 `--no-cleanup` 保留产物和 metrics.json。
+默认会清理 `run/bench-*/` 目录和自动创建的临时 work_dir（用 `rmtree_retry`
+应对 Windows 句柄延迟释放）；加 `--no-cleanup` 保留产物和 metrics.json。
+通过 `--work-dir` 显式指定的目录不会被清理。
 
 ### 指定工作目录
 

@@ -25,8 +25,10 @@
 用法：
     F:\\Py314\\python.exe benchmarks/run_benchmark.py
     F:\\Py314\\python.exe benchmarks/run_benchmark.py --rows 20000
+    F:\\Py314\\python.exe benchmarks/run_benchmark.py --scales 10000,50000,200000
+        # 多规模扫描：每个规模独立生成数据 × 全部组合，观察吞吐随规模的变化
     F:\\Py314\\python.exe benchmarks/run_benchmark.py --combinations python/local_csv polars/local_csv
-    F:\\Py314\\python.exe benchmarks/run_benchmark.py --no-cleanup   # 保留 run_dir 用于排查
+    F:\\Py314\\python.exe benchmarks/run_benchmark.py --no-cleanup   # 保留 run_dir/work_dir 用于排查
 
 退出码：0 = 全部组合成功；1 = 至少一个组合失败。
 """
@@ -50,7 +52,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from src.helpers import ROOT, abs_path, json_load, json_save  # noqa: E402
+from src.helpers import ROOT, abs_path, json_load, json_save, rmtree_retry  # noqa: E402
 from src.pipeline import run_pipeline  # noqa: E402
 
 # 基础配置文件（小规模，5k 行）
@@ -125,20 +127,21 @@ def _make_combination_cfg(base: dict[str, Any], engine: str, storage: str,
 # ----------------------------------------------------------------------
 # 数据生成（共享）
 # ----------------------------------------------------------------------
-def _generate_data(base: dict[str, Any], work_dir: str) -> str:
-    """生成基准数据到 work_dir/data/raw，返回 data_dir。
+def _generate_data(base: dict[str, Any], work_dir: str, scale: int) -> str:
+    """生成指定规模的数据到 work_dir/data_<scale>/raw，返回 data_dir。
 
-    只生成一次，所有组合共享同一份数据，避免重复生成影响计时。
+    多规模扫描时每个规模独立一份目录，互不覆盖；单规模模式等价于旧路径。
+    只生成一次、同规模所有组合共享同一份数据，避免重复生成影响计时。
     """
-    data_dir = os.path.join(work_dir, "data", "raw")
+    data_dir = os.path.join(work_dir, f"data_{scale}", "raw")
     cfg = copy.deepcopy(base)
     cfg["generator"]["output_dir"] = data_dir
     # 关闭 bad_date 缺陷，避免污染水位（与 conftest.parquet_env 一致）
     cfg["generator"]["defect_rates"]["bad_date"] = 0.0
     from src.generator import main as gen_main
     meta = gen_main(cfg)
-    print("[benchmark] 生成数据: orders={} customers={} products={}".format(
-        meta["rows"]["orders"], meta["rows"]["customers"], meta["rows"]["products"]))
+    print("[benchmark] 生成数据(scale={}): orders={} customers={} products={}".format(
+        scale, meta["rows"]["orders"], meta["rows"]["customers"], meta["rows"]["products"]))
     return data_dir
 
 
@@ -258,15 +261,16 @@ def _measure_combination(engine: str, storage: str, cfg: dict[str, Any]
 # ----------------------------------------------------------------------
 # 报告生成
 # ----------------------------------------------------------------------
-def _generate_reports(results: list[dict[str, Any]], rows: int,
+def _generate_reports(results: list[dict[str, Any]], scales: list[int],
                       started_at: str, finished_at: str) -> None:
-    """生成 Markdown 报告（report.md）和 JSON 原始数据（report.json）。"""
+    """生成 Markdown 报告（report.md）和 JSON 原始数据（report.json）."""
     # --- JSON 原始数据 ---
     json_doc = {
         "generated_at": finished_at,
         "started_at": started_at,
         "base_config": _BASE_CONFIG,
-        "rows_per_run": rows,
+        "rows_per_run": scales[0] if len(scales) == 1 else None,
+        "scales": scales,
         "combinations": results,
     }
     os.makedirs(os.path.dirname(REPORT_JSON), exist_ok=True)
@@ -278,7 +282,10 @@ def _generate_reports(results: list[dict[str, Any]], rows: int,
     lines.append("")
     lines.append(f"- **生成时间**: {finished_at}")
     lines.append(f"- **基础配置**: `{_BASE_CONFIG}`")
-    lines.append(f"- **每组合行数**: {rows}")
+    if len(scales) == 1:
+        lines.append(f"- **每组合行数**: {scales[0]}")
+    else:
+        lines.append(f"- **规模扫描**: {', '.join(str(s) for s in scales)} 行")
     lines.append(f"- **组合数**: {len(results)}")
     lines.append("- **内存说明**: `peak_memory_mb` 为 tracemalloc 采集的 Python 堆峰值，"
                  "不包含 polars/pyspark 的 native（Rust/JVM）内存；对 python 后端最准确。")
@@ -287,21 +294,22 @@ def _generate_reports(results: list[dict[str, Any]], rows: int,
     # 概览表
     lines.append("## 1. 组合概览")
     lines.append("")
-    lines.append("| engine | storage | status | wall(ms) | pipeline(ms) | "
+    lines.append("| engine | storage | rows | status | wall(ms) | pipeline(ms) | "
                  "peak_mem(MB) | total_rows_out | throughput(rows/s) | dq_score |")
-    lines.append("|--------|---------|--------|----------|-------------|"
+    lines.append("|--------|---------|------|--------|----------|-------------|"
                  "--------------|----------------|--------------------|----------|")
     for r in results:
         lines.append(
-            "| {engine} | {storage} | {status} | {wall} | {pdur} | "
-            "{mem} | {rows} | {tput} | {dq} |".format(
+            "| {engine} | {storage} | {rows} | {status} | {wall} | {pdur} | "
+            "{mem} | {rows_out} | {tput} | {dq} |".format(
                 engine=r["engine"],
                 storage=r["storage"],
+                rows=r.get("rows", "N/A"),
                 status=r["status"],
                 wall=r["wall_time_ms"],
                 pdur=r.get("pipeline_duration_ms", "N/A"),
                 mem=r["peak_memory_mb"],
-                rows=r["total_rows_out"],
+                rows_out=r["total_rows_out"],
                 tput=r["overall_throughput_rows_per_sec"],
                 dq=r.get("dq_score", "N/A"),
             )
@@ -311,16 +319,16 @@ def _generate_reports(results: list[dict[str, Any]], rows: int,
     # 每阶段明细表
     lines.append("## 2. 每阶段耗时与吞吐量")
     lines.append("")
-    lines.append("| engine | storage | stage | status | duration(ms) | "
+    lines.append("| engine | storage | rows | stage | status | duration(ms) | "
                  "rows_in | rows_out | throughput(rows/s) |")
-    lines.append("|--------|---------|-------|--------|-------------|"
+    lines.append("|--------|---------|------|-------|--------|-------------|"
                  "---------|---------|--------------------|")
     for r in results:
         for s in r.get("stages", []):
             lines.append(
-                "| {eng} | {stor} | {name} | {st} | {dur} | "
+                "| {eng} | {stor} | {rows} | {name} | {st} | {dur} | "
                 "{ri} | {ro} | {tp} |".format(
-                    eng=r["engine"], stor=r["storage"],
+                    eng=r["engine"], stor=r["storage"], rows=r.get("rows", "N/A"),
                     name=s["name"], st=s["status"],
                     dur=s["duration_ms"], ri=s["rows_in"],
                     ro=s["rows_out"], tp=s["throughput_rows_per_sec"],
@@ -331,11 +339,12 @@ def _generate_reports(results: list[dict[str, Any]], rows: int,
     # 内存峰值对比
     lines.append("## 3. 内存峰值对比")
     lines.append("")
-    lines.append("| engine | storage | peak_memory(MB) | wall(ms) |")
-    lines.append("|--------|---------|-----------------|----------|")
+    lines.append("| engine | storage | rows | peak_memory(MB) | wall(ms) |")
+    lines.append("|--------|---------|------|-----------------|----------|")
     for r in results:
-        lines.append("| {} | {} | {} | {} |".format(
-            r["engine"], r["storage"], r["peak_memory_mb"], r["wall_time_ms"]))
+        lines.append("| {} | {} | {} | {} | {} |".format(
+            r["engine"], r["storage"], r.get("rows", "N/A"),
+            r["peak_memory_mb"], r["wall_time_ms"]))
     lines.append("")
 
     # 失败组合
@@ -377,13 +386,32 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="AutoBatch 性能基准测试")
     parser.add_argument("--rows", type=int, default=None,
                         help="覆盖 generator.rows（默认用 pipeline_small.json 的 5000）")
+    parser.add_argument("--scales", type=str, default=None,
+                        help="逗号分隔的多规模扫描（如 10000,50000,200000），"
+                             "每个规模独立生成数据并跑全部组合；与 --rows 互斥")
     parser.add_argument("--combinations", nargs="+", default=None,
                         help="指定组合（形如 python/local_csv），默认跑全部 4 个")
     parser.add_argument("--no-cleanup", action="store_true",
-                        help="保留 bench-* run_dir 用于排查")
+                        help="保留 bench-* run_dir 与自动创建的 work_dir 用于排查")
     parser.add_argument("--work-dir", default=None,
-                        help="工作目录（默认自动创建临时目录）")
+                        help="工作目录（默认自动创建临时目录，跑完自动清理）")
     args = parser.parse_args(argv)
+
+    # 解析规模列表
+    if args.scales and args.rows is not None:
+        print("[benchmark] --rows 与 --scales 互斥，只能二选一")
+        return 1
+    if args.scales:
+        try:
+            scales = [int(x) for x in args.scales.split(",") if x.strip()]
+        except ValueError:
+            print("[benchmark] 非法 --scales，应为逗号分隔整数，如 10000,50000")
+            return 1
+        if not scales or any(s <= 0 for s in scales):
+            print("[benchmark] --scales 必须为正整数列表")
+            return 1
+    else:
+        scales = [args.rows] if args.rows is not None else None  # None = 用基础配置
 
     # 解析组合
     if args.combinations:
@@ -397,17 +425,14 @@ def main(argv: list[str]) -> int:
     else:
         combos = list(DEFAULT_COMBINATIONS)
 
-    print("[benchmark] 计划组合: {}".format(
-        [f"{e}/{s}" for e, s in combos]))
+    print("[benchmark] 计划组合: {}".format([f"{e}/{s}" for e, s in combos]))
 
     base = _load_base_config()
-    if args.rows is not None:
-        base["generator"]["rows"] = args.rows
-    rows = base["generator"]["rows"]
 
     # 同盘临时工作目录（避免跨盘 os.path.relpath 失败，与 conftest 一致）
     drive = os.path.splitdrive(ROOT)[0] + os.sep
-    if args.work_dir:
+    auto_work_dir = args.work_dir is None
+    if not auto_work_dir:
         work_dir = args.work_dir
         os.makedirs(work_dir, exist_ok=True)
     else:
@@ -422,47 +447,57 @@ def main(argv: list[str]) -> int:
     print(f"[benchmark] run_root={run_root}")
     print(f"[benchmark] 开始时间={started_at}")
 
-    # 1. 生成共享数据
-    try:
-        data_dir = _generate_data(base, work_dir)
-    except Exception as exc:  # noqa: BLE001
-        print(f"[benchmark] 数据生成失败: {exc}")
-        return 1
-
-    # 2. 跑每个组合
     results: list[dict[str, Any]] = []
-    for engine, storage in combos:
-        cfg = _make_combination_cfg(
-            base, engine, storage, data_dir, run_root, warehouse_dir)
-        try:
-            r = _measure_combination(engine, storage, cfg)
-        except Exception as exc:  # noqa: BLE001
-            r = {
-                "engine": engine, "storage": storage,
-                "status": "failed",
-                "error": f"{type(exc).__name__}: {str(exc)}",
-                "wall_time_ms": 0, "peak_memory_mb": 0,
-                "total_rows_in": 0, "total_rows_out": 0,
-                "stages": [], "overall_throughput_rows_per_sec": 0.0,
-                "batch_id": "n/a",
-            }
-            print(f"[benchmark] 组合 {engine}/{storage} 异常: {exc}")
-        results.append(r)
+    try:
+        for scale in (scales or [int(base["generator"]["rows"])]):
+            base["generator"]["rows"] = scale
+
+            # 1. 生成本规模的共享数据
+            try:
+                data_dir = _generate_data(base, work_dir, scale)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[benchmark] 数据生成失败(scale={scale}): {exc}")
+                return 1
+
+            # 2. 跑每个组合
+            for engine, storage in combos:
+                cfg = _make_combination_cfg(
+                    base, engine, storage, data_dir, run_root, warehouse_dir)
+                try:
+                    r = _measure_combination(engine, storage, cfg)
+                except Exception as exc:  # noqa: BLE001
+                    r = {
+                        "engine": engine, "storage": storage,
+                        "status": "failed",
+                        "error": f"{type(exc).__name__}: {str(exc)}",
+                        "wall_time_ms": 0, "peak_memory_mb": 0,
+                        "total_rows_in": 0, "total_rows_out": 0,
+                        "stages": [], "overall_throughput_rows_per_sec": 0.0,
+                        "batch_id": "n/a",
+                    }
+                    print(f"[benchmark] 组合 {engine}/{storage} 异常: {exc}")
+                r["rows"] = scale
+                results.append(r)
+    finally:
+        # 3. 清理：bench-* run_dir 总是尝试清（--no-cleanup 除外）；
+        #    自动创建的 work_dir 也一并清，避免盘根积累 autobatch_bench_* 残留.
+        if not args.no_cleanup:
+            _cleanup_run_dirs(run_root)
+            print("[benchmark] 已清理 bench-* run_dir（用 --no-cleanup 保留）")
+            if auto_work_dir:
+                ok = rmtree_retry(work_dir, attempts=6, base_delay=0.5)
+                print("[benchmark] 清理临时 work_dir: {}".format("ok" if ok else "FAILED"))
+        else:
+            print("[benchmark] 保留产物（--no-cleanup）")
 
     finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # 3. 生成报告
-    _generate_reports(results, rows, started_at, finished_at)
+    # 4. 生成报告
+    used_scales = sorted({r.get("rows", 0) for r in results})
+    _generate_reports(results, used_scales, started_at, finished_at)
     print("\n[benchmark] 报告已生成:")
     print(f"  - Markdown: {REPORT_MD}")
     print(f"  - JSON:     {REPORT_JSON}")
-
-    # 4. 清理
-    if not args.no_cleanup:
-        _cleanup_run_dirs(run_root)
-        print("[benchmark] 已清理 bench-* run_dir（用 --no-cleanup 保留）")
-    else:
-        print("[benchmark] 保留 bench-* run_dir（--no-cleanup）")
 
     # 5. 汇总
     n_ok = sum(1 for r in results if r["status"] == "success")

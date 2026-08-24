@@ -19,9 +19,61 @@ from typing import Any
 
 import pytest
 
-from src.helpers import ROOT, PipelineContext, StageLog, abs_path, csv_write, json_load, json_save
+from src.helpers import (
+    ROOT,
+    PipelineContext,
+    StageLog,
+    abs_path,
+    csv_write,
+    json_load,
+    json_save,
+    rmtree_retry,
+)
 from src.lineage import Manifest
 from src.pipeline import config_digest, run_pipeline
+
+# 会话内创建过的沙箱根目录（_same_drive_tmp_root），sessionfinish 时二次清扫.
+# teardown 单次 rmtree 可能因 Windows 句柄延迟释放失败，这里兜底再删一遍，
+# 避免盘根积累 autobatch_test_* 残留。
+_SANDBOX_ROOTS: list[str] = []
+
+
+def _sweep_stale_sandboxes() -> None:
+    """清扫上次会话残留的 autobatch_test_* 沙箱目录.
+
+    只删 mtime 超过 1 小时的：活跃会话的沙箱在持续写入，近期 mtime 视为
+    在用（防止并发 pytest 会话互删）；超龄的一定是崩溃/句柄残留，此时
+    持有进程早已退出，rmtree_retry 必然成功——自愈闭环。
+    """
+    import contextlib
+    import time
+
+    if os.name == "nt":
+        base = os.path.splitdrive(ROOT)[0] + os.sep
+    else:
+        base = os.path.dirname(ROOT)
+    with contextlib.suppress(Exception):
+        for name in os.listdir(base):
+            if not name.startswith("autobatch_test_"):
+                continue
+            path = os.path.join(base, name)
+            with contextlib.suppress(Exception):
+                if time.time() - os.path.getmtime(path) < 3600:
+                    continue
+                rmtree_retry(path, attempts=2, base_delay=0.2)
+
+
+def pytest_sessionstart(session):
+    _sweep_stale_sandboxes()
+
+
+def pytest_sessionfinish(session, exitstatus):
+    import contextlib
+
+    for d in _SANDBOX_ROOTS:
+        with contextlib.suppress(Exception):
+            rmtree_retry(d, attempts=6, base_delay=0.5)
+    _SANDBOX_ROOTS.clear()
 
 
 # ----------------------------------------------------------------------
@@ -251,8 +303,10 @@ def _same_drive_tmp_root():
         if not os.access(base, os.W_OK):
             base = None  # 回退 tempfile 默认目录
     d = tempfile.mkdtemp(prefix="autobatch_test_", dir=base)
+    _SANDBOX_ROOTS.append(d)
     yield d
-    shutil.rmtree(d, ignore_errors=True)
+    # 重试删除：SQLite/JVM 句柄延迟释放常让单次 rmtree 失败（残留根因）.
+    rmtree_retry(d)
 
 
 @pytest.fixture(scope="session")

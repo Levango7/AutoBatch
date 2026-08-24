@@ -455,6 +455,32 @@ def copy_file(src: str, dst: str) -> str:
     return sha256_of(dst)
 
 
+def rmtree_retry(path: str, attempts: int = 4, base_delay: float = 0.3) -> bool:
+    """带重试的递归删除，返回是否成功删净.
+
+    Windows 下 SQLite（Iceberg catalog）与 Spark JVM 的文件句柄释放有延迟，
+    一次性 rmtree 常因句柄未关而失败；测试 fixture teardown 若静默吞掉失败
+    会在盘根积累临时目录。指数退避重试给句柄释放留出时间；已不存在的路径
+    视为成功。全部尝试耗尽仍失败时返回 False，由调用方决定兜底策略。
+    """
+    import time
+
+    for i in range(attempts):
+        try:
+            shutil.rmtree(path)
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError:
+            if i < attempts - 1:
+                time.sleep(base_delay * (i + 1))
+    try:
+        shutil.rmtree(path)
+        return True
+    except OSError:
+        return False
+
+
 def num_float(v: Any) -> Optional[float]:
     if v is None:
         return None

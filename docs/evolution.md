@@ -161,6 +161,26 @@ deleted = diff 中 PK 在 n-1 出现但 n 未出现的行
 
 **局限**：依赖最重（Kafka + 连接器 + schema registry），运维复杂度高。本设计将其列为 Phase 5+ 的远期选项，不在本次演进范围内。
 
+**设计依据——为什么当前不引入 CDC**：
+
+1. **数据形态假设成立**。AutoBatch 的主表 orders 是 append-only（订单生成后不改、取消以状态列标记而非删除行），增量只需识别"新增了哪些行"，高水位 `max(order_date)` 语义完备；CDC 的核心价值（update/delete 捕获）在当前数据上没有消费场景。
+2. **批处理定位下实时性是过度设计**。项目 SLA 是 T+1 ~ 小时级批式刷新，五阶段产物（DQ 报告/聚合/看板）本身按批次组织；秒级 CDC 流入与按批次登记的 manifest/metrics/lineage 台账模型正交，强行接入要么台账粒度失真，要么为每条事件建一次"批次"，两者都破坏现有审计模型。
+3. **依赖哲学冲突**。项目从零依赖单机原型起步，每阶段只加一种基础设施（polars→Spark→MinIO→Iceberg）；CDC 一步引入 Kafka + Connect + schema registry 三件套，运维面超过前面所有阶段之和。
+4. **等价能力已被更便宜的路径覆盖**。"感知 update/delete"这一需求由 Phase 4 的 Iceberg snapshot diff 满足（读 added_data_files，IO 与变更量成正比），它复用湖表自带机制、零新增服务。CDC 相对 snapshot diff 的净增益只剩实时性，而实时性不是目标（见第 2 条）。
+
+**现有替代路径**：
+
+| 路径 | 状态 | 适用场景 | 局限 |
+|---|---|---|---|
+| 高水位（Phase 1） | ✅ 已落地 | append-only 主表，T+1 批式刷新 | 不感知 update/delete |
+| Iceberg snapshot diff（Phase 4） | ✅ 已落地 | 需要感知 update/delete 的湖表 | 依赖湖表格式与快照链 |
+| Debezium + Kafka + Connect | 远期备选 | 多下游共享变更流、异构库接入 | 三件套运维成本最高 |
+| Flink CDC（流批一体） | 远期备选 | 源端即需流式加工、SQL 化消费 binlog | 引入 Flink 集群 |
+| 云托管 DMS/DTS | 远期备选 | 全托管云环境、免运维 | 厂商锁定、按量计费 |
+| Delta Lake CDF | 远期备选 | 已选型 Delta 而非 Iceberg 时 | 与本项目 Iceberg 路线不符 |
+
+**升级触发条件**（满足任一条再重估 CDC）：源表开始真实 UPDATE/DELETE 且无法用湖表承载；SLA 从 T+1 收紧到分钟级；出现独立的流式下游消费者（如实时风控）；上游数据库不可改造为湖表落地的架构。
+
 #### 3.1.4 三种模式对比
 
 表：增量模式对比表

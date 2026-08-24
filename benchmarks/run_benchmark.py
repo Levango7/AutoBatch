@@ -430,7 +430,11 @@ def main(argv: list[str]) -> int:
     base = _load_base_config()
 
     # 同盘临时工作目录（避免跨盘 os.path.relpath 失败，与 conftest 一致）
-    drive = os.path.splitdrive(ROOT)[0] + os.sep
+    if os.name == "nt":
+        drive = os.path.splitdrive(ROOT)[0] + os.sep
+    else:
+        # POSIX：splitdrive 恒返回 ""，根目录对非 root 不可写；回退系统 tmp
+        drive = os.path.dirname(ROOT) if os.access(os.path.dirname(ROOT), os.W_OK) else tempfile.gettempdir()
     auto_work_dir = args.work_dir is None
     if not auto_work_dir:
         work_dir = args.work_dir

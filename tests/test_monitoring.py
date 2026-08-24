@@ -478,10 +478,17 @@ class TestPipelineIntegration:
     """端到端验证 pipeline 集成监控（monitoring.enabled=true）."""
 
     def _make_run_dir(self, tmp_path):
-        """在项目所在盘创建临时 run 目录（避免跨盘 relpath 问题）."""
-        drive = os.path.splitdrive(ROOT)[0] + os.sep
-        d = tempfile.mkdtemp(prefix="autobatch_mon_", dir=drive)
-        return d
+        """在项目所在盘创建临时 run 目录（避免跨盘 relpath 问题）.
+
+        POSIX 下 splitdrive 恒返回 ""，直接拼根目录会让非 root 用户
+        （CI runner）PermissionError——回退链：项目父目录 → 系统 tmp.
+        """
+        if os.name == "nt":
+            base = os.path.splitdrive(ROOT)[0] + os.sep
+        else:
+            parent = os.path.dirname(ROOT)
+            base = parent if os.access(parent, os.W_OK) else tempfile.gettempdir()
+        return tempfile.mkdtemp(prefix="autobatch_mon_", dir=base)
 
     def test_pipeline_with_monitoring_enabled(self, tmp_path):
         """monitoring.enabled=true 时 pipeline 完成后 metrics.json 含 resource_sample."""

@@ -107,7 +107,14 @@ jobs:
           grep -E "^(FAILED|ERROR) " /tmp/pytest-quality.log | head -30 | while IFS= read -r line; do
             echo "::error::${line:0:180}"
           done
-          grep -E "^(FAILED|ERROR) " /tmp/pytest-quality.log | head -30 || echo "::error::no FAILED lines parsed (crash before summary?)"
+          if grep -qE "^(FAILED|ERROR) " /tmp/pytest-quality.log; then
+            grep -E "^(FAILED|ERROR) " /tmp/pytest-quality.log | head -30
+          else
+            echo "::error::no FAILED lines parsed — dumping log tail for crash diagnosis"
+            tail -40 /tmp/pytest-quality.log | while IFS= read -r line; do
+              echo "::error::TAIL|${line:0:170}"
+            done
+          fi
 
       # -------------------------------------------------------------------------
       # 5. 上传覆盖率 artifacts（保留 14 天）

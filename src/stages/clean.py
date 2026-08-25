@@ -323,9 +323,9 @@ def _run_spark(ctx: PipelineContext, log, cl_dir: str) -> dict[str, Any]:
             spark=ctx.spark_session,
         )
         rows_out = df.count()
-        # 缓存 List[Dict] 供下游（与 Python 路径类型对齐：total_amount 为 float）
-        # toPandas() 把 SparkDataFrame 收集到 driver 为 pandas DataFrame，再转 List[Dict]
-        ctx.clean_orders = df.toPandas().to_dict(orient="records")
+        # Spark path: skip toPandas cache (OOM at 10M+ rows, RSS 9.8GB).
+        # Downstream reads from disk (03_clean/).
+        ctx.clean_orders = []
     else:
         ctx.clean_orders = []
 

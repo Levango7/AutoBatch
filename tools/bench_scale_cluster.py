@@ -216,9 +216,14 @@ def build_cluster_cfg(
     master: str = "spark://localhost:15077",
     driver_memory: str = "4g",
     local_mode: bool = False,
+    jvm_opts: str = "",
 ) -> dict[str, Any]:
     cfg = json_load(abs_path("config/pipeline.json"))
     cfg["engine"]["backend"] = "spark"
+    # JVM 附加参数（如堆转储/GC 日志）经 driver extraJavaOptions 注入，
+    # local 模式下 executor 与 driver 同 JVM，同样生效
+    if jvm_opts:
+        cfg["engine"]["spark"]["driver_extra_java_options"] = jvm_opts
     if local_mode:
         # 单 JVM local[*]：Driver 与 Executor 同进程，无容器反连问题；
         # 在 Linux 容器内运行时这是绕开 Windows winutils 门槛的稳态路径.
@@ -308,6 +313,11 @@ def main(argv: list[str]) -> int:
     )
     parser.add_argument("--master", default="spark://localhost:15077")
     parser.add_argument("--driver-memory", default="4g")
+    parser.add_argument(
+        "--jvm-opts",
+        default="",
+        help="附加 JVM 参数（spark.driver.extraJavaOptions），如堆转储/GC 日志",
+    )
     parser.add_argument("--keep-source", action="store_true", help="保留本地源 CSV")
     parser.add_argument("--skip-upload", action="store_true", help="跳过上传（源已在 MinIO 时）")
     args = parser.parse_args(argv)
@@ -358,6 +368,7 @@ def main(argv: list[str]) -> int:
         master=args.master,
         driver_memory=args.driver_memory,
         local_mode=args.local_mode,
+        jvm_opts=args.jvm_opts,
     )
     batch_id = (
         f"bench-{'local' if args.local_mode else 'cluster'}-{args.rows}-{uuid.uuid4().hex[:6]}"

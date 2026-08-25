@@ -1,0 +1,47 @@
+{
+  "tool": "tools/bench_scale_cluster.py",
+  "started_at": "2026-08-25 08:27:19",
+  "rows_requested": 10000000,
+  "source_size_gb": 0.91,
+  "engine": "spark",
+  "mode": "local(local[8], 12g)",
+  "storage": "parquet/s3(minio)",
+  "shuffle_partitions": 64,
+  "status": "success",
+  "synth_upload_ms": 13301,
+  "total_wall_ms": 274047,
+  "pipeline_duration_ms": 251641,
+  "dq_score": 0.9994,
+  "stages": [
+    {
+      "name": "ingest",
+      "duration_ms": 51900,
+      "rows_in": 0,
+      "rows_out": 10205000
+    },
+    {
+      "name": "validate",
+      "duration_ms": 97623,
+      "rows_in": 10205000,
+      "rows_out": 10205000
+    },
+    {
+      "name": "clean",
+      "duration_ms": 41180,
+      "rows_in": 10000000,
+      "rows_out": 10205000
+    },
+    {
+      "name": "compute",
+      "duration_ms": 43871,
+      "rows_in": 10000000,
+      "rows_out": 365
+    },
+    {
+      "name": "output",
+      "duration_ms": 15464,
+      "rows_in": 10000000,
+      "rows_out": 10000000
+    }
+  ]
+}

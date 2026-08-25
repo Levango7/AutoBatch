@@ -91,6 +91,9 @@ jobs:
         shell: bash
         run: |
           set -eo pipefail
+          # 环境探针：解释器/关键包版本进日志头部，秒退时可判层
+          python --version
+          python -c "import pytest, coverage; print('pytest', pytest.__version__, '| coverage', coverage.__version__)"
           python -m pytest tests/ \
             -k "not cluster" \
             --cov=src \

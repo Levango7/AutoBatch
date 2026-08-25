@@ -75,6 +75,7 @@
 | engine.spark.num_executors | executor 实例数（多机模式） | 1（缺省）/ 4 / 8 |
 | engine.spark.driver_memory | driver 进程内存 | `512m`（缺省）/ `2g` 等 |
 | engine.spark.shuffle_partitions | shuffle 分区数（影响并行度） | 4（缺省，本地）/ 200（多机） |
+| engine.spark.max_result_size | driver 端 action 结果序列化上限（千万行级 join 需放大） | "1g"（Spark 默认）/ 大规模 "4g"+ |
 | engine.spark.adaptive_query_execution | AQE 开关（自动合并小分区、处理倾斜） | true（缺省）/ false |
 | engine.spark.write_single_file | 写出时合并为单文件（coalesce(1)） | false（缺省）/ true |
 | engine.spark.read_options | 传给 `spark.read.csv` 的参数 | `{}`（缺省） |
@@ -172,19 +173,19 @@
 
 ## 9. 测试运行方式
 
-项目内置 pytest 测试套件（336 个用例），位于 `tests/`：
+项目内置 pytest 测试套件（344 个用例），位于 `tests/`：
 
 ```
 python -m pytest tests/ -v
 ```
 
-测试覆盖范围（22 个测试模块，Windows 本地 Python 3.14 基线：313 passed + 23 skipped——skip 为环境相关用例）：
+测试覆盖范围（22 个测试模块，Windows 本地 Python 3.14 基线：322 passed + 22 skipped——skip 为环境相关用例）：
 
 | 文件 | 覆盖内容 | 用例数 |
 |---|---|---|
 | tests/test_benchmark.py | 基准测试：4 个 engine × storage 组合完整 pipeline 耗时对比，默认 skip 需 `--runslow` 启用 | 6 |
 | tests/test_config_schema.py | 配置 schema 校验：合法/非法 backend、fail_at、多余键、最小配置等 12 个场景 | 12 |
-| tests/test_edge_cases.py | 边界条件：零行/单行数据、空值/混合空值 CSV、空 state/manifest/metrics、聚合单行与空串数值等 34 个场景 | 34 |
+| tests/test_edge_cases.py | 边界条件：零行/单行数据、空值/混合空值 CSV、空 state/manifest/metrics、聚合单行与空串数值、rmtree_retry 删除重试、s3_credentials 环境变量回退等 39 个场景 | 39 |
 | tests/test_engine_polars.py | 4 个 Polars 等价性场景：全量产物与 python 路径一致、DQ Score in [0.95, 1.0] 且 lineage/metrics 正确、增量 + Polars 组合、Parquet 格式条件 skip | 4 |
 | tests/test_engine_spark.py | 3 个 Spark 等价性场景：全量产物与 python 路径一致、DQ Score in [0.95, 1.0] 且 lineage/metrics 正确、增量 + Spark 组合；Windows 缺 `hadoop.dll` 时 `skipif` 跳过本地模式 | 3 |
 | tests/test_engine_spark_cluster.py | 4 个 Spark 多机模式场景：多机+S3 全量产物与 local_csv 一致、多 executor 并行、增量+多机+S3 组合、Worker 数量；Docker 集群不可用时跳过 | 4 |
@@ -203,9 +204,9 @@ python -m pytest tests/ -v
 | tests/test_storage_iceberg.py | 13 个 Iceberg 湖表场景：等价性 / ACID / time travel / schema evolution / snapshot diff 增量 / 增量+Iceberg / SQL catalog / REST catalog；pyiceberg 未安装时 `skipif` 跳过 | 13 |
 | tests/test_storage_parquet.py | 4 个 Parquet 湖存储场景：本地 Parquet 全量产物与 local_csv 一致、S3 MinIO Parquet 全量产物与 local_csv 一致、Parquet 压缩比基准、增量 + Parquet 组合；MinIO 不可用时 `skipif` 跳过 | 4 |
 | tests/test_openlineage.py | 20 个 OpenLineage 血缘事件测试：event 结构 / parent facet / NDJSON 写出 / HTTP 上报容错 / 确定性 runId；纯单元级，零外部依赖 | 20 |
-| tests/test_resume.py          | 18 个断点续跑测试：resume 触发条件（disabled/auto batch/no manifest/success status/version drift/digest drift）/ 产物完整性检查（各 stage 目录非空 + validate 需 quality_summary.json）/ lineage_decl 持久化；纯单元级，零外部依赖 | 18 |
+| tests/test_resume.py          | 21 个断点续跑测试：resume 触发条件（disabled/auto batch/no manifest/success status/version drift/digest drift）/ 产物完整性检查（主输出目录判据 + validate 需批次根 quality_summary.json）/ lineage_decl 持久化 / 干净数据 e2e 续跑回归锁；纯单元级，零外部依赖 | 21 |
 
-合计 336 个用例。
+合计 344 个用例。
 
 `pytest.ini` 已配置 `testpaths = tests` 与 `pythonpath = .`，从项目根直接运行即可，无需额外参数。增量测试用 `conftest.py` 的 `inc_env` 夹具隔离 state 目录与数据目录，互不污染。Spark 本地模式测试用 `pytest.mark.skipif` 在 Windows 缺 `hadoop.dll` 或未装 `pyspark` 时跳过，代码逻辑完整，装齐环境后可直接运行。Spark 多机模式测试在 Docker Desktop / MinIO 不可用时跳过。Parquet S3 测试用 `pytest.mark.skipif` 在 MinIO 不可达时跳过，本地 Parquet 测试无需 MinIO 即可运行。OpenLineage 与断点续跑测试为纯单元级，不依赖任何外部服务。
 
@@ -214,9 +215,9 @@ python -m pytest tests/ -v
 `.github/workflows/ci.yml` 与 `.github/workflows/quality.yml` 配置了持续集成：
 
 - **触发**：ci.yml 在 push（main / master / release/*）或提交 PR 时运行；quality.yml 同。
-- **矩阵**：ubuntu-latest × Python 3.10 / 3.11 / 3.12（fail-fast 关闭，各版本独立报告）。
+- **矩阵**：ubuntu-latest × Python 3.10 / 3.11 / 3.12 + macos-latest × 3.12 单腿（POSIX 兼容验证；fail-fast 关闭，各节点独立报告）。
 - **步骤**：Checkout → 安装依赖（runtime + pyspark/polars/pyarrow/pyiceberg 可选引擎）→ `python -m pytest tests/ -v -k "not cluster"`（全量测试 + 覆盖率；Spark 集群用例需本地 Docker 集群，CI 中显式排除）→ `python main.py --config config/pipeline_small.json`（流水线冒烟）；另有独立 pip-audit 依赖安全扫描 job。
-- **quality.yml**：ruff lint + ruff format 校验 + mypy 类型检查（Python 3.10）+ pytest 覆盖率收集 + `coverage report --fail-under=60` 门禁。
+- **quality.yml**：ruff lint + ruff format 校验 + mypy 类型检查（Python 3.12，依赖与 CI 绿腿对齐）+ pytest 覆盖率收集（经 `tools/quality_collect.py`，失败用例自动转 ::error:: 注解）+ `coverage report --fail-under=60` 门禁。已知事项：覆盖率收集步骤在 GHA runner 上存在启动层平台故障（2026-08 连续多轮未定位），已显式降级为非阻塞并在 yml 内注释恢复条件；pytest 断言职责由 ci.yml 承担。
 
 任一矩阵节点失败即 CI 标红，保证主干始终可运行且测试通过。
 
@@ -402,6 +403,7 @@ Phase 2a 列式加速 + Phase 2b 分布式加速能力通过 `config/pipeline.js
 | `spark.shuffle_partitions` | int | shuffle 分区数，影响并行度。本地小数据建议 4，多机建议 200 |
 | `spark.adaptive_query_execution` | bool | AQE 开关（自动合并小分区、处理倾斜），缺省 `true` |
 | `spark.write_single_file` | bool | 写出时是否 `coalesce(1)` 合并为单文件，缺省 `false`（保留分区并行写出） |
+| `spark.max_result_size` | str | driver 端 action 结果序列化上限，缺省 `"1g"`（Spark 默认）。千万行级 join/broadcast 的单 task 序列化结果会超限，需放大（如 `"4g"`） |
 | `spark.read_options` | dict | 传给 `spark.read.csv` 的参数 |
 
 配置示例（摘自 `config/pipeline_small.json`）：

@@ -153,6 +153,7 @@
       "num_executors": 2,
       "driver_memory": "1g",
       "shuffle_partitions": 10,
+      "max_result_size": "1g",
       "adaptive_query_execution": true,
       "write_single_file": false,
       "read_options": {},

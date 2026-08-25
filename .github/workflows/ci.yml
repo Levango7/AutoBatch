@@ -1,7 +1,7 @@
 # =============================================================================
 # AutoBatch CI 流水线
 # Phase 6 CI/CD 加固 + 任务61 修复：
-#   - CI 矩阵为 3.10 / 3.11 / 3.12：
+#   - CI 矩阵为 ubuntu-latest × 3.10/3.11/3.12 + macos-latest × 3.12 单腿（POSIX 兼容验证）：
 #     · 3.9 因 pyarrow/pyspark/polars 等引擎依赖要求 Python >=3.10，仅代码层支持
 #     · 3.13/3.14 上 pyspark/polars/pyarrow 的 manylinux wheel 缺失（2026-08 实测）
 #   - push 限定 main / master / release/* 分支；pull_request 不限分支

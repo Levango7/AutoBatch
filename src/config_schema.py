@@ -52,6 +52,8 @@ class EngineSparkSection(_AllowExtra):
     shuffle_partitions: Optional[int] = None
     adaptive_query_execution: bool = True
     write_single_file: bool = False
+    # driver 端 action 结果序列化上限；千万行级 join/broadcast 需放大（如 "4g"）
+    max_result_size: str = ""
     read_options: dict[str, Any] = Field(default_factory=dict)
     cluster: dict[str, Any] = Field(default_factory=dict)
 

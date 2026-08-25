@@ -24,7 +24,9 @@ from src.helpers import (
     PipelineContext,
     StageLog,
     abs_path,
+    apply_spark_env,
     csv_write,
+    detect_spark_paths,
     json_load,
     json_save,
     rmtree_retry,
@@ -78,78 +80,14 @@ def pytest_sessionfinish(session, exitstatus):
 
 # ----------------------------------------------------------------------
 # 跨平台 Spark / Hadoop 路径自动探测
+# （实现已下沉到 src.helpers.detect_spark_paths/apply_spark_env，
+#   与 tools/bench_scale_cluster.py 共用同一份；此处仅保留 fixture
+#   需要的"设置并快照旧环境"包装）
 # ----------------------------------------------------------------------
-def detect_spark_paths() -> dict[str, str]:
-    """探测 SPARK_HOME / JAVA_HOME / HADOOP_HOME / PYSPARK_PYTHON。
-
-    优先级：环境变量 > 系统常见路径 > Windows 默认路径（回退）。
-    Linux/WSL 默认：/opt/spark, /usr/lib/jvm, /opt/hadoop
-    macOS 默认：/usr/local/opt/spark, /usr/local/opt/openjdk
-    Windows 默认：F:\\spark_home, F:\\jdk17, F:\\hadoop, F:\\Py314\\python.exe
-    """
-    env = os.environ
-    result: dict[str, str] = {}
-
-    # SPARK_HOME
-    result["SPARK_HOME"] = env.get("SPARK_HOME") or _find_path(
-        ["/opt/spark", "/usr/local/spark", "C:\\spark", "F:\\spark_home"]
-    )
-    # JAVA_HOME
-    result["JAVA_HOME"] = (
-        env.get("JAVA_HOME")
-        or env.get("JAVA_HOME_17_X64")  # Windows JDK 安装记录
-        or _find_path(
-            [
-                "/usr/lib/jvm/java-17-openjdk-amd64",
-                "/usr/lib/jvm/java-17-openjdk-x86_64",
-                "/usr/lib/jvm/default-java",
-                "/usr/local/opt/openjdk",
-                "C:\\Program Files\\Java\\jdk-17",
-                "C:\\Program Files\\Java\\jdk17",
-                "F:\\jdk17",
-            ]
-        )
-    )
-    # HADOOP_HOME
-    result["HADOOP_HOME"] = env.get("HADOOP_HOME") or _find_path(
-        ["/opt/hadoop", "/usr/local/hadoop", "C:\\hadoop", "F:\\hadoop"]
-    )
-    # PYSPARK_PYTHON（Driver 端）
-    result["PYSPARK_PYTHON"] = env.get("PYSPARK_PYTHON") or env.get("PYTHON") or _detect_python()
-    # PYSPARK_DRIVER_PYTHON
-    result["PYSPARK_DRIVER_PYTHON"] = env.get("PYSPARK_DRIVER_PYTHON") or result["PYSPARK_PYTHON"]
-
-    return result
-
-
-def _find_path(candidates: list[str]) -> str:
-    """返回第一个实际存在的路径，全部不存在则返回第一个候选（让后续测试 skip）。"""
-    for c in candidates:
-        if os.path.isdir(c):
-            return c
-    return candidates[0] if candidates else ""
-
-
-def _detect_python() -> str:
-    """检测可用 Python 解释器路径。"""
-    try:
-        return shutil.which("python3") or shutil.which("python") or ""
-    except Exception:  # noqa: BLE001
-        return ""
-
-
 def _build_spark_env(spark_paths: dict[str, str]) -> dict[str, str]:
-    """根据探测结果设置环境变量，返回 (old_env, need_cleanup)。"""
+    """按探测结果设置环境变量，返回旧环境快照供 fixture teardown 还原."""
     old_env = dict(os.environ)
-    for key, value in spark_paths.items():
-        if value:
-            os.environ.setdefault(key, value)
-    # PATH 前置 hadoop/bin + spark/bin
-    hadoop_bin = os.path.join(os.environ.get("HADOOP_HOME", ""), "bin")
-    spark_bin = os.path.join(os.environ.get("SPARK_HOME", ""), "bin")
-    extra = os.pathsep.join(p for p in (hadoop_bin, spark_bin) if p and os.path.isdir(p))
-    if extra:
-        os.environ["PATH"] = extra + os.pathsep + os.environ.get("PATH", "")
+    apply_spark_env(spark_paths)
     return old_env
 
 

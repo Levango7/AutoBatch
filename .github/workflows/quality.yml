@@ -38,10 +38,10 @@ jobs:
       # Python 3.10：mypy 2.x 最低支持 target/run 均为 3.10（见 pyproject.toml
       # mypy python_version="3.10"）。3.9 仅代码层支持（引擎依赖要求 >=3.10）。
       # -------------------------------------------------------------------------
-      - name: Set up Python 3.10
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.12'
           cache: pip
 
       - name: Install dependencies (runtime + dev)
@@ -49,6 +49,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
+          # 引擎依赖与 ci.yml 对齐：此前 3.10+无引擎依赖组合下 pytest 曾零输出
+          # 秒退（2026-08 连续数轮未定位），对齐绿腿环境以收敛变量
+          pip install "pyspark>=4.0,<5.0" "polars>=1.0,<2.0" "pyarrow>=23.0.1,<25.0" "pyiceberg==0.12.0rc1"
 
       # -------------------------------------------------------------------------
       # 1. ruff lint（pyproject.toml 配置）

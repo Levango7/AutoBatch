@@ -15,8 +15,7 @@ def main() -> int:
         apps = get("http://localhost:8080/api/v1/applications").get("apps", [])
         print("== Master applications ==")
         for a in apps:
-            print(a.get("id"), a.get("name", "")[:50], a.get("state"),
-                  "cores=", a.get("cores"))
+            print(a.get("id"), a.get("name", "")[:50], a.get("state"), "cores=", a.get("cores"))
         if not apps:
             print("(none)")
     except Exception as e:  # noqa: BLE001

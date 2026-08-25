@@ -206,9 +206,7 @@ def _clean_orders_spark(ctx: PipelineContext, log) -> tuple[int, Any, list[str]]
 
         spark_session = ctx.spark_session
         assert spark_session is not None, "spark clean 路径必须持有 SparkSession"
-        ids_df = spark_session.createDataFrame(
-            [(k,) for k in outlier_keys], schema=["_outlier_id"]
-        )
+        ids_df = spark_session.createDataFrame([(k,) for k in outlier_keys], schema=["_outlier_id"])
         df = (
             df.join(F.broadcast(ids_df), df["order_id"] == ids_df["_outlier_id"], "left")
             .withColumn(

@@ -99,22 +99,38 @@ jobs:
             --tb=short -q \
             2>&1 | tee /tmp/pytest-quality.log
 
-      # 失败诊断：FAILED 用例转 ::error:: 注解（公开 API 可读，见 ci.yml 同名步骤）
+      # 失败诊断：FAILED 用例转 ::error:: 注解（公开 API 可读，见 ci.yml 同名步骤）；
+      # 日志同时上传 artifact 双保险。脚本全程容错：诊断自身绝不改变结论.
       - name: Surface failed tests as annotations
         if: failure()
         shell: bash
         run: |
-          grep -E "^(FAILED|ERROR) " /tmp/pytest-quality.log | head -30 | while IFS= read -r line; do
+          set +e
+          LOG=/tmp/pytest-quality.log
+          if [ ! -s "$LOG" ]; then
+            echo "::error::log missing or empty — pytest died before producing output"
+            exit 0
+          fi
+          grep -E "^(FAILED|ERROR) " "$LOG" | head -30 | while IFS= read -r line; do
             echo "::error::${line:0:180}"
           done
-          if grep -qE "^(FAILED|ERROR) " /tmp/pytest-quality.log; then
-            grep -E "^(FAILED|ERROR) " /tmp/pytest-quality.log | head -30
+          if grep -qE "^(FAILED|ERROR) " "$LOG"; then
+            grep -E "^(FAILED|ERROR) " "$LOG" | head -30
           else
             echo "::error::no FAILED lines parsed — dumping log tail for crash diagnosis"
-            tail -40 /tmp/pytest-quality.log | while IFS= read -r line; do
+            tail -40 "$LOG" | while IFS= read -r line; do
               echo "::error::TAIL|${line:0:170}"
             done
           fi
+          exit 0
+
+      - name: Upload pytest log (failure diagnosis)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-quality-log
+          path: /tmp/pytest-quality.log
+          retention-days: 7
 
       # -------------------------------------------------------------------------
       # 5. 上传覆盖率 artifacts（保留 14 天）

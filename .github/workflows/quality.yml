@@ -90,11 +90,13 @@ jobs:
       - name: Collect coverage data
         shell: bash
         run: |
-          set -eo pipefail
-          # 临时二分定位：最小命令集复现"零输出秒退"，逐步加回变量
-          python --version
-          python -m pytest --version
-          python -m pytest tests/test_edge_cases.py -q --tb=long
+          set +e  # 二分诊断模式：任何输出都转为注解带回
+          dump() { while IFS= read -r line; do echo "::error::${1}|${line:0:165}"; done; }
+          python --version > /tmp/q.log 2>&1; echo "pyver_exit=$?" >> /tmp/q.log
+          python -m pytest --version >> /tmp/q.log 2>&1; echo "pytestver_exit=$?" >> /tmp/q.log
+          python -m pytest tests/test_edge_cases.py -q >> /tmp/q.log 2>&1
+          echo "edgecases_exit=$?" >> /tmp/q.log
+          tail -30 /tmp/q.log | dump T
 
       # 失败诊断：FAILED 用例转 ::error:: 注解（公开 API 可读，见 ci.yml 同名步骤）；
       # 日志同时上传 artifact 双保险。脚本全程容错：诊断自身绝不改变结论.

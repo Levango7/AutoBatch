@@ -91,16 +91,10 @@ jobs:
         shell: bash
         run: |
           set -eo pipefail
-          # 环境探针：解释器/关键包版本进日志头部，秒退时可判层
+          # 临时二分定位：最小命令集复现"零输出秒退"，逐步加回变量
           python --version
-          python -c "import pytest, coverage; print('pytest', pytest.__version__, '| coverage', coverage.__version__)"
-          python -m pytest tests/ \
-            -k "not cluster" \
-            --cov=src \
-            --cov-report=xml:coverage.xml \
-            --cov-report=html \
-            --tb=short -q \
-            2>&1 | tee /tmp/pytest-quality.log
+          python -m pytest --version
+          python -m pytest tests/test_edge_cases.py -q --tb=long
 
       # 失败诊断：FAILED 用例转 ::error:: 注解（公开 API 可读，见 ci.yml 同名步骤）；
       # 日志同时上传 artifact 双保险。脚本全程容错：诊断自身绝不改变结论.

@@ -1,0 +1,16 @@
+{
+  "tool": "tools/bench_scale_cluster.py",
+  "started_at": "2026-08-25 05:44:09",
+  "rows_requested": 10000000,
+  "source_size_gb": 0.91,
+  "engine": "spark",
+  "mode": "local(local[8], 12g)",
+  "storage": "parquet/s3(minio)",
+  "shuffle_partitions": 64,
+  "status": "failed",
+  "synth_upload_ms": 13772,
+  "total_wall_ms": 377155,
+  "pipeline_duration_ms": null,
+  "dq_score": null,
+  "stages": []
+}

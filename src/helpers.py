@@ -247,9 +247,12 @@ def _apply_spark_base_config(builder: Any, scfg: dict[str, Any]) -> Any:
     # 结果会超 1G 缺省（2026-08 亿行基准实测 clean 阶段即因此失败），可经配置放大
     if scfg.get("max_result_size"):
         builder = builder.config("spark.driver.maxResultSize", scfg["max_result_size"])
-    # AQE 缺省开启，自动合并小分区、处理倾斜
+    # AQE 缺省开启，自动合并小分区、处理倾斜。
+    # ⚠ 键名必须是 spark.sql.adaptive.enabled——旧代码误用
+    # spark.sql.adaptiveQueryExecution（无效键被 Spark 静默忽略），导致
+    # AQE 实际从未生效（2026-08 亿行基准 OOM 排查中发现）
     aqe = scfg.get("adaptive_query_execution", True)
-    builder = builder.config("spark.sql.adaptiveQueryExecution", "true" if aqe else "false")
+    builder = builder.config("spark.sql.adaptive.enabled", "true" if aqe else "false")
     return builder
 
 

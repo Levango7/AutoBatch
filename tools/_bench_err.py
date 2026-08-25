@@ -9,7 +9,7 @@ def main() -> int:
     if len(sys.argv) < 3:
         print("usage: _bench_err.py <batch> <stage>")
         return 1
-    batch, stage = sys.argv[1], sys.argv[2]
+    batch, stage = sys.argv[1], sys.argv[2].strip(";")
     path = os.path.join("run", batch, "logs", f"{stage}.jsonl")
     with open(path, encoding="utf-8") as f:
         for line in f:

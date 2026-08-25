@@ -204,7 +204,9 @@ def _clean_orders_spark(ctx: PipelineContext, log) -> tuple[int, Any, list[str]]
     if outlier_keys:
         from pyspark.sql import functions as F  # noqa: F811 - 局部别名保持可读
 
-        ids_df = ctx.spark_session.createDataFrame(
+        spark_session = ctx.spark_session
+        assert spark_session is not None, "spark clean 路径必须持有 SparkSession"
+        ids_df = spark_session.createDataFrame(
             [(k,) for k in outlier_keys], schema=["_outlier_id"]
         )
         df = (

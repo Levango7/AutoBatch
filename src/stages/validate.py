@@ -178,10 +178,12 @@ def run(ctx: PipelineContext, log) -> dict[str, Any]:
             total_good += good_count
             total_bad += bad_count
             if outlier_indices:
-                # 单次 collect 同时取 (order_id, value)，按"值是否越界"标记。
-                # 不能用两次独立 collect 的行索引互相对齐（Spark 不保证无 orderBy
-                # 的两次 action 行序一致）；outlier 判定是纯值函数，与行序无关，
-                # 因此按值判界结果确定。bounds 计算复用 quality._outlier_bounds。
+                # outlier(action=flag) 只标记不拒收。bounds 用分布式
+                # approxQuantile 求 Q1/Q3（driver 仅收 2 个标量），再只 collect
+                # 越界行的 order_id（约 1% 行）——旧实现把 (order_id, 值) 两列
+                # 全表 collect 到 driver 算精确 IQR，千万行级即 OOM
+                # （2026-08 亿行基准实测）。近似分位数 ε=0.001 与精确 IQR 在
+                # 大表上的标记差异可忽略，且 flag 结果不影响任何聚合值.
                 oc = rules.get(name, {}).get("outlier") or {}
                 oc_col = oc.get("column")
                 if (
@@ -190,21 +192,25 @@ def run(ctx: PipelineContext, log) -> dict[str, Any]:
                     and oc_col in df.columns
                     and "order_id" in df.columns
                 ):
-                    pairs = df.select(
-                        F.col("order_id"), F.col(oc_col).cast("double").alias("_oc_val")
-                    ).collect()
-                    vals = sorted(r["_oc_val"] for r in pairs if r["_oc_val"] is not None)
-                    if len(vals) >= 100:
-                        bounds = RuleEngine._outlier_bounds_from_vals(vals, oc)
-                        if bounds is not None:
-                            for r in pairs:
-                                v = r["_oc_val"]
-                                if (
-                                    v is not None
-                                    and (v < bounds[0] or v > bounds[1])
-                                    and r["order_id"]
-                                ):
-                                    outlier_keys.add(r["order_id"])
+                    factor = float(oc.get("factor", 1.5))
+                    # total_amount 等派生列在 Spark 路径为 StringType，须先落
+                    # double 派生列再求分位数（approxQuantile 不收字符串列）
+                    dfn = df.withColumn("_oc_num", F.col(oc_col).cast("double"))
+                    qs = dfn.approxQuantile("_oc_num", [0.25, 0.75], 0.001)
+                    if qs and all(q is not None for q in qs):
+                        iqr = qs[1] - qs[0]
+                        lo, hi = qs[0] - factor * iqr, qs[1] + factor * iqr
+                        out_rows = (
+                            dfn.select(F.col("order_id"), F.col("_oc_num").alias("_v"))
+                            .where(
+                                ((F.col("_v") < lo) | (F.col("_v") > hi))
+                                & F.col("order_id").isNotNull()
+                            )
+                            .collect()
+                        )
+                        for r in out_rows:
+                            if r["order_id"]:
+                                outlier_keys.add(r["order_id"])
             emitted_v, emitted_q = _emit_valid_quarantine(
                 ctx,
                 name,

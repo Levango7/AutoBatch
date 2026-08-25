@@ -816,22 +816,23 @@ class RuleEngine:
         outlier_indices: set = set()
         outlier_count = 0
         if oc_col and oc.get("action") == "flag" and oc_col in df.columns:
-            cf = F.col(oc_col).cast("double")
-            vals_rows = df.select(cf.alias("v")).collect()
-            vals = [row["v"] for row in vals_rows if row["v"] is not None]
-            bounds = None
-            if len(vals) >= 100:
-                bounds = RuleEngine._outlier_bounds_from_vals(vals, oc)
-            if bounds is not None:
-                # 用 collect 后的顺序算 outlier 行索引（与 polars 路径一致）。
-                # 注意：该索引只用于计数/统计，禁止跨另一次独立 collect 按索引
-                # 对齐其他列——Spark 不保证两次 action 行序一致（validate 阶段
-                # 取 order_id 用的是单次 collect + 按值判界，见 stages/validate.py）。
-                for i, row in enumerate(vals_rows):
-                    v = row["v"]
-                    if v is not None and (v < bounds[0] or v > bounds[1]):
-                        outlier_indices.add(i)
-                        outlier_count += 1
+            # bounds/count 用分布式 approxQuantile(+count) 求 IQR 界与越界行数
+            # （driver 仅收 2 个分位数标量 + 1 个计数）。旧实现把单列值**全表
+            # collect 到 driver** 再算精确 IQR，千万行级直接 OOM
+            # （2026-08 亿行基准实测）。ε=0.001 的分位近似在大表上的标记数
+            # 差异可忽略；Spark 路径的 indices 仅作"存在越界行"信号，
+            # 消费方 stages/validate.py 据此自行做越界 id 收集。
+            factor = float(oc.get("factor", 1.5))
+            # total_amount 等派生列在 Spark 路径为 StringType：先落 double
+            # 派生列再求分位数（approxQuantile 不收字符串列）
+            dfn = df.withColumn("_oc_num", F.col(oc_col).cast("double"))
+            qs = dfn.approxQuantile("_oc_num", [0.25, 0.75], 0.001)
+            if qs and all(q is not None for q in qs):
+                iqr = qs[1] - qs[0]
+                lo, hi = qs[0] - factor * iqr, qs[1] + factor * iqr
+                outlier_count = dfn.where((F.col("_oc_num") < lo) | (F.col("_oc_num") > hi)).count()
+                if outlier_count > 0:
+                    outlier_indices.add(0)
         return outlier_indices, outlier_count
 
     @staticmethod

@@ -227,6 +227,7 @@ def build_cluster_cfg(
                 "master": master,
                 "shuffle_partitions": shuffle_partitions,
                 "driver_memory": driver_memory,
+                "max_result_size": "6g",
                 "cluster": {"enabled": False, "driver_host": "", "s3_endpoint": ""},
             }
         )
@@ -382,7 +383,11 @@ def main(argv: list[str]) -> int:
         "rows_requested": args.rows,
         "source_size_gb": round(size_gb, 2),
         "engine": "spark",
-        "mode": "cluster(2 workers x 2 cores x 2g)",
+        "mode": (
+            f"local({args.master}, {args.driver_memory})"
+            if args.local_mode
+            else "cluster(2 workers x 2 cores x 2g)"
+        ),
         "storage": "parquet/s3(minio)",
         "shuffle_partitions": args.shuffle_partitions,
         "status": "success" if rc == 0 else "failed",

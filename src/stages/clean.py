@@ -197,11 +197,26 @@ def _clean_orders_spark(ctx: PipelineContext, log) -> tuple[int, Any, list[str]]
 
     # is_anomaly：用 outlier_keys 集合标记（与 Python/Polars 路径语义一致）
     # 用 "1"/"0" 字符串与 Python/Polars 路径写出格式对齐。
+    # 大规模下 isin(数万元素) 会构建巨型表达式树（driver 内存 + 每 task 序列化
+    # 双重爆炸，2026-08 千万行实测 OOM）——改 broadcast join 一张 ids 小表，
+    # 语义等价且内存恒定。
     outlier_keys = list(ctx.outlier_keys)
-    df = df.withColumn(
-        flag_col,
-        F.when(F.col("order_id").isin(outlier_keys), F.lit("1")).otherwise(F.lit("0")),
-    )
+    if outlier_keys:
+        from pyspark.sql import functions as F  # noqa: F811 - 局部别名保持可读
+
+        ids_df = ctx.spark_session.createDataFrame(
+            [(k,) for k in outlier_keys], schema=["_outlier_id"]
+        )
+        df = (
+            df.join(F.broadcast(ids_df), df["order_id"] == ids_df["_outlier_id"], "left")
+            .withColumn(
+                flag_col,
+                F.when(F.col("_outlier_id").isNotNull(), F.lit("1")).otherwise(F.lit("0")),
+            )
+            .drop("_outlier_id")
+        )
+    else:
+        df = df.withColumn(flag_col, F.lit("0"))
 
     # out_fields：base_fields + 新增列，避免重复
     base_fields = df.columns

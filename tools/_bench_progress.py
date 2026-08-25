@@ -10,7 +10,7 @@ def main() -> int:
         print("no run/")
         return 1
     batches = sorted(
-        (d for d in os.listdir(root) if d.startswith("bench-cluster")),
+        (d for d in os.listdir(root) if d.startswith("bench-")),
         key=lambda d: os.path.getmtime(os.path.join(root, d)),
     )
     if not batches:

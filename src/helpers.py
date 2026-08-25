@@ -243,6 +243,10 @@ def _apply_spark_base_config(builder: Any, scfg: dict[str, Any]) -> Any:
         builder = builder.config("spark.driver.memory", scfg["driver_memory"])
     if scfg.get("shuffle_partitions") is not None:
         builder = builder.config("spark.sql.shuffle.partitions", scfg["shuffle_partitions"])
+    # driver 端 action 结果序列化上限：千万行级 join/broadcast 的单 task 序列化
+    # 结果会超 1G 缺省（2026-08 亿行基准实测 clean 阶段即因此失败），可经配置放大
+    if scfg.get("max_result_size"):
+        builder = builder.config("spark.driver.maxResultSize", scfg["max_result_size"])
     # AQE 缺省开启，自动合并小分区、处理倾斜
     aqe = scfg.get("adaptive_query_execution", True)
     builder = builder.config("spark.sql.adaptiveQueryExecution", "true" if aqe else "false")

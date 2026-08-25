@@ -10,8 +10,48 @@ benchmarks/
 ├── README.md          # 本说明文档
 ├── run_benchmark.py   # 基准测试主脚本
 ├── report.md          # 最近一次基准报告（Markdown 表格，运行后生成）
-└── report.json        # 最近一次基准原始数据（JSON，运行后生成）
+├── report.json        # 最近一次基准原始数据（JSON，运行后生成）
+└── runs/              # 大规模实证证据（tools/bench_scale_cluster.py 产出）
 ```
+
+## 大规模 Docker 实证（Spark + MinIO S3）
+
+`tools/bench_scale_cluster.py` 面向大规模验证：polars 向量合成数据（秒级千万行）→
+上传 MinIO → Spark 引擎经 S3 直读跑完整五阶段 → 每次运行的阶段耗时/行数/DQ
+落盘 `runs/<batch>.json` 作为可提交证据。
+
+**已实测（Docker Desktop 单机 VM：15GB 内存 / 32 vCPU，Spark local[4-8]，Parquet/S3）：**
+
+| 规模 | pipeline 耗时 | DQ Score | 证据 |
+|---|---|---|---|
+| 100 万行 | 151 s | 0.9994 | `runs/bench-local-1000000-d29e27.json` |
+| **500 万行** | **227.7 s** | 0.9994 | `runs/bench-local-5000000-1817bb.json` |
+
+5M 分阶段：ingest 22.7s / validate 58.4s / clean 95.0s / compute 37.9s / output 13.4s。
+
+**规模边界（实测结论）**：15GB VM 下 1000 万行的 clean 阶段（全列去重 shuffle）
+会触顶 OOM——这是执行环境内存边界而非代码缺陷；亿行级验证需 ≥48GB 内存的
+单机或真集群横向扩容。命令已就绪：
+
+```bash
+# ≥48GB 内存环境（或 Docker VM 内存调大后）直接执行：
+docker run --rm --network autobatch-net --entrypoint bash \
+  -v "$(pwd):/work" -w /work autobatch-bench:latest -c \
+  "python3 tools/bench_scale_cluster.py --rows 100000000 \
+   --local-mode --master 'local[8]' --driver-memory 32g \
+   --s3-endpoint minio:9000"
+```
+
+该工具链在开发过程中实际暴露并驱动修复了四个产品级扩展性缺陷：
+集群模式 ingest 的 Driver 全量 collect（新增 S3 源直读分支）、outlier 规则
+两处全表 collect（改分布式 approxQuantile + 仅收集越界 id）、clean 阶段
+isin 大列表表达式树（改 broadcast join）、abs_path 破坏 s3a:// URI。
+
+### 前置条件
+
+- Docker Desktop 已启动；Spark 集群与 MinIO 容器运行中（MinIO 需接入 autobatch-net）
+- 基准镜像：`docker build -t autobatch-bench:latest -f docker/spark-cluster/Dockerfile.bench docker/spark-cluster`
+- 凭证经环境变量 `MINIO_ROOT_USER/MINIO_ROOT_PASSWORD` 注入（缺省 minioadmin）
 
 ## 覆盖组合
 

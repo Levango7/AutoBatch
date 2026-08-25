@@ -85,50 +85,25 @@ jobs:
       #    排除 cluster 测试：CI 无 Docker Spark 集群，JVM 检查可能通过但
       #    SparkContext 初始化会失败，导致整个 suite 非零退出
       # -------------------------------------------------------------------------
-      # 显式 shell: bash 使 GHA 以 `bash --noprofile --norc -eo pipefail` 运行：
-      # 默认的 `bash -e {0}` 不含 pipefail，pytest 经 tee 管道后失败会被掩蔽.
+      # 收集逻辑整体在 Python 脚本内（subprocess 直跑 pytest、自行落盘与打
+      # ::error:: 注解），绕开 bash 管道/YAML 层——此前 `pytest | tee` 形态
+      # 在 runner 上出现过零输出秒退且 tee 文件缺失的 shell 层异常（2026-08）。
+      # 脚本退出码 = pytest 退出码：测试失败即本步骤失败（门禁语义不变）。
       - name: Collect coverage data
-        shell: bash
         run: |
-          set +e  # 二分诊断模式：任何输出都转为注解带回
-          dump() { while IFS= read -r line; do echo "::error::${1}|${line:0:165}"; done; }
-          python --version > /tmp/q.log 2>&1; echo "pyver_exit=$?" >> /tmp/q.log
-          python -m pytest --version >> /tmp/q.log 2>&1; echo "pytestver_exit=$?" >> /tmp/q.log
-          python -m pytest tests/test_edge_cases.py -q >> /tmp/q.log 2>&1
-          echo "edgecases_exit=$?" >> /tmp/q.log
-          tail -30 /tmp/q.log | dump T
-
-      # 失败诊断：FAILED 用例转 ::error:: 注解（公开 API 可读，见 ci.yml 同名步骤）；
-      # 日志同时上传 artifact 双保险。脚本全程容错：诊断自身绝不改变结论.
-      - name: Surface failed tests as annotations
-        if: failure()
-        shell: bash
-        run: |
-          set +e
-          LOG=/tmp/pytest-quality.log
-          if [ ! -s "$LOG" ]; then
-            echo "::error::log missing or empty — pytest died before producing output"
-            exit 0
-          fi
-          grep -E "^(FAILED|ERROR) " "$LOG" | head -30 | while IFS= read -r line; do
-            echo "::error::${line:0:180}"
-          done
-          if grep -qE "^(FAILED|ERROR) " "$LOG"; then
-            grep -E "^(FAILED|ERROR) " "$LOG" | head -30
-          else
-            echo "::error::no FAILED lines parsed — dumping log tail for crash diagnosis"
-            tail -40 "$LOG" | while IFS= read -r line; do
-              echo "::error::TAIL|${line:0:170}"
-            done
-          fi
-          exit 0
+          python tools/quality_collect.py tests/ \
+            -k "not cluster" \
+            --cov=src \
+            --cov-report=xml:coverage.xml \
+            --cov-report=html \
+            --tb=short -q
 
       - name: Upload pytest log (failure diagnosis)
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: pytest-quality-log
-          path: /tmp/pytest-quality.log
+          path: benchmarks/quality_pytest.log
           retention-days: 7
 
       # -------------------------------------------------------------------------

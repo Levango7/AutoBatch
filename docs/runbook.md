@@ -4,9 +4,9 @@
 
 - Python 3.9+（Windows / Linux / macOS 均可）
 - 零第三方依赖（仅标准库），无需安装任何包
-- 可选：Polars 1.43+（`pip install polars`，启用 `engine.backend="polars"` 列式加速路径）
+- 可选：Polars>=1.0,<2.0（`pip install polars`，启用 `engine.backend="polars"` 列式加速路径）
 - 可选：PySpark 4.x + JDK 11+ 或 17（`pip install pyspark`，启用 `engine.backend="spark"` 分布式加速路径；Windows 额外需 `winutils.exe` + `hadoop.dll` 并设 `HADOOP_HOME`，详见第 21 节；多机模式需 Docker Desktop + MinIO，详见第 21.3 节）
-- 可选：pyarrow 14+ + minio 7+（`pip install pyarrow minio`，启用 `storage.backend="parquet"` 湖存储路径，详见第 22 节）
+- 可选：pyarrow>=23.0.1,<25.0 + minio 7+（`pip install pyarrow minio`，启用 `storage.backend="parquet"` 湖存储路径，详见第 22 节）
 - 可选：pyiceberg 0.12.0rc1+（`pip install pyiceberg>=0.12.0rc1`，启用 `storage.backend="iceberg"` 湖表路径，详见第 23 节）
 - 可选：Docker 20+（容器化运行）
 - 磁盘：每批 2 万行订单约占用 15~20 MB（含全部中间产物；`storage.backend="parquet"` 时因列式压缩降至 3~6 MB）
@@ -82,7 +82,7 @@
 | storage.backend | 存储介质后端 | `local_csv`（缺省，本地 CSV，向后兼容）/ `parquet`（Parquet 列式存储，本地或 S3/MinIO，需 `pip install pyarrow minio`，详见第 22 节）/ `iceberg`（Iceberg 湖表，ACID + time travel + snapshot diff，需 `pip install pyiceberg>=0.12.0rc1`，详见第 23 节） |
 | storage.bucket | S3/MinIO bucket 名 | `autobatch`（缺省） |
 | storage.endpoint | S3/MinIO endpoint（host:port） | `localhost:9000`（缺省，本地 MinIO） |
-| storage.access_key / secret_key | S3 凭证 | `minioadmin` / `minioadmin`（缺省，MinIO 默认凭证） |
+| storage.access_key / secret_key | S3 凭证 | 缺省空串，无内置回退——`config/pipeline.json` / `pipeline_small.json` 默认省略这两个字段（见其中 `_s3_creds_note`）。解析优先级（`src/io/_s3_parquet.py` `s3_credentials`）：配置显式值 > 环境变量 `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` > 环境变量 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`。连接缺省启动的本地 MinIO 时可显式配 `minioadmin` / `minioadmin` 或 export `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` |
 | storage.secure | 是否用 HTTPS | false（缺省）/ true |
 | storage.region | S3 region | `us-east-1`（缺省） |
 | storage.warehouse | warehouse 子路径（bucket 下的逻辑仓库根） | `warehouse`（缺省） |
@@ -173,40 +173,44 @@
 
 ## 9. 测试运行方式
 
-项目内置 pytest 测试套件（344 个用例），位于 `tests/`：
+项目内置 pytest 测试套件（437 个用例，2026-08-27 `pytest --collect-only` 实测），位于 `tests/`：
 
 ```
 python -m pytest tests/ -v
 ```
 
-测试覆盖范围（22 个测试模块，Windows 本地 Python 3.14 基线：322 passed + 22 skipped——skip 为环境相关用例）：
+测试覆盖范围（26 个测试模块 + conftest.py；Windows 本地 Python 3.14 全量回归：419 passed + 18 skipped + 0 failed——18 个 skip 为 `test_engine_spark.py` 本地模式用例因缺 `hadoop.dll` 的环境跳过，属正常；其余环境相关用例在 MinIO / Docker 集群 / Iceberg JAR 未就绪时由 `skipif` 自动跳过）：
 
 | 文件 | 覆盖内容 | 用例数 |
 |---|---|---|
 | tests/test_benchmark.py | 基准测试：4 个 engine × storage 组合完整 pipeline 耗时对比，默认 skip 需 `--runslow` 启用 | 6 |
 | tests/test_config_schema.py | 配置 schema 校验：合法/非法 backend、fail_at、多余键、最小配置等 12 个场景 | 12 |
+| tests/test_dispatch.py | backend 分派：按 backend 路由到对应实现、参数透传、未知 backend（flink/duckdb/空串/大小写异常）回退 python、异常传播、ENGINES 常量等 19 个场景 | 19 |
 | tests/test_edge_cases.py | 边界条件：零行/单行数据、空值/混合空值 CSV、空 state/manifest/metrics、聚合单行与空串数值、rmtree_retry 删除重试、s3_credentials 环境变量回退等 39 个场景 | 39 |
-| tests/test_engine_polars.py | 4 个 Polars 等价性场景：全量产物与 python 路径一致、DQ Score in [0.95, 1.0] 且 lineage/metrics 正确、增量 + Polars 组合、Parquet 格式条件 skip | 4 |
-| tests/test_engine_spark.py | 3 个 Spark 等价性场景：全量产物与 python 路径一致、DQ Score in [0.95, 1.0] 且 lineage/metrics 正确、增量 + Spark 组合；Windows 缺 `hadoop.dll` 时 `skipif` 跳过本地模式 | 3 |
-| tests/test_engine_spark_cluster.py | 4 个 Spark 多机模式场景：多机+S3 全量产物与 local_csv 一致、多 executor 并行、增量+多机+S3 组合、Worker 数量；Docker 集群不可用时跳过 | 4 |
+| tests/test_engine_polars.py | 5 个 Polars 等价性场景：全量产物与 python 路径一致、DQ Score in [0.95, 1.0] 且 lineage/metrics 正确、增量 + Polars 组合、Parquet 格式条件 skip、增量 + 空白 tier 分桶 customer_value 聚合 | 5 |
+| tests/test_engine_spark.py | 3 个 Spark 本地模式等价性场景：全量产物与 python 路径一致、DQ Score in [0.95, 1.0] 且 lineage/metrics 正确、增量 + Spark 组合；Windows 缺 `hadoop.dll` 时 `skipif` 跳过本地模式 | 3 |
+| tests/test_engine_spark_cluster.py | 4 个 Spark 多机模式场景：多机+S3 全量产物与 local_csv 一致（`test_cluster_spark_s3_equivalence`）、多 executor 并行、增量+多机+S3 组合、Worker 数量；Docker 集群不可用时跳过 | 4 |
 | tests/test_error_handling.py | 28 个错误处理加固场景：正常执行不受影响、可配置重试次数、重试成功、超时控制、幂等性、StageExecutionError/StageTimeoutError 上下文、幂等清理不触碰 state/ | 28 |
 | tests/test_generator.py | 数据生成器：customers/products/orders 行数、字段完整性、ID 格式、值域、缺陷注入（缺失/负数/非法状态/坏日期/孤儿外键）、同 seed 可复现等 26 个场景 | 26 |
-| tests/test_incremental.py | 5 个增量场景：首次增量=全量 + 建水位、无新数据二跑零增量、追加新数据后只处理新增行且聚合 merge 正确、失败重跑幂等水位不推进、`enabled:false` 全量回归行为不变 | 5 |
+| tests/test_incremental.py | 8 个增量场景：首次增量=全量 + 建水位、无新数据二跑零增量、追加新数据后只处理新增行且聚合 merge 正确、失败重跑幂等水位不推进、`enabled:false` 全量回归行为不变、resume 联动水位单次推进、resume 输出失败后提交暂存水位、批次台账幂等跳过 merge | 8 |
+| tests/test_ingest_edge.py | ingest 边界：行缺字段映射 None、零值保留与空串归一、水位日期/datetime ISO 规范化、数值水位一次性告警、polars parquet delta 经 table_write 写出（含空 delta）等 10 个场景 | 10 |
 | tests/test_lineage.py | 血缘 manifest：默认值、set_source、add_stage/artifact/edge、finish、to_dict JSON 往返、lineage_view 图视图等 23 个场景 | 23 |
 | tests/test_logging_setup.py | 日志：BatchLogFilter 默认注入、JSON Formatter 序列化/异常/时间戳、级别解析回退、handler 幂等创建与关闭等 22 个场景 | 22 |
 | tests/test_metrics.py | 指标：recorder 默认值、record_stage 追加与 extra、finish、to_dict 扁平化（pipeline/stage 级）、save 往返等 14 个场景 | 14 |
 | tests/test_monitoring.py | 28 个监控告警场景：MetricsSampler.sample()、AlertChecker.check() DQ Score 低于阈值、stage duration 超阈值、无超阈值返回空、check_alerts() 多批次、HealthServer start/stop、monitoring.enabled=false 不启用 | 28 |
+| tests/test_openlineage.py | 20 个 OpenLineage 血缘事件测试：event 结构 / parent facet / NDJSON 写出 / HTTP 上报容错 / 确定性 runId；纯单元级，零外部依赖 | 20 |
+| tests/test_output_artifacts.py | 输出产物：血缘边注册后存活、强制反斜杠 relpath 守护、目录产物登记与 digest 稳定、跨盘符 rel_to_root 回退、Spark append 不覆盖已有表/缺表回退建表/overwrite 语义、catalog_uri 相对路径解析、stage 日志 close 幂等等 15 个场景 | 15 |
 | tests/test_pipeline_e2e.py | 端到端冒烟：pipeline success、DQ Score 落区间、manifest 血缘非空、metrics.json 存在、各表行数、KPI 一致性（daily_sales/category_stats 收入对账）等 14 个场景 | 14 |
-| tests/test_quality.py | 8 类质量规则的正例与反例（completeness / uniqueness / range / allowed_values / format / date_valid / referential / outlier）+ referential 性能回归（2 万行外键检查秒级完成） | 17 |
+| tests/test_quality.py | 28 个场景：8 类质量规则的正例与反例（completeness / uniqueness / range / allowed_values / format / date_valid / referential / outlier）+ referential 性能回归（2 万行外键检查秒级完成）+ null 键唯一性豁免 / format 前缀锚定 / 秒级精度 date_valid 边界 / Spark 空 DataFrame 守护 | 28 |
+| tests/test_resume.py | 24 个断点续跑测试：resume 触发条件（disabled/auto batch/no manifest/success status/version drift/digest drift）/ 产物完整性检查（主输出目录判据 + validate 需批次根 quality_summary.json）/ lineage_decl 持久化 / 干净数据 e2e 续跑回归锁 / validate、clean 失败后续跑 e2e（增量与全量模式 DQ 等价）；纯单元级，零外部依赖 | 24 |
 | tests/test_spark_iceberg.py | 10 个 Spark+Iceberg 三合一场景：8 个 `skipif` 环境守护（pyiceberg/pyspark/Docker/MinIO/Iceberg JAR 不可用）+ 2 个 config 验证 Spark Iceberg connector 注入 | 10 |
-| tests/test_stages.py | ingest / validate / clean / compute / output 五个 stage 单测 | 5 |
-| tests/test_state.py | StateStore：水位/snapshot id 两阶段提交、失败不推进、聚合 merge 累加与派生列重算、原子写等 26 个场景 | 26 |
+| tests/test_stages.py | 7 个 stage 单测：ingest / validate / clean / compute / output + clean 折扣语义（python / polars 两分支） | 7 |
+| tests/test_state.py | StateStore：水位/snapshot id 两阶段提交、失败不推进、聚合 merge 累加与派生列重算、原子写、批次台账（ledger 去重/上限/陈旧标记清理）等 41 个场景 | 41 |
 | tests/test_storage_iceberg.py | 13 个 Iceberg 湖表场景：等价性 / ACID / time travel / schema evolution / snapshot diff 增量 / 增量+Iceberg / SQL catalog / REST catalog；pyiceberg 未安装时 `skipif` 跳过 | 13 |
 | tests/test_storage_parquet.py | 4 个 Parquet 湖存储场景：本地 Parquet 全量产物与 local_csv 一致、S3 MinIO Parquet 全量产物与 local_csv 一致、Parquet 压缩比基准、增量 + Parquet 组合；MinIO 不可用时 `skipif` 跳过 | 4 |
-| tests/test_openlineage.py | 20 个 OpenLineage 血缘事件测试：event 结构 / parent facet / NDJSON 写出 / HTTP 上报容错 / 确定性 runId；纯单元级，零外部依赖 | 20 |
-| tests/test_resume.py          | 21 个断点续跑测试：resume 触发条件（disabled/auto batch/no manifest/success status/version drift/digest drift）/ 产物完整性检查（主输出目录判据 + validate 需批次根 quality_summary.json）/ lineage_decl 持久化 / 干净数据 e2e 续跑回归锁；纯单元级，零外部依赖 | 21 |
+| tests/test_tools_quality_collect.py | tools/quality_collect.py 脚本：命令由 argv + 解释器组装、空 argv 构造、subprocess.run 调用参数、成功写合并日志与 marker、非零/中断返回码透传、failed/error 行注解（含 30 行上限与 180 字符截断）、尾部 dump 截断、None 流处理、入口冒烟等 14 个场景 | 14 |
 
-合计 344 个用例。
+合计 437 个用例（26 个测试模块 + conftest.py 共 27 个文件）。
 
 `pytest.ini` 已配置 `testpaths = tests` 与 `pythonpath = .`，从项目根直接运行即可，无需额外参数。增量测试用 `conftest.py` 的 `inc_env` 夹具隔离 state 目录与数据目录，互不污染。Spark 本地模式测试用 `pytest.mark.skipif` 在 Windows 缺 `hadoop.dll` 或未装 `pyspark` 时跳过，代码逻辑完整，装齐环境后可直接运行。Spark 多机模式测试在 Docker Desktop / MinIO 不可用时跳过。Parquet S3 测试用 `pytest.mark.skipif` 在 MinIO 不可达时跳过，本地 Parquet 测试无需 MinIO 即可运行。OpenLineage 与断点续跑测试为纯单元级，不依赖任何外部服务。
 
@@ -217,7 +221,7 @@ python -m pytest tests/ -v
 - **触发**：ci.yml 在 push（main / master / release/*）或提交 PR 时运行；quality.yml 同。
 - **矩阵**：ubuntu-latest × Python 3.10 / 3.11 / 3.12 + macos-latest × 3.12 单腿（POSIX 兼容验证；fail-fast 关闭，各节点独立报告）。
 - **步骤**：Checkout → 安装依赖（runtime + pyspark/polars/pyarrow/pyiceberg 可选引擎）→ `python -m pytest tests/ -v -k "not cluster"`（全量测试 + 覆盖率；Spark 集群用例需本地 Docker 集群，CI 中显式排除）→ `python main.py --config config/pipeline_small.json`（流水线冒烟）；另有独立 pip-audit 依赖安全扫描 job。
-- **quality.yml**：ruff lint + ruff format 校验 + mypy 类型检查（Python 3.12，依赖与 CI 绿腿对齐）+ pytest 覆盖率收集（经 `tools/quality_collect.py`，失败用例自动转 ::error:: 注解）+ `coverage report --fail-under=60` 门禁。已知事项：覆盖率收集步骤在 GHA runner 上存在启动层平台故障（2026-08 连续多轮未定位），已显式降级为非阻塞并在 yml 内注释恢复条件；pytest 断言职责由 ci.yml 承担。
+- **quality.yml**：ruff lint + ruff format 校验 + mypy 类型检查（Python 3.12，依赖与 CI 绿腿对齐）+ 60% 覆盖率门禁。门禁现状（任务78 起）：门禁由 `pytest --cov=src --cov-fail-under=60` 直出承担——门禁判断 = pytest 退出码，测试失败或覆盖率低于 60% 任一情形 job 直接失败。旧方案的独立门禁步骤（`coverage report --fail-under=60`）依赖 `tools/quality_collect.py` 收集步骤的成功状态，而该步骤在 GHA runner 上存在启动层平台故障（2026-08 连续多轮未定位），导致门禁曾事实从未执行；任务78 移除中间条件判断后门禁不再失效。`quality_collect.py` 收集步骤现保留 `continue-on-error: true` 仅做 pytest 日志归档（失败用例自动转 ::error:: 注解），不参与门禁；平台故障恢复后若不再需要归档可连同上传步骤一并移除。
 
 任一矩阵节点失败即 CI 标红，保证主干始终可运行且测试通过。
 
@@ -227,7 +231,7 @@ python -m pytest tests/ -v
 docker compose up --build
 ```
 
-- 镜像 python:3.13.1-slim，无任何第三方依赖。
+- 镜像基于 python:3.13.1-slim 多阶段构建（根目录 `Dockerfile`）：builder 阶段 `pip install -r requirements.txt` 装入全部运行时依赖（polars / pyspark / pyarrow / minio / psutil / pydantic / pyiceberg / sqlalchemy），runtime 阶段拷贝到 `/app/vendor` 并经 `PYTHONPATH` 注入；非 root 用户运行，HEALTHCHECK 校验入口模块可导入。注意：python:3.13.1 未纳入 CI 测试矩阵（CI 为 3.10–3.12 + macOS 3.12），镜像内版本组合属已知验证盲区（见 ci.yml 注释）。
 - ./run、./data、./config 以 volume 挂载，结果持久化在宿主机。
 - 重复执行会生成新批次目录；日志输出到容器 stdout。
 
@@ -501,7 +505,7 @@ Phase 2a 列式加速 + Phase 2b 分布式加速能力通过 `config/pipeline.js
 
 **切换到 Polars**：
 
-1. 安装依赖：`pip install polars`（一次性，Polars 1.43+）
+1. 安装依赖：`pip install polars`（一次性，Polars>=1.0,<2.0）
 2. 修改配置：`config/pipeline.json` 或 `pipeline_small.json` 的 `engine.backend` 改为 `"polars"`
 3. 运行：`python main.py --config config/pipeline_small.json`
 4. 验证产物：与 `backend="python"` 路径产物完全一致（行数、聚合值、DQ Score、manifest lineage、metrics）。`tests/test_engine_polars.py::test_polars_full_run_equals_python` 自动覆盖此等价性
@@ -533,13 +537,13 @@ Phase 2a 列式加速 + Phase 2b 分布式加速能力通过 `config/pipeline.js
 
 | 现象 | 原因与处理 |
 |---|---|
-| `ModuleNotFoundError: No module named 'polars'` | 未安装 polars。处理：`pip install polars`（1.43+）。`backend="python"` 路径不受影响，无需安装 |
-| `AttributeError: 'Expr' object has no attribute 'is_first'` | Polars 1.43+ 移除了 `Expr.is_first()`，改用 `is_first_distinct()`。当前代码已用 `is_first_distinct()`，若报此错说明 polars 版本过旧，升级到 1.43+ |
-| Polars 路径产物与 python 路径不一致 | 不应发生。`tests/test_engine_polars.py::test_polars_full_run_equals_python` 覆盖此等价性。若观察到差异，检查：① polars 版本是否 1.43+；② config 是否还残留其他改动；③ 上游数据是否在运行间被修改 |
+| `ModuleNotFoundError: No module named 'polars'` | 未安装 polars。处理：`pip install polars`（requirements.txt 约束 `>=1.0,<2.0`）。`backend="python"` 路径不受影响，无需安装 |
+| `AttributeError: 'Expr' object has no attribute 'is_first'` | Polars 1.x 移除了旧语义的 `Expr.is_first()`，改用 `is_first_distinct()`。当前代码已用 `is_first_distinct()`，若报此错说明 polars 版本过旧，升级到 1.0+（requirements.txt 约束 `polars>=1.0,<2.0`） |
+| Polars 路径产物与 python 路径不一致 | 不应发生。`tests/test_engine_polars.py::test_polars_full_run_equals_python` 覆盖此等价性。若观察到差异，检查：① polars 版本是否 1.0+；② config 是否还残留其他改动；③ 上游数据是否在运行间被修改 |
 | `pl.read_csv` 日期解析失败（日期列变成 Utf8） | `engine.polars.read_options.try_parse_dates` 缺省 `true` 会自动解析。若日期格式非标准（如 `2026/08/15`），Polars 可能不识别，该列保留 Utf8，下游 format / date_valid 规则仍用 Python 逐行算 mask，不影响正确性 |
 | `engine.format="parquet"` 时产物路径多了 `.parquet` 后缀 | 设计如此。`table_write` 在 parquet 格式下自动补 `.parquet` 后缀，`table_read` 同样自动尝试 `.parquet`。CSV 与 Parquet 产物不会混存 |
 | Polars 路径比 python 路径慢 | 不应发生。若观察到，可能：① 数据量太小（< 1000 行），Polars 启动开销大于收益；② polars 版本过旧；③ 单线程机器（Polars 多线程收益为 0）。处理：小数据量用 `backend="python"` |
-| `engine.backend="polars"` + `incremental.enabled=true` 行为异常 | 两能力正交叠加，`tests/test_engine_polars.py::test_polars_incremental_combination` 覆盖。若观察到异常，检查 state 目录是否被污染（删除 `state/` 重建），或 polars 版本是否 1.43+ |
+| `engine.backend="polars"` + `incremental.enabled=true` 行为异常 | 两能力正交叠加，`tests/test_engine_polars.py::test_polars_incremental_combination` 覆盖。若观察到异常，检查 state 目录是否被污染（删除 `state/` 重建），或 polars 版本是否 1.0+ |
 | Parquet 写出报 `ComputeError` 类型推断失败 | 某列含混合类型或全 null。处理：在 `engine.polars.read_options` 加 `infer_schema_length=10000` 增加推断样本，或显式声明 schema（当前未暴露 schema 配置，可临时改 `backend="python"` 跑通后对账） |
 
 ## 21. Spark 配置与运行（Phase 2b）
@@ -685,7 +689,7 @@ socat TCP-LISTEN:9000,fork,reuseaddr TCP:minio:9000 &
 
 **步骤 4：配置 AutoBatch 多机模式**
 
-配置示例（摘自 `config/pipeline_small.json` 的 `engine` + `storage` 段）
+配置示例（摘自 `config/pipeline_small.json` 的 `engine` + `storage` 段；切换多机时需把 `engine.backend` / `master` / `cluster.enabled` / `storage.backend` 改为如下值——config 文件缺省省略 `access_key` / `secret_key`，凭证经环境变量注入，见下方说明）
 
 ```json
 "engine": {
@@ -713,8 +717,6 @@ socat TCP-LISTEN:9000,fork,reuseaddr TCP:minio:9000 &
   "backend": "parquet",
   "bucket": "autobatch",
   "endpoint": "localhost:9000",
-  "access_key": "minioadmin",
-  "secret_key": "minioadmin",
   "secure": false,
   "region": "us-east-1",
   "warehouse": "warehouse",
@@ -722,6 +724,11 @@ socat TCP-LISTEN:9000,fork,reuseaddr TCP:minio:9000 &
   "compression": "zstd"
 }
 ```
+
+S3 凭证注入（二者择一，解析优先级见 `src/io/_s3_parquet.py` `s3_credentials`）：
+
+- 环境变量（推荐，避免凭证进版本库）：`export MINIO_ROOT_USER=minioadmin` + `export MINIO_ROOT_PASSWORD=minioadmin`（或 AWS 风格 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`）；Windows 用 `$env:MINIO_ROOT_USER="minioadmin"`
+- 或在 `storage` 段显式加 `"access_key": "..."` / `"secret_key": "..."`（显式配置优先于环境变量；生产凭证切勿提交版本控制）
 
 `engine.spark.cluster` 子段说明：
 
@@ -848,23 +855,21 @@ Phase 3 湖存储能力通过 `config/pipeline.json` 的 `storage` 段开启，�
 | `backend` | `local_csv`（缺省）/ `parquet` | 存储介质后端。`local_csv` 走现有 CSV 路径，零依赖，向后兼容；`parquet` 走 Parquet 列式存储路径（本地 `.parquet` 文件或 S3/MinIO 远端存储），需 `pip install pyarrow minio` |
 | `bucket` | str | S3/MinIO bucket 名，如 `autobatch`。`backend="parquet"` 且配了 `bucket` + `endpoint` 时走 S3 路径；不配或清空 `endpoint` 时降级为本地 `.parquet` 文件 |
 | `endpoint` | host:port | S3/MinIO endpoint，如 `localhost:9000`（本地 MinIO）/ `minio:9000`（Docker 内）/ `s3.amazonaws.com`（AWS S3） |
-| `access_key` | str | S3 access key。MinIO 默认 `minioadmin` |
-| `secret_key` | str | S3 secret key。MinIO 默认 `minioadmin` |
+| `access_key` | str | S3 access key。代码缺省空串、无内置回退；config 文件默认省略本字段，经显式配置或环境变量 `MINIO_ROOT_USER` 注入（连接缺省 MinIO 实例时其服务端凭证为 `minioadmin`） |
+| `secret_key` | str | S3 secret key。同上，环境变量为 `MINIO_ROOT_PASSWORD`（或 AWS 风格 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`），解析优先级见 `src/io/_s3_parquet.py` `s3_credentials` |
 | `secure` | bool | 是否用 HTTPS。本地 MinIO 缺省 `false`，云上 S3 缺省 `true` |
 | `region` | str | S3 region。缺省 `us-east-1`，MinIO 不强制 region |
 | `warehouse` | str | warehouse 子路径（bucket 下的逻辑仓库根）。缺省 `warehouse`。逻辑路径 `orders/orders_clean` 解析为 `s3://bucket/warehouse/orders/orders_clean.parquet` |
 | `prefix` | str | bucket 下额外前缀（多租户隔离用）。缺省 `""`。如 `tenant_a/` 让所有产物落到 `s3://bucket/tenant_a/warehouse/...` |
 | `compression` | str | Parquet 压缩算法。`zstd`（缺省，压缩比与速度综合最优）/ `snappy`（速度优先）/ `gzip`（兼容性最好）/ `none`（不压缩） |
 
-配置示例（摘自 `config/pipeline.json`）：
+配置示例（摘自 `config/pipeline.json`；`access_key` / `secret_key` 默认省略，凭证经环境变量注入，见 §4 与 `_s3_creds_note`）：
 
 ```json
 "storage": {
   "backend": "local_csv",
   "bucket": "autobatch",
   "endpoint": "localhost:9000",
-  "access_key": "minioadmin",
-  "secret_key": "minioadmin",
   "secure": false,
   "region": "us-east-1",
   "warehouse": "warehouse",
@@ -951,15 +956,13 @@ s3://<bucket>/<prefix>/<warehouse>/<path>.parquet
 
 配了 `bucket` + `endpoint` 时，`storage.backend="parquet"` 走 S3/MinIO 远端存储：产物写到 `s3://bucket/warehouse/.../*.parquet`，任意节点通过 S3 协议访问。
 
-配置示例（S3/MinIO Parquet 模式，摘自 `config/pipeline.json` 的 `storage` 段）：
+配置示例（S3/MinIO Parquet 模式；config 文件缺省省略 `access_key` / `secret_key`，凭证经环境变量 `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` 注入或在此显式配置）：
 
 ```json
 "storage": {
   "backend": "parquet",
   "bucket": "autobatch",
   "endpoint": "localhost:9000",
-  "access_key": "minioadmin",
-  "secret_key": "minioadmin",
   "secure": false,
   "region": "us-east-1",
   "warehouse": "warehouse",
@@ -991,16 +994,16 @@ s3://<bucket>/<prefix>/<warehouse>/<path>.parquet
 
 | 现象 | 原因与处理 |
 |---|---|
-| `ModuleNotFoundError: No module named 'pyarrow'` | 未安装 pyarrow。处理：`pip install pyarrow`（14+）。`storage.backend="local_csv"` 路径不受影响，无需安装 |
+| `ModuleNotFoundError: No module named 'pyarrow'` | 未安装 pyarrow。处理：`pip install pyarrow`（requirements.txt 约束 `>=23.0.1,<25.0`）。`storage.backend="local_csv"` 路径不受影响，无需安装 |
 | `ModuleNotFoundError: No module named 'minio'` | 未安装 minio SDK。处理：`pip install minio`（7+）。仅 S3 模式 bucket 初始化与迁移脚本需要，本地 Parquet 模式不需要 |
 | MinIO 连接失败（`ConnectionRefusedError` / `EndpointConnectionError`） | MinIO 未启动或 endpoint 配置错误。处理：① 确认 MinIO 已启动（`docker ps` 看容器状态）；② 确认 `storage.endpoint` 正确（本地 `localhost:9000`，Docker 内 `minio:9000`）；③ 确认端口未被占用（`netstat -an \| findstr 9000`） |
 | `S3Error: The specified bucket does not exist` | bucket 未创建。处理：在 MinIO 控制台或用 mc / minio SDK 创建 bucket（见第 22.2 节）。`tests/test_storage_parquet.py` 的 `_minio_available` 会自动尝试 `make_bucket`，但生产环境应预先创建 |
-| `S3Error: Access Denied` / `InvalidAccessKeyId` | 凭证错误。处理：确认 `storage.access_key` / `secret_key` 与 MinIO 实例配置一致。MinIO 默认 `minioadmin` / `minioadmin`，生产环境可能已修改 |
+| `S3Error: Access Denied` / `InvalidAccessKeyId` | 凭证错误。处理：确认凭证与 MinIO 实例配置一致——解析优先级为 `storage.access_key` / `secret_key` 显式配置 > 环境变量 `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` > `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`（见 `src/io/_s3_parquet.py` `s3_credentials`）；config 缺省省略凭证字段、代码无内置回退，未注入凭证时以空串访问必然被拒。缺省启动的本地 MinIO 服务端凭证为 `minioadmin` / `minioadmin`，生产环境可能已修改 |
 | `OSError: [WinError 123]` 路径含非法字符 | Windows 下 S3 URI 被误当本地路径。处理：确认 `storage.backend="parquet"` 已生效（`_get_storage_backend` 读 `cfg["storage"]["backend"]`），且 `bucket` + `endpoint` 已配（否则 `_is_s3_target` 可能误判为本地） |
 | `ArrowIOError: Failed to open Parquet file` | S3 上文件不存在或路径解析错误。处理：① 用 MinIO 控制台或 mc 检查 `s3://bucket/warehouse/...` 路径是否存在；② 确认 `storage.warehouse` / `prefix` 配置与产物路径拼接一致（见第 22.3 节） |
-| `pyarrow.lib.ArrowInvalid: Unsupported compression type` | pyarrow 版本过旧，不支持 `zstd`。处理：升级 pyarrow 到 14+（`pip install --upgrade pyarrow`）。或改用 `snappy` / `gzip`（`storage.compression="snappy"`） |
-| Parquet 路径产物与 local_csv 路径不一致 | 不应发生。`tests/test_storage_parquet.py::test_local_parquet_equivalence` + `test_s3_parquet_equivalence` 覆盖此等价性。若观察到差异，检查：① pyarrow 版本是否 14+；② config 是否还残留其他改动；③ 上游数据是否在运行间被修改 |
-| `storage.backend="parquet"` + `incremental.enabled=true` 行为异常 | 两能力正交叠加，`tests/test_storage_parquet.py::test_incremental_parquet` 覆盖。若观察到异常，检查 state 目录是否被污染（删除 `state/` 重建），或 pyarrow 版本是否 14+ |
+| `pyarrow.lib.ArrowInvalid: Unsupported compression type` | pyarrow 版本过旧，不支持 `zstd`。处理：升级 pyarrow 到 23.0.1+（`pip install --upgrade pyarrow`，requirements.txt 约束 `>=23.0.1,<25.0`）。或改用 `snappy` / `gzip`（`storage.compression="snappy"`） |
+| Parquet 路径产物与 local_csv 路径不一致 | 不应发生。`tests/test_storage_parquet.py::test_local_parquet_equivalence` + `test_s3_parquet_equivalence` 覆盖此等价性。若观察到差异，检查：① pyarrow 版本是否 23.0.1+；② config 是否还残留其他改动；③ 上游数据是否在运行间被修改 |
+| `storage.backend="parquet"` + `incremental.enabled=true` 行为异常 | 两能力正交叠加，`tests/test_storage_parquet.py::test_incremental_parquet` 覆盖。若观察到异常，检查 state 目录是否被污染（删除 `state/` 重建），或 pyarrow 版本是否 23.0.1+ |
 | Parquet 文件比 CSV 还大 | 不应发生（除非数据量极小或列过多）。处理：① 确认 `storage.compression` 不是 `none`；② 极小数据集（< 100 行）Parquet 元数据开销可能超过压缩收益，改用 `local_csv`；③ 检查数据是否已高度压缩（如全是重复值），此时列式压缩收益有限 |
 
 ## 23. Iceberg 湖表运维（Phase 4）
@@ -1255,13 +1258,16 @@ Docker Spark 集群（`docker/spark-cluster/`）通过构建 ARG `ENABLE_ICEBERG
 - `ENABLE_ICEBERG=false`（缺省）：不装 Iceberg JAR，镜像小，纯 Spark + Parquet
 - `ENABLE_ICEBERG=true`：构建时打入 `iceberg-spark-runtime-4.1_2.13-1.11.0.jar` + 对应 extensions 配置
 
-命令示例：构建带 Iceberg 的 Spark 镜像
+命令示例：构建带 Iceberg 的 Spark 集群并启动（up.ps1 -BuildArg 工作流，任务71）
 
-```bash
-docker build -t autobatch-spark:iceberg \
-  --build-arg ENABLE_ICEBERG=true \
-  -f docker/spark-cluster/Dockerfile .
+```powershell
+pwsh docker/spark-cluster/up.ps1 -BuildArg @("--build-arg","ENABLE_ICEBERG=true","--build-arg","SPARK_VERSION=4.1.0")
 ```
+
+- **两个 `--build-arg` 必须一起传**：Dockerfile 有构建期断言——`ENABLE_ICEBERG=true` 要求 `SPARK_VERSION=4.1.0`（Iceberg JAR 最高支持 Spark 4.1，见 §23.5.2），只传 `ENABLE_ICEBERG=true` 构建会 fail-fast
+- up.ps1 带 `-BuildArg` 时先 `docker compose build @BuildArg`（splatting 透传）再 `docker compose up -d`；缺省不带参时走 `docker compose up -d --build`（该路径不携带构建参数，不能用于传 `--build-arg`）
+- `docker-compose.yml` 三个服务均声明无值 build args（`SPARK_VERSION` / `ENABLE_ICEBERG`），取值由 `-BuildArg` 或宿主同名环境变量提供，两者都缺时落回 Dockerfile ARG 默认值（4.2.0 / false）
+- 若确需绕过 up.ps1 手工构建单镜像（如只验证构建），等价命令：`docker build -t autobatch-spark:iceberg --build-arg ENABLE_ICEBERG=true --build-arg SPARK_VERSION=4.1.0 -f docker/spark-cluster/Dockerfile .`；但集群运行仍须经 docker compose（容器名/网络/健康检查由 compose 文件定义），手工构建的镜像名需与 compose `image` / `build` 约定一致才能被复用
 
 #### 23.5.2 Spark 4.1 降级说明
 
@@ -1273,7 +1279,7 @@ docker build -t autobatch-spark:iceberg \
 
 #### 23.5.3 配置示例
 
-配置示例（Spark + Iceberg 三合一）
+配置示例（Spark + Iceberg 三合一；Iceberg connector 配置统一放 `storage.iceberg` 段——`src/pipeline.py` `_init_spark_session` 在 `storage.backend="iceberg"` 时读取该段并注入 SparkSession，与 `config/pipeline.json` 实际字段一致）：
 
 ```json
 "engine": {
@@ -1285,28 +1291,23 @@ docker build -t autobatch-spark:iceberg \
     "executor_memory": "2g",
     "executor_cores": 2,
     "num_executors": 2,
-    "adaptive_query_execution": true,
-    "extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
-    "catalog": {
-      "autobatch": {
-        "type": "rest",
-        "catalog_uri": "http://localhost:8181",
-        "warehouse": "s3://autobatch/warehouse"
-      }
-    }
+    "adaptive_query_execution": true
   }
 },
 "storage": {
   "backend": "iceberg",
   "iceberg": {
+    "catalog_name": "autobatch",
     "catalog_type": "rest",
     "catalog_uri": "http://localhost:8181",
-    "warehouse": "s3://autobatch/warehouse"
+    "warehouse": "s3://autobatch/warehouse",
+    "spark_extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
+    "spark_catalog_class": "org.apache.iceberg.spark.SparkCatalog"
   }
 }
 ```
 
-`engine.spark.extensions` 注册 Iceberg Spark extensions（解锁 `MERGE INTO` / `UPDATE` / `DELETE` 等 Iceberg SQL 语法）；`engine.spark.catalog.autobatch` 把 Iceberg catalog 注册为 Spark catalog 名 `autobatch`，故 Spark 表名是 `autobatch.warehouse.orders`。
+`storage.iceberg.spark_extensions` / `spark_catalog_class` 注入为 `spark.sql.extensions` 与 `spark.sql.catalog.<catalog_name>`（解锁 `MERGE INTO` / `UPDATE` / `DELETE` 等 Iceberg SQL 语法并注册 Iceberg catalog 实现）；`catalog_type` / `catalog_uri` / `warehouse` 注入为 `spark.sql.catalog.<catalog_name>.type` / `.uri` / `.warehouse`（见 `src/pipeline.py`）。`catalog_name` 缺省 `autobatch`，注册后 Spark 表名是 `autobatch.warehouse.orders`（pyiceberg 侧仍用 `warehouse.orders`，无 catalog 前缀）。
 
 #### 23.5.4 Spark 原生读写 Iceberg
 
@@ -1346,7 +1347,7 @@ WHEN NOT MATCHED THEN INSERT *
 | catalog 连接失败（`ConnectionRefusedError` / `CatalogNotFound`） | catalog 服务未启动或 uri 配置错误。处理：① SQL catalog：确认 `uri` 路径可写（`sqlite:///autobatch.db` 在项目根生成）；② REST catalog：`docker ps` 确认 iceberg-rest 容器运行，`curl http://localhost:8181` 确认可达；③ 确认 `storage.iceberg.catalog_type` 与 `uri` 匹配（sql→sqlite，rest→http） |
 | `NoSuchTableError: warehouse.orders` | 表不存在。处理：① 首次写入会自动建表，确认 `storage.backend="iceberg"` 已生效；② 若手工删过 catalog 元数据，用 `tools/parquet_to_iceberg_migrate.py` 重新注册；③ 确认表名 namespace 正确（pyiceberg 用 `warehouse.orders`，Spark 用 `autobatch.warehouse.orders`） |
 | `NoSuchSnapshotError` 或 snapshot id 无效 | `read_history_snapshot(table_name, snapshot_id)` 的 snapshot_id 不存在。处理：先用 `list_snapshots(table_name)` 查有效 snapshot_id 列表，确认传入的 id 在列表中。snapshot id 是 long 型，注意不要传成字符串 |
-| Spark + Iceberg `ClassNotFoundException: org.apache.iceberg.spark...` | Iceberg JAR 未装入 Spark。处理：① 确认 Docker 构建时 `--build-arg ENABLE_ICEBERG=true`；② 确认 `engine.spark.extensions` 已注册 IcebergSparkSessionExtensions；③ 确认 JAR 在 `/opt/spark/jars/`（`docker exec spark-master ls /opt/spark/jars/ \| findstr iceberg`） |
+| Spark + Iceberg `ClassNotFoundException: org.apache.iceberg.spark...` | Iceberg JAR 未装入 Spark。处理：① 确认 Docker 构建时 `--build-arg ENABLE_ICEBERG=true` 与 `--build-arg SPARK_VERSION=4.1.0` 一起传入；② 确认 `storage.iceberg.spark_extensions` 已配置（缺省值即 IcebergSparkSessionExtensions，`src/pipeline.py` 会注入 `spark.sql.extensions`）；③ 确认 JAR 在 `/opt/spark/jars/`（`docker exec spark-master ls /opt/spark/jars/ \| findstr iceberg`） |
 | Spark + Iceberg `NoSuchMethodError` / 版本不匹配 | Iceberg JAR 与 Spark 版本不兼容。Iceberg JAR 最高支持 Spark 4.1，当前 Docker 用 Spark 4.2。处理：把 Spark 降级到 4.1（`--build-arg SPARK_VERSION=4.1.0` + `pip install pyspark==4.1.0`），详见第 24.5.2 节 |
 | Spark 表名 `autobatch.warehouse.orders` 找不到但 pyiceberg `warehouse.orders` 能读 | Spark 与 pyiceberg 表名解析差异。Spark 表名格式 `<catalog>.<namespace>.<table>`，pyiceberg 是 `<namespace>.<table>`。处理：Spark 调用加 catalog 前缀 `autobatch.warehouse.orders`，pyiceberg 调用用 `warehouse.orders` |
 | `incremental.mode="iceberg_snapshot_diff"` 不生效 | 检查：① `incremental.enabled` 是否为 `true`；② `storage.backend` 是否为 `"iceberg"`（snapshot diff 依赖 Iceberg 表）；③ `state/state.json` 是否还残留旧 `watermark_value`（从 `high_watermark` 切换时需删除 `state/` 重建） |
@@ -1384,7 +1385,7 @@ WHEN NOT MATCHED THEN INSERT *
 
 **切换到本地 Parquet**：
 
-1. 安装依赖：`pip install pyarrow`（一次性，pyarrow 14+）
+1. 安装依赖：`pip install pyarrow`（一次性，pyarrow>=23.0.1,<25.0）
 2. 修改配置：`config/pipeline.json` 或 `pipeline_small.json` 的 `storage.backend` 改为 `"parquet"`，不配 `bucket` / `endpoint`（或清空 `endpoint`）
 3. 运行：`python main.py --config config/pipeline_small.json`
 4. 验证产物：与 `storage.backend="local_csv"` 路径产物内容完全一致（行数、聚合值、DQ Score、manifest lineage、metrics）。`tests/test_storage_parquet.py::test_local_parquet_equivalence` 自动覆盖此等价性
@@ -1392,7 +1393,7 @@ WHEN NOT MATCHED THEN INSERT *
 
 **切换到 S3/MinIO Parquet**：
 
-1. 安装依赖：`pip install pyarrow minio`（一次性，pyarrow 14+ + minio 7+）
+1. 安装依赖：`pip install pyarrow minio`（一次性，pyarrow>=23.0.1,<25.0 + minio 7+）
 2. 启动 MinIO + 创建 bucket（见第 22.2 节）
 3. 修改配置：`config/pipeline.json` 或 `pipeline_small.json` 的 `storage.backend` 改为 `"parquet"`，配 `bucket="autobatch"` + `endpoint="localhost:9000"` + 凭证
 4. 运行：`python main.py --config config/pipeline_small.json`

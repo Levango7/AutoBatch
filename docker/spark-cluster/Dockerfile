@@ -236,19 +236,32 @@ RUN if [ "${ENABLE_ICEBERG}" = "true" ]; then \
         echo ">>> Phase 5: ENABLE_ICEBERG=false，跳过 Iceberg JAR 安装（保持 Spark ${SPARK_VERSION} 兼容）"; \
     fi
 
-# ── 非 root 用户（UID/GID 1000，与 K8s/securityContext 约定一致） ─
+# ── 非 root 用户（UID/GID 自适应，与 K8s/securityContext 约定一致） ─
 # Spark Master/Worker 日志写到 ${SPARK_HOME}/logs/，需对 spark 用户可写。
 # 基础镜像（Ubuntu）可能已有 UID 1000 的用户（如 ubuntu）：此时 spark 复用
 # 默认 UID 而非固定 1000，避免 useradd 冲突导致构建失败。
-RUN if ! id -u spark >/dev/null 2>&1; then \
+#
+# 关键修复（2026-08-26）：chown -R /opt/spark 走符号链接时，在 containerd
+# snapshotter 下出现过 logs/work 子目录属主未生效（root:root）的问题——
+# 运行时 spark-daemon.sh 对日志目录 touch 探测失败后尝试 chown 又因非 root
+# 失败，导致 Master/Worker "failed to launch"。因此这里显式 readlink -f
+# 解析真实路径后再 mkdir+chown，并以 spark 身份做写入自验证（失败即中止
+# 构建，避免带病镜像）。
+RUN set -eux; \
+    if ! id -u spark >/dev/null 2>&1; then \
         if id -u 1000 >/dev/null 2>&1; then \
             useradd -m spark; \
         else \
             useradd -m -u 1000 spark; \
         fi; \
-    fi && \
-    mkdir -p /opt/spark/logs /opt/spark/work && \
-    chown -R spark:spark /opt/spark
+    fi; \
+    SPARK_REAL_HOME=$(readlink -f /opt/spark); \
+    echo ">>> Spark real home: ${SPARK_REAL_HOME}"; \
+    mkdir -p "${SPARK_REAL_HOME}/logs" "${SPARK_REAL_HOME}/work"; \
+    chown -R spark:spark "${SPARK_REAL_HOME}"; \
+    chown -h spark:spark /opt/spark; \
+    su -s /bin/bash spark -c "touch '${SPARK_REAL_HOME}/logs/.rwtest' && rm '${SPARK_REAL_HOME}/logs/.rwtest' && touch '${SPARK_REAL_HOME}/work/.rwtest' && rm '${SPARK_REAL_HOME}/work/.rwtest'"; \
+    ls -ld "${SPARK_REAL_HOME}" "${SPARK_REAL_HOME}/logs" "${SPARK_REAL_HOME}/work"
 
 # ── 入口脚本 ────────────────────────────────────────────────────
 COPY --chown=spark:spark entrypoint.sh /opt/entrypoint.sh

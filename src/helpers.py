@@ -41,6 +41,7 @@ from .io._s3_parquet import (  # noqa: F401
     _table_exists,
     _table_read_parquet,
     _table_write_parquet,
+    apply_s3a_hadoop_conf,
 )
 
 if TYPE_CHECKING:  # avoid runtime circular import: lineage imports helpers
@@ -205,6 +206,11 @@ def _get_spark_session(cfg: dict[str, Any]) -> Any:
     spark_cfg = cfg.get("engine", {}).get("spark", {}) or {}
     builder = SparkSession.builder
     builder = _apply_spark_base_config(builder, spark_cfg)
+    # parquet+S3 场景注入 fs.s3a.* 凭证/endpoint（与 pipeline._init_spark_session
+    # 同一组键值）。缺失时重建的 session 无凭证读 s3a://，报
+    # NoAuthWithAWSException——典型触发路径：run_pipeline 结束 spark.stop() 后，
+    # table_read 惰性重建 session 读 MinIO 产物（2026-08-26 cluster 测试实测）。
+    builder = apply_s3a_hadoop_conf(builder, cfg)
     return builder.getOrCreate()
 
 

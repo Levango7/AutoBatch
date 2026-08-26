@@ -596,14 +596,29 @@ def spark_cluster_env(_same_drive_tmp_root, request):
     if not _spark_master_reachable():
         pytest.skip("Spark Master not reachable at localhost:15077")
 
+    # 多机模式：PYSPARK_PYTHON 是 Worker 端 Python 路径（Docker 容器内为
+    # python3）。必须在 detect_spark_paths/_build_spark_env 之前占位——否则
+    # 探测到的宿主机 Windows 路径会被 apply_spark_env 抢先注入 os.environ，
+    # 并在 SparkContext 创建时快照为 ctx.pythonExec（pyspark context.py:
+    # "self.pythonExec = os.environ.get('PYSPARK_PYTHON', 'python3')"）打包进
+    # 每个 PythonFunction 分发到容器内 executor；该 Windows 路径在 Linux 容器
+    # 中不存在 → "Cannot run program ... error=2" 任务级失败。
+    os.environ.setdefault("PYSPARK_PYTHON", "python3")
     # 跨平台探测 Spark/Hadoop 路径（环境变量优先，系统路径次之，Windows 回退）
     spark_paths = detect_spark_paths()
     old_env = _build_spark_env(spark_paths)
-    # 多机模式：PYSPARK_PYTHON 是 Worker 端 Python 路径（Docker 容器内为 python3），
-    # PYSPARK_DRIVER_PYTHON 是 Driver 端 Python 路径（宿主机路径）
-    os.environ.setdefault("PYSPARK_PYTHON", "python3")
-    if not os.environ.get("PYSPARK_DRIVER_PYTHON"):
-        os.environ["PYSPARK_DRIVER_PYTHON"] = spark_paths.get("PYSPARK_PYTHON", "python")
+    # PYSPARK_DRIVER_PYTHON 是 Driver 端 Python 路径（宿主机路径）。detect 链条
+    # 会把 DRIVER 缺省为 worker 侧的 "python3" 占位值，因此以进入本 fixture 前
+    # 的外部配置（old_env 快照）为准：外部显式设置则尊重，未设置则回指宿主机
+    # 解释器（Windows 上无 python3 命令，不能沿用占位值）。
+    # 兜底值须过滤 cmd 不安全字符（空格/括号等）：PySpark bin\*.cmd 批处理展开
+    # %PYSPARK_DRIVER_PYTHON% 时会被 "(x86)" 截断 if/for 块直接崩溃；此时回退
+    # 裸命令名交由 PATH 解析。
+    if not old_env.get("PYSPARK_DRIVER_PYTHON"):
+        _driver_py = shutil.which("python") or ""
+        if any(_c in _driver_py for _c in " ()&^%!"):
+            _driver_py = "python"
+        os.environ["PYSPARK_DRIVER_PYTHON"] = _driver_py
 
     work_dir = tempfile.mkdtemp(prefix="autobatch_cluster_", dir=_same_drive_tmp_root)
 
@@ -912,8 +927,8 @@ MINIO_AVAILABLE = _minio_available()
 def _pyiceberg_available() -> bool:
     """检查 PyIceberg 是否可用（导入测试 + 基础功能）。"""
     try:
-        import pyiceberg  # noqa: F401
         import pyarrow  # noqa: F401
+        import pyiceberg  # noqa: F401
         return True
     except Exception:  # noqa: BLE001
         return False

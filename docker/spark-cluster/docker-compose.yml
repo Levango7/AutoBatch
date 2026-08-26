@@ -13,8 +13,12 @@ services:
     environment:
       SPARK_MODE: master
     ports:
-      - "15077:7077"   # Spark Master RPC
-      - "8080:8080"   # Master Web UI
+      # 显式绑定 127.0.0.1：规避 Windows 上 0.0.0.0 通配绑定的幽灵占用
+      # （GetActiveTcpListeners 可见无属主的 0.0.0.0:8080 监听，导致
+      #  com.docker.backend 报 "ports are not available"；具体 IP 绑定可共存）
+      # 测试/Driver 均通过 localhost 访问，127.0.0.1 绑定完全满足需求
+      - "127.0.0.1:15077:7077"   # Spark Master RPC
+      - "127.0.0.1:8080:8080"    # Master Web UI / REST API
     networks:
       - autobatch-net
     healthcheck:
@@ -37,7 +41,7 @@ services:
       SPARK_WORKER_CORES: "2"
       SPARK_WORKER_MEMORY: 2g
     ports:
-      - "8081:8081"   # Worker-1 Web UI
+      - "127.0.0.1:8081:8081"   # Worker-1 Web UI
     networks:
       - autobatch-net
     depends_on:
@@ -64,7 +68,7 @@ services:
       SPARK_WORKER_CORES: "2"
       SPARK_WORKER_MEMORY: 2g
     ports:
-      - "8082:8081"   # Worker-2 Web UI → 宿主机 8082
+      - "127.0.0.1:8082:8081"   # Worker-2 Web UI → 宿主机 8082
     networks:
       - autobatch-net
     depends_on:

@@ -29,13 +29,14 @@ from typing import Any
 
 import pytest
 
-from src.helpers import ROOT, VERSION, abs_path, json_load, json_save
+from src.helpers import ROOT, VERSION, abs_path, csv_read, json_load, json_save
 from src.lineage import Manifest
 from src.pipeline import (
     _load_resume_plan,
     _stage_outputs_intact,
     run_pipeline,
 )
+from src.state import StateStore
 
 
 # ----------------------------------------------------------------------
@@ -330,3 +331,189 @@ def test_e2e_resume_clean_data_with_openlineage(_same_drive_tmp_root, request):
     # validate：第一次运行真实执行（START→COMPLETE），续跑批次跳过时补发 COMPLETE
     validate_events = [e for e in events if e["job"]["name"] == "testns.validate"]
     assert [e["eventType"] for e in validate_events] == ["START", "COMPLETE", "COMPLETE"]
+
+
+# ----------------------------------------------------------------------
+# 任务 #74 C1+C2+C4：续跑恢复内存态与增量提交（端到端）
+# ----------------------------------------------------------------------
+def _max_order_date(orders_csv: str) -> str:
+    """源文件中的最大 order_date（bad_date 缺陷在增量 fixture 中已关闭）."""
+    rows, _ = csv_read(orders_csv)
+    return max(r["order_date"] for r in rows if r.get("order_date"))
+
+
+def test_resume_after_validate_failure_incremental(inc_env):
+    """C1+C2+C4：增量批次 validate 失败 → 同 batch_id 续跑.
+
+    修复前缺陷：
+      - C1：续跑跳过 ingest 后 ctx.ingested 为空 → validate 重跑零校验
+        （DQ 虚报，quality checks_total=0）.
+      - C2：staged 水位随崩溃进程丢失 → 提交阶段无水位可提升，
+        下一批次重复聚合翻倍.
+    本测试锁定：validate 真实执行（checks_total>0）、staged 水位从失败
+    manifest 恢复并经续跑提交恰好提升一次、台账登记、聚合落正式路径.
+    """
+    env = inc_env
+    cfg = env["cfg"]
+    cfg["error_handling"]["resume"] = True
+    state_dir = env["state_dir"]
+    batch_id = "test-inc-" + uuid.uuid4().hex[:8]
+    run_dir = os.path.join(env["run_root"], batch_id)
+
+    # --- run1：validate 注入失败 ---
+    rc1 = run_pipeline(cfg, batch_id, fail_at="validate")
+    assert rc1 == 1
+
+    # 失败 manifest 必须携带续跑所需内存态（C1+C2 写侧）
+    manifest1 = json_load(os.path.join(run_dir, "manifest.json"))
+    ingest1 = next(s for s in manifest1["stages"] if s["name"] == "ingest")
+    assert ingest1["status"] == "success"
+    assert ingest1.get("ingested"), "ingest 条目应持久化 ingested 文件列表（C1）"
+    assert ingest1.get("staged_state"), "ingest 条目应持久化 staged 水位（C2）"
+    assert ingest1["staged_state"].get("tables"), "staged_state 应含 tables 段"
+
+    # 失败不推进水位（两阶段提交）
+    store = StateStore(state_dir)
+    assert not store.is_batch_merged(store.load(), batch_id)
+
+    # --- run2：同 cfg 同 batch_id 续跑 ---
+    rc2 = run_pipeline(cfg, batch_id, fail_at="")
+    assert rc2 == 0
+
+    manifest2 = json_load(os.path.join(run_dir, "manifest.json"))
+    by_name = {s["name"]: s for s in manifest2["stages"]}
+    assert by_name["ingest"].get("resumed") is True
+    assert by_name["validate"].get("resumed") is not True, "validate 必须重跑"
+
+    # C1：validate 真实执行（非空转）——质量检查数 > 0，valid 产物重建
+    quality = json_load(os.path.join(run_dir, "quality_summary.json"))
+    assert quality["checks_total"] > 0, "续跑 validate 不得零校验空转（C1）"
+    assert os.listdir(os.path.join(run_dir, "02_valid"))
+
+    # C2+C4：staged 水位恢复后提交恰好一次
+    state = store.load()
+    info = state["tables"]["orders"]
+    assert info["watermark_value"] == _max_order_date(env["orders_path"]), (
+        "续跑成功后 staged 水位应恢复并正式提升（修复前：staged 丢失、水位不推进）"
+    )
+    assert info["cumulative_row_count"] == info["last_seen_row_count"] > 0, (
+        "水位必须恰好推进一次（cumulative == 本批 seen，无双提交）"
+    )
+    assert "new_watermark" not in info
+    assert batch_id in state.get("merged_batches", []), "台账应登记批次"
+    # C4：聚合从暂存替换进正式路径
+    assert os.path.isfile(os.path.join(state_dir, "aggregates", "daily_sales.csv"))
+
+
+def test_resume_after_clean_failure_restores_outlier_keys(inc_env, monkeypatch):
+    """C1：clean 失败续跑 → clean 重跑时拿到 run1 validate 持久化的 outlier_keys.
+
+    用 spy 捕获续跑 clean 收到的 ctx.outlier_keys，与失败 manifest 中
+    validate 条目持久化的列表对比（修复前续跑 ctx 全新 → clean 缺键）。
+    """
+    import src.stages.clean as clean_mod
+
+    env = inc_env
+    cfg = env["cfg"]
+    cfg["error_handling"]["resume"] = True
+    batch_id = "test-inc-" + uuid.uuid4().hex[:8]
+    run_dir = os.path.join(env["run_root"], batch_id)
+
+    # --- run1：clean 注入失败（ingest/validate 已成功）---
+    rc1 = run_pipeline(cfg, batch_id, fail_at="clean")
+    assert rc1 == 1
+
+    manifest1 = json_load(os.path.join(run_dir, "manifest.json"))
+    validate1 = next(s for s in manifest1["stages"] if s["name"] == "validate")
+    assert validate1["status"] == "success"
+    # validate 条目持久化了 outlier_keys（可能为空集 → 键缺省；空集时续跑
+    # 行为与缺省一致，round-trip 语义仍然成立）
+    persisted_keys = validate1.get("outlier_keys")
+
+    # --- run2：续跑，spy 捕获 clean 收到的 ctx ---
+    captured: dict[str, Any] = {}
+    orig_run = clean_mod.run
+
+    def _spy(ctx, log):
+        captured["outlier_keys"] = set(ctx.outlier_keys)
+        return orig_run(ctx, log)
+
+    monkeypatch.setattr(clean_mod, "run", _spy)
+    rc2 = run_pipeline(cfg, batch_id, fail_at="")
+    assert rc2 == 0
+
+    manifest2 = json_load(os.path.join(run_dir, "manifest.json"))
+    by_name = {s["name"]: s for s in manifest2["stages"]}
+    assert by_name["ingest"].get("resumed") is True
+    assert by_name["validate"].get("resumed") is True
+    assert by_name["clean"].get("resumed") is not True, "clean 必须重跑"
+
+    # clean 真实执行并消费了恢复的 outlier_keys（C1 round-trip）
+    expected = set(persisted_keys or [])
+    assert captured.get("outlier_keys") == expected, (
+        f"续跑 clean 的 outlier_keys 应与 run1 validate 持久化值一致: "
+        f"captured={captured.get('outlier_keys')}, persisted={persisted_keys}"
+    )
+    # 续跑 manifest 的 validate 条目继续携带该键（二次失败仍可恢复）
+    if persisted_keys is not None:
+        assert by_name["validate"].get("outlier_keys") == persisted_keys
+
+
+def test_resume_after_validate_failure_full_mode_dq_equivalence(_same_drive_tmp_root, request):
+    """C1 全量模式回归：validate 失败续跑后的 DQ 必须等价于一次成功批次.
+
+    同配置同种子生成两份确定性数据：控制批次一次跑成功，实验批次
+    fail_at=validate 后续跑成功。修复前后者 validate 空转（DQ=1.0/零校验），
+    与控制批次 DQ 明显不等；修复后两者检查数与 DQ 完全一致。
+    """
+    from src.generator import main as gen_main
+
+    def _make_env(tag: str) -> tuple[dict[str, Any], str]:
+        work_dir = tempfile.mkdtemp(prefix=f"resume_full_{tag}_", dir=_same_drive_tmp_root)
+        cfg = json_load(abs_path("config/pipeline_small.json"))
+        data_dir = os.path.join(work_dir, "data", "raw")
+        cfg["generator"]["output_dir"] = data_dir
+        gen_main(cfg)
+        cfg["generator"]["enabled"] = False
+        cfg["source"]["files"] = {
+            "orders": os.path.join(data_dir, "orders.csv"),
+            "customers": os.path.join(data_dir, "customers.csv"),
+            "products": os.path.join(data_dir, "products.csv"),
+        }
+        run_root = os.path.join(ROOT, "run")
+        os.makedirs(run_root, exist_ok=True)
+        cfg["pipeline"]["run_dir"] = run_root
+        cfg["error_handling"]["resume"] = True
+        return cfg, run_root
+
+    # --- 控制批次：一次成功 ---
+    cfg_ctrl, run_root_ctrl = _make_env("ctrl")
+    bid_ctrl = "test-resume-full-ctrl-" + uuid.uuid4().hex[:6]
+    run_dir_ctrl = os.path.join(run_root_ctrl, bid_ctrl)
+    request.addfinalizer(lambda: shutil.rmtree(run_dir_ctrl, ignore_errors=True))
+    rc_ctrl = run_pipeline(cfg_ctrl, bid_ctrl, fail_at="")
+    assert rc_ctrl == 0
+    quality_ctrl = json_load(os.path.join(run_dir_ctrl, "quality_summary.json"))
+
+    # --- 实验批次：validate 失败 → 续跑 ---
+    cfg_exp, run_root_exp = _make_env("exp")
+    bid_exp = "test-resume-full-exp-" + uuid.uuid4().hex[:6]
+    run_dir_exp = os.path.join(run_root_exp, bid_exp)
+    request.addfinalizer(lambda: shutil.rmtree(run_dir_exp, ignore_errors=True))
+    rc1 = run_pipeline(cfg_exp, bid_exp, fail_at="validate")
+    assert rc1 == 1
+    rc2 = run_pipeline(cfg_exp, bid_exp, fail_at="")
+    assert rc2 == 0
+
+    manifest2 = json_load(os.path.join(run_dir_exp, "manifest.json"))
+    by_name = {s["name"]: s for s in manifest2["stages"]}
+    assert by_name["ingest"].get("resumed") is True
+    quality_exp = json_load(os.path.join(run_dir_exp, "quality_summary.json"))
+
+    # 续跑 validate 真实执行：检查数非零，且与控制批次一致（确定性数据）
+    assert quality_exp["checks_total"] > 0, "续跑 validate 不得零校验（C1）"
+    assert quality_exp["checks_total"] == quality_ctrl["checks_total"]
+    assert quality_exp["dq_score"] == quality_ctrl["dq_score"], (
+        f"续跑 DQ {quality_exp['dq_score']} 应等价于一次成功批次 "
+        f"{quality_ctrl['dq_score']}（修复前 validate 空转会虚报 1.0）"
+    )

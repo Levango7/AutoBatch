@@ -9,6 +9,8 @@
 2. test_polars_dq_score_in_range            — polars 全量 DQ Score in [0.95, 1.0]、lineage/metrics 正确
 3. test_polars_incremental_combination      — 增量 + polars：首次建水位、二跑零增量、追加只处理新增
 4. test_polars_parquet_format               — engine.format="parquet" 时 pipeline 跑通（若当前阶段未支持则 skip）
+5. test_polars_incremental_cv_blank_tier_bucket — 增量 customer_value/tier buckets：
+   历史客户空 tier 分桶 fallback unknown，polars 与 python 完全等价（任务76）
 """
 
 from __future__ import annotations
@@ -327,3 +329,68 @@ def test_polars_parquet_format(polars_env):
     assert p_final_count == csv_final_count, (
         f"parquet format orders_final 行数 {p_final_count} 应等于 csv format {csv_final_count}"
     )
+
+
+# ----------------------------------------------------------------------
+# 场景 5: 增量 customer_value —— 历史客户空 tier 分桶等价（任务76）
+# ----------------------------------------------------------------------
+def test_polars_incremental_cv_blank_tier_bucket():
+    """历史客户 tier 为空串时，polars 与 python 增量 buckets 完全等价。
+
+    关键分歧（已修复）：python ``history_meta[cid]["tier"] or "unknown"``
+    把空 tier 分桶到 "unknown"；旧 polars ``coalesce(tier_h, tier)`` 只跳
+    null 不跳 ""，历史客户空 tier 落进 "" 桶，两引擎 tier 表不一致。
+    修复后 tier_for_agg 用 ``_blank_to_null`` 把 "" 视同缺失。
+
+    同时验证：
+    - cv 行历史客户的 tier/city 保留历史空串原样（python cv 行不做
+      or "unknown" fallback，tier_for_agg 才 fallback）
+    - customers 只统计真新客户（不在 history_meta 的），历史客户不计
+    """
+    pl = pytest.importorskip("polars")
+
+    from src.stages.compute import (
+        _customer_value_incremental,
+        _customer_value_incremental_polars,
+        _df_to_dicts,
+    )
+
+    orders = [
+        {"customer_id": "C1", "total_amount": "100.00"},
+        {"customer_id": "C2", "total_amount": "200.00"},
+        {"customer_id": "C3", "total_amount": "300.00"},
+    ]
+    customers = [{"customer_id": "C3", "tier": "gold", "city": "上海"}]
+    history_meta = {
+        "C1": {"tier": "", "city": ""},  # 历史客户：空 tier（分歧触发点）
+        "C2": {"tier": "silver", "city": "北京"},  # 历史客户：正常 tier
+    }
+
+    cv_py, tiers_py = _customer_value_incremental(orders, customers, history_meta)
+    cv_pl, tiers_pl = _customer_value_incremental_polars(
+        pl.DataFrame(orders), pl.DataFrame(customers), history_meta
+    )
+    cv_pl_dicts = _df_to_dicts(cv_pl)
+    tiers_pl_dicts = _df_to_dicts(tiers_pl)
+
+    # cv 行与 python 完全一致（顺序：revenue 降序 C3/C2/C1，rank 1/2/3）
+    assert cv_py == cv_pl_dicts
+    c1_py = next(r for r in cv_py if r["customer_id"] == "C1")
+    c1_pl = next(r for r in cv_pl_dicts if r["customer_id"] == "C1")
+    assert c1_py["tier"] == "" and c1_pl["tier"] == "", "历史空 tier 在 cv 行保持原样 ''"
+    assert c1_py["city"] == "" and c1_pl["city"] == ""
+
+    # tier 分桶与 python 完全一致；空串桶修复为 "unknown"
+    assert tiers_py == tiers_pl_dicts
+    tier_names = {t["tier"] for t in tiers_pl_dicts}
+    assert tier_names == {"gold", "silver", "unknown"}, (
+        f"历史空 tier 应分桶到 unknown，实际: {tier_names}"
+    )
+    by_tier = {t["tier"]: t for t in tiers_pl_dicts}
+    # customers 只计真新客户（C3）；历史客户 C1/C2 不重复计数
+    assert by_tier["unknown"]["customers"] == 0
+    assert by_tier["silver"]["customers"] == 0
+    assert by_tier["gold"]["customers"] == 1
+    assert by_tier["unknown"]["revenue"] == 100.0
+    assert by_tier["silver"]["revenue"] == 200.0
+    assert by_tier["gold"]["revenue"] == 300.0

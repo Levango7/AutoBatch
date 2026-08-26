@@ -34,6 +34,42 @@ from src.helpers import (
 from src.lineage import Manifest
 from src.pipeline import config_digest, run_pipeline
 
+
+# ----------------------------------------------------------------------
+# 命令行选项：--runslow（任务73 / #69审查H3 修复）
+# ----------------------------------------------------------------------
+def pytest_addoption(parser):
+    """注册 --runslow 命令行选项，用于显式启用基准/慢速测试.
+
+    选项必须定义在 conftest.py（会话级插件入口）才能对任意 pytest 调用生效。
+    此前该选项定义在 tests/test_benchmark.py 模块内，只有该模块被收集时才注册，
+    导致单文件运行（如 pytest tests/test_stages.py --runslow）报
+    "unrecognized arguments: --runslow"。
+    """
+    parser.addoption(
+        "--runslow",
+        action="store_true",
+        default=False,
+        help="显式启用基准测试（tests/test_benchmark.py，默认跳过，因为耗时长）",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    """基准测试默认跳过的统一控制点（任务73 / #69审查H3 修复）.
+
+    tests/test_benchmark.py 内的用例不再挂无条件 @pytest.mark.skip 装饰器，
+    收集阶段在此统一打 skip 标记，保持单一机制：
+      - 未传 --runslow：跳过全部基准用例（默认回归计数 18 skipped 含此 6 项）
+      - 传了 --runslow：用例真正执行（环境缺失时用例内部自行按 skipif 兜底）
+    """
+    if config.getoption("--runslow", default=False):
+        return
+    skip_benchmark = pytest.mark.skip(reason="基准测试默认跳过，显式传 --runslow 启用")
+    for item in items:
+        if item.path.name == "test_benchmark.py":
+            item.add_marker(skip_benchmark)
+
+
 # 会话内创建过的沙箱根目录（_same_drive_tmp_root），sessionfinish 时二次清扫.
 # teardown 单次 rmtree 可能因 Windows 句柄延迟释放失败，这里兜底再删一遍，
 # 避免盘根积累 autobatch_test_* 残留。
@@ -929,6 +965,7 @@ def _pyiceberg_available() -> bool:
     try:
         import pyarrow  # noqa: F401
         import pyiceberg  # noqa: F401
+
         return True
     except Exception:  # noqa: BLE001
         return False
@@ -964,28 +1001,8 @@ def iceberg_env(_same_drive_tmp_root, request):
     if not PYICEBERG_AVAILABLE:
         pytest.skip("pyiceberg not installed or unavailable")
 
-    work_dir = tempfile.mkdtemp(prefix="autobatch_iceberg_", dir=_same_drive_tmp_root)
-    """Iceberg storage 测试环境：SQL catalog + SQLite + 本地 warehouse.
-
-    在同盘临时目录下复制 pipeline_small.json，把 storage.backend 改为 "iceberg"，
-    配 SQL catalog（SQLite，零额外服务），warehouse 指向本地临时目录.
-    调用 generator 生成 data/raw/{orders,customers,products}.csv，把 source.files
-    指向生成文件，run_dir 指向 ROOT/run.
-
-    返回 dict:
-        cfg            — 已配置好的配置 dict（storage.backend="iceberg"）
-        cfg_path       — 配置文件路径
-        work_dir       — 工作目录（绝对路径，同盘）
-        data_dir       — data/raw 目录
-        run_root       — run 根目录（ROOT/run）
-        warehouse_dir  — Iceberg warehouse 目录
-        catalog_db     — SQLite catalog 数据库路径
-        orders_path    — orders.csv 路径
-        customers_path — customers.csv 路径
-        products_path  — products.csv 路径
-
-    cleanup: 测试结束后清理本 fixture 创建的 test-iceberg-* run_dir.
-    """
+    # 仅创建一次 work_dir；此前此处出现过 mkdtemp + 重复 docstring 的粘贴残留，
+    # 第一个临时目录没有任何变量/finalizer 引用，每跑一个用例就泄漏一个目录（任务73 修复）。
     work_dir = tempfile.mkdtemp(prefix="autobatch_iceberg_", dir=_same_drive_tmp_root)
 
     cfg = _load_small_config()

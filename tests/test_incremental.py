@@ -14,13 +14,16 @@ state 目录和数据目录，run_dir 用唯一 batch_id 隔离。
 from __future__ import annotations
 
 import copy
+import logging
 import os
 import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
-from src.helpers import abs_path, csv_read, csv_write, json_load
-from src.pipeline import run_pipeline
+from src.helpers import PipelineContext, abs_path, csv_read, csv_write, json_load
+from src.lineage import Manifest
+from src.pipeline import _advance_and_merge, run_pipeline
+from src.state import StateStore
 
 
 # ----------------------------------------------------------------------
@@ -359,3 +362,164 @@ def test_full_mode_regression(inc_env):
     assert "stages" in metrics
     assert len(metrics["stages"]) == 5
     assert metrics["status"] == "success"
+
+
+# ----------------------------------------------------------------------
+# 场景 6（任务 #74 C2+C4）：resume 后水位恰好推进一次，追加新数据不翻倍
+# ----------------------------------------------------------------------
+def test_resume_incremental_watermark_advance_once(inc_env):
+    """validate 失败 → 同 batch_id 续跑成功：staged 水位恢复并提升恰好一次；
+    再追加新数据跑第三批：旧日期桶不得重复累加（修复前双倍聚合回归锁）.
+
+    修复前缺陷链：崩溃丢失 staged 水位 → 续跑提交无水位可提升 →
+    第三批从旧水位重读本批增量 → daily_sales 旧桶翻倍。
+    """
+    env = inc_env
+    cfg = env["cfg"]
+    cfg["error_handling"]["resume"] = True
+    state_dir = env["state_dir"]
+    daily_path = os.path.join(state_dir, "aggregates", "daily_sales.csv")
+
+    # --- 第一次：validate 失败（两阶段提交 → 水位不推进）---
+    bid = _new_bid("resume-wm")
+    rc1, _ = _run(cfg, bid, fail_at="validate")
+    assert rc1 == 1
+    state_path = os.path.join(state_dir, "state.json")
+    if os.path.exists(state_path):
+        state_fail = _read_state(state_dir)
+        assert not state_fail.get("tables", {}).get("orders", {}).get("watermark_value"), (
+            "失败时水位不得推进"
+        )
+
+    expected_wm = _max_col(env["orders_path"], "order_date")
+
+    # --- 续跑：同 cfg 同 batch_id ---
+    rc2, _ = _run(cfg, bid, fail_at="")
+    assert rc2 == 0
+    state2 = _read_state(state_dir)
+    info2 = state2["tables"]["orders"]
+    assert info2["watermark_value"] == expected_wm, "续跑应把 staged 水位正式提升（C2）"
+    assert info2["cumulative_row_count"] == info2["last_seen_row_count"] > 0, (
+        "水位恰好推进一次（无丢失、无双提交）"
+    )
+    assert bid in state2.get("merged_batches", []), "台账应登记批次（C4）"
+    daily1, _ = csv_read(daily_path)
+    n_daily1 = len(daily1)
+    assert n_daily1 > 0
+
+    # --- 追加新订单，第三批（新 batch_id）---
+    cust_rows, _ = csv_read(env["customers_path"])
+    prod_rows, _ = csv_read(env["products_path"])
+    n_new = 5
+    new_orders = _make_new_orders(
+        n_new,
+        start_id=300001,
+        cid=cust_rows[0]["customer_id"],
+        pid=prod_rows[0]["product_id"],
+        base_date=_next_date(expected_wm),
+    )
+    _append_orders(env["orders_path"], new_orders)
+
+    bid3 = _new_bid("resume-wm-next")
+    rc3, _ = _run(cfg, bid3)
+    assert rc3 == 0
+
+    state3 = _read_state(state_dir)
+    info3 = state3["tables"]["orders"]
+    assert info3["watermark_value"] == max(o["order_date"] for o in new_orders), (
+        "第三批应只从续跑后的新水位起读增量"
+    )
+    assert (
+        info3["cumulative_row_count"]
+        == info2["cumulative_row_count"] + info3["last_seen_row_count"]
+    ), "第三批只见新增行（修复前会重读第二批增量）"
+
+    daily2, _ = csv_read(daily_path)
+    assert len(daily2) == n_daily1 + n_new, "新日期各成一桶，旧桶不分裂不重复"
+    by_date1 = {r["order_date"]: r for r in daily1}
+    by_date2 = {r["order_date"]: r for r in daily2}
+    for date_str, row1 in by_date1.items():
+        row2 = by_date2[date_str]
+        assert row2["orders"] == row1["orders"], f"{date_str} 桶 orders 被重复累加"
+        assert row2["revenue"] == row1["revenue"], f"{date_str} 桶 revenue 被重复累加"
+
+
+# ----------------------------------------------------------------------
+# 场景 7（任务 #74 C2）：output 失败续跑——全部前序 stage resume，
+# staged 水位仍从失败 manifest 恢复并恰好提交一次
+# ----------------------------------------------------------------------
+def test_resume_after_output_failure_commits_staged_watermark(inc_env):
+    """fail_at=output → 同 batch_id 续跑：ingest/validate/clean/compute 全部
+    resume，staged 水位经恢复后在提交点提升恰好一次，聚合并入正式路径.
+    """
+    env = inc_env
+    cfg = env["cfg"]
+    cfg["error_handling"]["resume"] = True
+    state_dir = env["state_dir"]
+
+    bid = _new_bid("resume-out")
+    rc1, run_dir1 = _run(cfg, bid, fail_at="output")
+    assert rc1 == 1
+    # 失败 manifest 的 ingest 条目携带 staged_state
+    manifest1 = json_load(os.path.join(run_dir1, "manifest.json"))
+    ingest1 = next(s for s in manifest1["stages"] if s["name"] == "ingest")
+    assert ingest1.get("staged_state"), "失败 manifest 应携带 staged 水位（C2）"
+
+    rc2, run_dir2 = _run(cfg, bid, fail_at="")
+    assert rc2 == 0
+
+    manifest2 = json_load(os.path.join(run_dir2, "manifest.json"))
+    by_name = {s["name"]: s for s in manifest2["stages"]}
+    for skipped in ("ingest", "validate", "clean", "compute"):
+        assert by_name[skipped].get("resumed") is True, skipped
+    assert by_name["output"].get("resumed") is not True, "output 必须重跑"
+
+    state2 = _read_state(state_dir)
+    info2 = state2["tables"]["orders"]
+    expected_wm = _max_col(env["orders_path"], "order_date")
+    assert info2["watermark_value"] == expected_wm, "staged 水位恢复后应恰好提交一次"
+    assert info2["cumulative_row_count"] == info2["last_seen_row_count"] > 0
+    assert bid in state2.get("merged_batches", [])
+    assert os.path.isfile(os.path.join(state_dir, "aggregates", "daily_sales.csv"))
+
+
+# ----------------------------------------------------------------------
+# 场景 8（任务 #74 C4）：台账幂等闸门——已提交批次重放提交阶段不重复累加
+# ----------------------------------------------------------------------
+def test_batch_ledger_idempotent_skip_merge(inc_env):
+    """崩溃在提交点之后（如 metrics 阶段）重放入 _advance_and_merge：
+    merged_batches 台账命中 → 跳过合并，水位/聚合/台账全部不变.
+    """
+    env = inc_env
+    cfg = env["cfg"]
+    state_dir = env["state_dir"]
+    daily_path = os.path.join(state_dir, "aggregates", "daily_sales.csv")
+
+    bid = _new_bid("ledger")
+    rc, run_dir = _run(cfg, bid)
+    assert rc == 0
+
+    store = StateStore(state_dir)
+    state_before = store.load()
+    assert store.is_batch_merged(state_before, bid), "成功批次应已登记台账"
+    daily_before, _ = csv_read(daily_path)
+    wm_before = state_before["tables"]["orders"]["watermark_value"]
+    cum_before = state_before["tables"]["orders"]["cumulative_row_count"]
+
+    # 模拟提交阶段重放（老实现无闸门会二次累加聚合与水位）
+    ctx = PipelineContext(
+        config=cfg,
+        run_dir=run_dir,
+        batch_id=bid,
+        manifest=Manifest(bid, "replay-digest", run_dir),
+    )
+    ctx.engine_backend = "python"
+    ctx.state = store.load()
+    _advance_and_merge(ctx, store, logging.getLogger("test-ledger"))
+
+    state_after = store.load()
+    assert state_after["tables"]["orders"]["watermark_value"] == wm_before, "水位不得二次推进"
+    assert state_after["tables"]["orders"]["cumulative_row_count"] == cum_before
+    assert state_after["merged_batches"].count(bid) == 1, "台账不得重复登记"
+    daily_after, _ = csv_read(daily_path)
+    assert daily_after == daily_before, "聚合不得二次累加"

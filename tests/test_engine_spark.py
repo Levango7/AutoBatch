@@ -99,31 +99,11 @@ _HADOOP_HOME_CANDIDATES = [
 _HADOOP_DLL_EXISTS = any(_hadoop_native_exists(h) for h in _HADOOP_HOME_CANDIDATES if h)
 
 
-def _pyspark_jvm_exists() -> bool:
-    """检验 pyspark 能否启动 JVM（即 Hadoop native lib 实际上已就位）。
-
-    本地测试 fixture 会尝试 spark_env 预置 Java/Home 环境变量，
-    但 CI 可能未提供 native lib，此时 Spark 会抛 Py4JJavaError。
-    这里用轻量 SparkContext.getOrCreate 探测（超时 2s 视为不可用）。
-    """
-    try:
-        import os as _os2
-
-        # 若 JAVA_HOME / spark_home 未设置，直接假设为无环境
-        if not _os2.environ.get("JAVA_HOME") and not _os2.environ.get("SPARK_HOME"):
-            return False
-        from pyspark import SparkContext as _SparkCtx
-
-        sc = _SparkCtx.getOrCreate(
-            master="local[1]",
-            conf=_SparkCtx._conf.newSession(),
-        )
-        sc.stop()
-        return True
-    except Exception:  # noqa: BLE001
-        return False
-
-
+# 注意：此处曾存在第二份（损坏的）_pyspark_jvm_exists 定义，其
+# `conf=_SparkCtx._conf.newSession()` 访问了 SparkContext 上不存在的类属性
+# _conf，恒抛 AttributeError 被 try/except 吞掉返回 False，导致
+# PYSPARK_JVM_OK 恒为 False、本地有完整 Spark+Hadoop 环境也被全部误跳过。
+# 已删除，仅保留上方第一份正确实现（任务73 / H-3 修复）。
 PYSPARK_JVM_OK = _pyspark_jvm_exists()
 # 同时要求 pyspark 可 import（未安装时也跳过）
 try:

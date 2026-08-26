@@ -141,6 +141,10 @@ def run(ctx: PipelineContext, log) -> dict[str, Any]:
     # may be "01_raw/<name>_incremental.csv" for delta datasets.
     src_rel_by_name: dict[str, str] = {}
 
+    # 引擎特定逻辑——非函数级 dispatch：for 循环内三分支，分支体各 30-60 行
+    # 且共享循环迭代变量（finfo/name/path）、累积器（total_in/total_good/
+    # outlier_keys/produced_*）与后续逻辑（_emit_valid_quarantine/produced_*.append），
+    # 提取为三个独立函数会割裂共享状态，保留内联三分支。
     is_polars = ctx.engine_backend == "polars"
     is_spark = ctx.engine_backend == "spark"
 

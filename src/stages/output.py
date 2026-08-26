@@ -35,6 +35,7 @@ from ..helpers import (
     table_write,
     utc_ts,
 )
+from ._dispatch import dispatch_by_engine
 
 
 def _jsonify(value: Any) -> Any:
@@ -145,12 +146,14 @@ def run(ctx: PipelineContext, log) -> dict[str, Any]:
     out_dir = os.path.join(ctx.run_dir, "05_output")
     os.makedirs(out_dir, exist_ok=True)
 
-    if ctx.engine_backend == "spark":
-        rows_in, rows_out = _write_orders_final_spark(ctx, out_dir)
-    elif ctx.engine_backend == "polars":
-        rows_in, rows_out = _write_orders_final_polars(ctx, out_dir)
-    else:
-        rows_in, rows_out = _write_orders_final_python(ctx, out_dir)
+    rows_in, rows_out = dispatch_by_engine(
+        ctx.engine_backend,
+        _write_orders_final_python,
+        _write_orders_final_polars,
+        _write_orders_final_spark,
+        ctx,
+        out_dir,
+    )
 
     dashboard_data = _jsonify(_build_dashboard(ctx))
     json_save(os.path.join(out_dir, "dashboard_data.json"), dashboard_data)

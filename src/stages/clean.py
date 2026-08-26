@@ -37,6 +37,7 @@ from ..helpers import (
     table_read,
     table_write,
 )
+from ._dispatch import dispatch_by_engine
 
 
 def _clean_orders(ctx: PipelineContext, log) -> tuple[int, list[dict[str, Any]], list[str]]:
@@ -247,11 +248,9 @@ def run(ctx: PipelineContext, log) -> dict[str, Any]:
     cl_dir = os.path.join(ctx.run_dir, "03_clean")
     os.makedirs(cl_dir, exist_ok=True)
 
-    if ctx.engine_backend == "spark":
-        return _run_spark(ctx, log, cl_dir)
-    if ctx.engine_backend == "polars":
-        return _run_polars(ctx, log, cl_dir)
-    return _run_python(ctx, log, cl_dir)
+    return dispatch_by_engine(
+        ctx.engine_backend, _run_python, _run_polars, _run_spark, ctx, log, cl_dir
+    )
 
 
 def _run_python(ctx: PipelineContext, log, cl_dir: str) -> dict[str, Any]:

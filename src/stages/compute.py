@@ -53,6 +53,7 @@ from ..helpers import (
     table_read,
     table_write,
 )
+from ._dispatch import dispatch_by_engine
 
 
 def _bucket(rows):
@@ -855,11 +856,9 @@ def run(ctx: PipelineContext, log) -> dict[str, Any]:
     agg_dir = os.path.join(ctx.run_dir, "04_aggregates")
     os.makedirs(agg_dir, exist_ok=True)
 
-    if ctx.engine_backend == "spark":
-        return _run_spark(ctx, log, agg_dir, cconf)
-    if ctx.engine_backend == "polars":
-        return _run_polars(ctx, log, agg_dir, cconf)
-    return _run_python(ctx, log, agg_dir, cconf)
+    return dispatch_by_engine(
+        ctx.engine_backend, _run_python, _run_polars, _run_spark, ctx, log, agg_dir, cconf
+    )
 
 
 def _run_python(ctx: PipelineContext, log, agg_dir: str, cconf: dict[str, Any]) -> dict[str, Any]:

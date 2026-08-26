@@ -91,6 +91,8 @@ def _ingest_full(
     获得列式压缩。sha256 用文件内容计算（本地）或 "parquet" 占位（S3）。
     """
     if ctx.engine_backend == "spark":
+        # 引擎特定逻辑——非函数级三分支 dispatch（仅 spark early return，
+        # python/polars 共用下方 copy_file/csv_read 路径），保留内联。
         return _ingest_full_spark(ctx, name, rel, src, raw_dir, log, incremental)
     cfg = ctx.config
     dst = os.path.join(raw_dir, os.path.basename(rel))
@@ -225,6 +227,9 @@ def _ingest_incremental(
         # First run (or state.json absent): full load + establish initial watermark.
         dst = os.path.join(raw_dir, f"{name}.csv")
         if ctx.engine_backend == "spark":
+            # 引擎特定逻辑——非函数级 dispatch：first-run 内联三分支，
+            # 条件混合 engine_backend 与 _get_storage_backend（parquet），
+            # 且分支体含 _stage_new_watermark 等共享后续逻辑，保留内联。
             # Spark 全量读+写，然后从已读入的 DataFrame 算水位
             cfg = ctx.config
             spark = ctx.spark_session
@@ -289,6 +294,8 @@ def _ingest_incremental(
         src, dst, wm_col, wm_value, backend=ctx.engine_backend, ctx=ctx
     )
     # sha256：spark 路径用占位符；parquet 路径下实际文件是 .csv.parquet
+    # 引擎特定逻辑——非函数级 dispatch：sha 计算内联三分支，条件混合
+    # engine_backend 与 _get_storage_backend（parquet），保留内联。
     if ctx.engine_backend == "spark":
         sha = "spark_dir"
     elif _get_storage_backend(ctx.config) == "parquet" and os.path.exists(dst + ".parquet"):
@@ -364,6 +371,8 @@ def _copy_incremental(
 
     ``backend="python"`` 走原 csv.DictReader 路径，行为 100% 不变。
     """
+    # 引擎特定逻辑——非函数级 dispatch：backend 已作为参数透传，
+    # 这是参数化分支（caller 传入 ctx.engine_backend），保留内联。
     if backend == "spark":
         assert ctx is not None
         return _copy_incremental_spark(ctx, src, dst, wm_col, wm_value)
@@ -477,6 +486,8 @@ def _compute_watermark(
     ``backend="spark"`` 时用 ``spark.read.csv(path).agg(F.max(wm_col))``
     分布式聚合（Spark DataFrame 聚合表达式），参见 docs/evolution.md §4.3.2.4。
     """
+    # 引擎特定逻辑——非函数级 dispatch：backend 已作为参数透传，
+    # 这是参数化分支（caller 传入 ctx.engine_backend），保留内联。
     if backend == "spark":
         from pyspark.sql import functions as F
 

@@ -4,21 +4,26 @@
 #   - 仅保留运行时可选依赖（按 engine / storage backend 按需启用）
 #   - 加兼容性上界，避免主版本升级引入 breaking change
 #   - dev / CI 依赖拆分到 requirements-dev.txt
+# 任务78 修复：Python 版本说明如实化（最低支持 3.10，无 3.9 CI 腿）
 # =============================================================================
 
 # -----------------------------------------------------------------------------
 # 运行时可选依赖（按 engine / storage backend 按需启用）
 # -----------------------------------------------------------------------------
-# 注：polars/pyspark/pyarrow/pyiceberg 均要求 Python >=3.10。
-# 为支持 Python 3.9 作为最低兼容版本，仅在 >=3.10 时安装这些引擎依赖；
-# 3.9 CI 跑 python engine + local_csv 核心路径。
+# 注：项目最低支持 Python 3.10（pyproject.toml requires-python=">=3.10"，
+# ruff target-version="py310"、mypy python_version="3.10" 三者一致，任务78 对齐）。
+# polars/pyspark/pyarrow/pyiceberg 本身均要求 Python >=3.10，因此在声明的
+# 支持范围内全部可安装，不再有"3.9 时不装引擎依赖"的分支。
+# CI 版本矩阵（如实描述）：ubuntu-latest × 3.10/3.11/3.12 + macos-latest × 3.12；
+# 无 3.9 腿（旧注释称"3.9 CI 跑 python engine + local_csv 核心路径"与实际不符），
+# 3.13/3.14 未纳入矩阵（运行镜像 python:3.13.1-slim 属已知验证盲区，见 ci.yml 注释）。
 polars>=1.0,<2.0       # Phase 2a 列式加速（engine.backend="polars" 时需要；Python >=3.10）
 pyspark>=4.0,<5.0      # Phase 2b Spark 分布式加速（engine.backend="spark" 时需要；需 JDK17+；Python >=3.10）
 pyarrow>=23.0.1,<25.0   # Phase 3 湖存储（storage.backend="parquet" 时需要；Python >=3.10 因 wheel 支持；>=23.0.1 修复 PYSEC-2026-113）
 minio>=7.0,<8.0        # Phase 3 湖存储（MinIO SDK；bucket 初始化与迁移脚本用）
 psutil>=5.9,<7.0       # 任务41 监控告警（monitoring.enabled=true 时可选；不可用则降级返回 None）
 pydantic>=2.10.6,<2.14.0b1 # 配置校验（src/config_schema.py；pipeline.py 导入失败时自动降级跳过校验；
-                       # 2\.10\.6 起提供 linux cp39 wheel，避免 CI 3.9 装不上）
+                       # 版本窗口与 pyproject.toml validation/all/dev 分组保持一致）
 # 注意：iceberg 增量扫描用的 incremental_append_scan API 仅存在于 0.12 系列，
 # 当前只有预发布版。精确 pin 预发布版本 pip 可直接安装（无需 --pre）。
 # 0.12 正式版发布后应改为 pyiceberg>=0.12.0,<0.13。

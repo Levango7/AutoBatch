@@ -28,8 +28,13 @@ services:
     image: minio/minio:RELEASE.2024-08-29T01-40-52Z
     container_name: autobatch-minio
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      # 显式绑定 127.0.0.1：缺省凭证为 minioadmin（仅开发用），0.0.0.0 通配绑定
+      # 会把缺省凭证服务暴露到所有网卡。与 docker/spark-cluster/docker-compose.yml
+      # 的 127.0.0.1 安全基线保持一致。
+      # 本地测试通过 localhost:9000 访问 MinIO；compose 内部容器经 minio 主机名
+      # 走 Docker 内部网络访问，不经过宿主端口映射，改绑定不影响这些路径。
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
     environment:
       # 凭证从环境变量读取（缺省 minioadmin 仅开发用；生产通过 .env 覆盖）
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
@@ -73,7 +78,9 @@ services:
     image: tabio/iceberg-rest:1.11.0
     container_name: autobatch-iceberg-rest
     ports:
-      - "8181:8181"
+      # 显式绑定 127.0.0.1：REST catalog 仅供本机访问（catalog_uri=http://localhost:8181），
+      # 与 spark-cluster / minio 的安全基线一致（Spark worker 经容器内部网络访问）
+      - "127.0.0.1:8181:8181"
     depends_on:
       minio-init:
         condition: service_completed_successfully

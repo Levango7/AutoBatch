@@ -8,6 +8,16 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # 构建参数透传声明（任务71）：无值声明表示"取值由构建入参决定"——
+      # 由 up.ps1 -BuildArg（docker compose build --build-arg ...）或宿主同名
+      # 环境变量提供；两者都不存在时使用 Dockerfile 的 ARG 默认值
+      # （SPARK_VERSION=4.2.0 / ENABLE_ICEBERG=false），默认构建行为不变。
+      # 不在此处写死 ENABLE_ICEBERG 值，避免破坏默认构建。
+      # Phase 5 Iceberg 部署：--build-arg SPARK_VERSION=4.1.0 --build-arg ENABLE_ICEBERG=true
+      # 需一起传入（Dockerfile 内有构建期断言防护）。
+      args:
+        - SPARK_VERSION
+        - ENABLE_ICEBERG
     container_name: spark-master
     hostname: spark-master
     environment:
@@ -33,6 +43,16 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # 构建参数透传声明（任务71）：无值声明表示"取值由构建入参决定"——
+      # 由 up.ps1 -BuildArg（docker compose build --build-arg ...）或宿主同名
+      # 环境变量提供；两者都不存在时使用 Dockerfile 的 ARG 默认值
+      # （SPARK_VERSION=4.2.0 / ENABLE_ICEBERG=false），默认构建行为不变。
+      # 不在此处写死 ENABLE_ICEBERG 值，避免破坏默认构建。
+      # Phase 5 Iceberg 部署：--build-arg SPARK_VERSION=4.1.0 --build-arg ENABLE_ICEBERG=true
+      # 需一起传入（Dockerfile 内有构建期断言防护）。
+      args:
+        - SPARK_VERSION
+        - ENABLE_ICEBERG
     container_name: spark-worker-1
     hostname: spark-worker-1
     environment:
@@ -60,6 +80,16 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # 构建参数透传声明（任务71）：无值声明表示"取值由构建入参决定"——
+      # 由 up.ps1 -BuildArg（docker compose build --build-arg ...）或宿主同名
+      # 环境变量提供；两者都不存在时使用 Dockerfile 的 ARG 默认值
+      # （SPARK_VERSION=4.2.0 / ENABLE_ICEBERG=false），默认构建行为不变。
+      # 不在此处写死 ENABLE_ICEBERG 值，避免破坏默认构建。
+      # Phase 5 Iceberg 部署：--build-arg SPARK_VERSION=4.1.0 --build-arg ENABLE_ICEBERG=true
+      # 需一起传入（Dockerfile 内有构建期断言防护）。
+      args:
+        - SPARK_VERSION
+        - ENABLE_ICEBERG
     container_name: spark-worker-2
     hostname: spark-worker-2
     environment:

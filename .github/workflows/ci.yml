@@ -1,12 +1,23 @@
 # =============================================================================
 # AutoBatch CI 流水线
-# Phase 6 CI/CD 加固 + 任务61 修复：
-#   - CI 矩阵为 ubuntu-latest × 3.10/3.11/3.12 + macos-latest × 3.12 单腿（POSIX 兼容验证）：
-#     · 3.9 因 pyarrow/pyspark/polars 等引擎依赖要求 Python >=3.10，仅代码层支持
-#     · 3.13/3.14 上 pyspark/polars/pyarrow 的 manylinux wheel 缺失（2026-08 实测）
+# Phase 6 CI/CD 加固 + 任务61 修复 + 任务78 修复：
+#   - CI 矩阵：ubuntu-latest × 3.10/3.11/3.12（build job，附 MinIO service）
+#     + macos-latest × 3.12 单腿（build-macos job，POSIX 兼容验证）
+#   - 版本说明（如实描述，任务78 修订）：
+#     · 3.9 不在 CI：pyproject.toml 已声明 requires-python=">=3.10"
+#      （ruff target-version="py310"、mypy python_version="3.10" 同步对齐），
+#       不再有 3.9 支持声明，也没有 3.9 CI 腿
+#     · 3.13/3.14 未纳入 CI 测试矩阵。注意：应用的 Docker 运行镜像基于
+#       python:3.13.1-slim（见根目录 Dockerfile，安装完整 requirements.txt）；
+#       该版本组合尚未被任何 CI 腿验证，属已知盲区——本地无 docker，镜像
+#       可构建性亦无法本地验证，需推送后由 CI/CD 观察确认
+#   - build job 附 MinIO service：tests/test_storage_parquet.py 的 S3 测试此前
+#     因 CI 无 MinIO 服务、_minio_available() 探测 localhost:9000 恒失败而永久
+#     跳过；加 service 后在 Linux 腿实际运行。GHA service 容器仅支持 Linux
+#     runner，macOS 腿无法附加 services，相应测试继续经 skipif 自动跳过。
 #   - push 限定 main / master / release/* 分支；pull_request 不限分支
 #   - 顶层 concurrency 取消同分支旧任务，节省 CI 资源
-#   - 新增 pip-audit 依赖安全扫描步骤
+#   - pip-audit 依赖安全扫描为独立 job，与测试矩阵并行
 #   - smoke test 失败时上传 run/ 目录 artifact 便于诊断
 # =============================================================================
 name: CI / AutoBatch Pipeline CI
@@ -25,28 +36,54 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ===========================================================================
+  # Linux 测试矩阵：ubuntu-latest × 3.10/3.11/3.12（附 MinIO service）
+  # ===========================================================================
   build:
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        # CI 仅跑 3.10/3.11/3.12：
-        # - 3.9 因 pydantic-core 2.22+ 才提供 linux cp39 wheel（pyarrow/pyspark 需 Python ≥3.10），装不上
-        # - 3.13/3.14 上 pyspark / polars / pyarrow 的最新 wheel 仍缺 3.13/3.14 manylinux x86_64
-        #  （2026-08 实测这些包未发布 3.13/3.14 wheel）
-        # 3.9 是代码层面最低支持版本（核心路径 python engine + local_csv），通过 pyproject.toml
-        # target-version="py39" 声明；CI 跑 3.10 矩阵即可验证所有引擎路径。
-        os: [ubuntu-latest]
+        # CI 矩阵覆盖 3.10/3.11/3.12，与 pyproject.toml 声明的最低支持版本
+        # 一致（requires-python=">=3.10"）。无 3.9 腿：3.9 已不在支持声明内，
+        # CI 也从未有过 3.9 腿（旧注释声称"3.9 跑 python engine 核心路径"
+        # 与实际不符，任务78 已修正为如实描述）。
+        # 3.13/3.14 不在矩阵：应用 Docker 运行镜像基于 python:3.13.1-slim
+        # （根目录 Dockerfile），该组合未被 CI 验证，属已知盲区。
         python-version:
           - '3.10'
           - '3.11'
           - '3.12'
-        include:
-          # macOS 平台腿：单版本（3.12）验证 POSIX 兼容性，控制矩阵规模。
-          # Spark 本地用例因缺 hadoop native 库由 skipif 自动跳过，与 Linux 一致.
-          - os: macos-latest
-            python-version: '3.12'
-    continue-on-error: false
+
+    # -------------------------------------------------------------------------
+    # MinIO service（任务78 新增）：让 tests/test_storage_parquet.py 与
+    # tests/conftest.py 中被 MINIO_AVAILABLE skipif 跳过的 S3 测试实际运行。
+    #   - image 锁定版本，与 docker/iceberg/docker-compose.yml 第 28 行一致
+    #     （minio/minio:RELEASE.2024-08-29T01-40-52Z），避免 :latest 漂移
+    #   - 9000/9001 端口映射到 runner 宿主 localhost；测试侧探测与访问方式：
+    #     tests/conftest.py _minio_available() 与 s3_env fixture 直连
+    #     localhost:9000，期望凭证 access_key/secret_key = minioadmin，
+    #     bucket = "autobatch"（tests/test_storage_parquet.py 第 31-43 行同）
+    #   - 无需 minio-init 建桶步骤：conftest 与 test_storage_parquet 的
+    #     _minio_available() 在 bucket 缺失时会自行 make_bucket("autobatch")
+    #   - GHA service 容器仅支持 Linux runner（macOS 腿 build-macos job
+    #     无法定义 services，S3 测试经 skipif 自动跳过，与加 service 前行为一致）
+    # -------------------------------------------------------------------------
+    services:
+      minio:
+        image: minio/minio:RELEASE.2024-08-29T01-40-52Z
+        command: server /data --console-address ":9001"
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+        ports:
+          - 9000:9000
+          - 9001:9001
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/live || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
       - name: Checkout
@@ -61,17 +98,19 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # 核心依赖：pydantic pin >=2.10.6 以提供 linux cp39 wheel（CI 3.10+ 全覆盖）
+          # 核心依赖（版本约束见 requirements.txt，与 pyproject.toml 可选依赖分组同步）
           pip install -r requirements.txt
-          # optional 引擎依赖：pyspark / polars / pyarrow / pyiceberg 均要求 Python >=3.10
+          # optional 引擎依赖：pyspark / polars / pyarrow / pyiceberg 均要求 Python >=3.10，
           # 在 CI 当前矩阵（3.10–3.12）中均可安装；pyarrow>=23.0.1 修复 PYSEC-2026-113
           pip install "pyspark>=4.0,<5.0" "polars>=1.0,<2.0" "pyarrow>=23.0.1,<25.0" "pyiceberg==0.12.0rc1"
           pip install -r requirements-dev.txt
 
-      # 全量运行；重型测试（Spark 集群/MinIO/需要 hadoop native lib 的路径）
-      # 由 tests 内的 skipif 环境探测自动跳过——仓库未使用 pytest marker 标注
-      # Spark 本地模式在 Linux CI 缺 hadoop native lib 时自动 skipif，不阻塞流水线
-      # 注意：Spark cluster 测试需要 Docker Spark 集群（localhost:15077），CI 环境无此条件，
+      # 全量运行；重型测试（Spark 集群 / 需要 hadoop native lib 的路径）
+      # 由 tests 内的 skipif 环境探测自动跳过——仓库未使用 pytest marker 标注。
+      # S3（MinIO）测试在本 Linux 腿因 job 级 minio service 而实际运行
+      # （任务78 前因无 MinIO 服务永久跳过）；Spark 本地模式在 Linux CI
+      # 缺 hadoop native lib 时经 skipif 自动跳过，不阻塞流水线。
+      # 注意：Spark cluster 测试需要 Docker Spark 集群（localhost:7077），CI 环境无此条件，
       #       通过 -k "not cluster" 显式排除以避免 JVM 初始化失败导致整个 suite 失败
       # 显式 shell: bash 使 GHA 以 `bash --noprofile --norc -eo pipefail` 运行：
       # 默认的 `bash -e {0}` 不含 pipefail，pytest 经 tee 管道后失败会被掩蔽
@@ -104,7 +143,11 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-py${{ matrix.python-version }}
+          # artifact 名称含 os 维度（任务71）：本 job 为 ubuntu-latest 矩阵，
+          # 与 build-macos job 的 3.12 腿同版本共存，仅按 python-version 命名
+          # 会重名，upload-artifact@v4 对同一 run 内重名直接报错（未设
+          # overwrite）——os 后缀消除碰撞。job 拆分后 os 固定，直接写字面量。
+          name: coverage-py${{ matrix.python-version }}-ubuntu-latest
           path: |
             coverage.xml
             htmlcov/
@@ -134,7 +177,99 @@ jobs:
         if: failure() && steps.smoke.outcome == 'failure'
         uses: actions/upload-artifact@v4
         with:
-          name: smoke-run-py${{ matrix.python-version }}
+          # 同上：os 字面量后缀防止与 build-macos job 的 3.12 腿 artifact 重名
+          name: smoke-run-py${{ matrix.python-version }}-ubuntu-latest
+          path: run/
+          if-no-files-found: warn
+          retention-days: 7
+
+  # ===========================================================================
+  # macOS 测试腿：单版本（3.12）验证 POSIX 兼容性，控制矩阵规模（任务78
+  # 从原 matrix include 拆为独立 job）。
+  # GHA service 容器仅支持 Linux runner，本 job 无 services 定义：
+  #   - S3（MinIO）测试经 skipif 自动跳过（_minio_available() 探测
+  #     localhost:9000 失败，MINIO_AVAILABLE=False）——与 Linux 腿加
+  #     MinIO service 之前的行为一致
+  #   - Spark 本地用例因缺 hadoop native 库由 skipif 自动跳过，与 Linux 一致
+  # ===========================================================================
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip    # 启用 pip 缓存，加速依赖安装
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # 核心依赖（版本约束见 requirements.txt，与 pyproject.toml 可选依赖分组同步）
+          pip install -r requirements.txt
+          # optional 引擎依赖：与 build job 完全一致，pyspark / polars / pyarrow /
+          # pyiceberg 均要求 Python >=3.10（本腿 3.12 全部可安装）
+          pip install "pyspark>=4.0,<5.0" "polars>=1.0,<2.0" "pyarrow>=23.0.1,<25.0" "pyiceberg==0.12.0rc1"
+          pip install -r requirements-dev.txt
+
+      # 与 build job 同口径：-k "not cluster" 排除 Spark 集群测试；
+      # MinIO / hadoop native 依赖用例经 skipif 自动跳过。
+      # 显式 shell: bash + set -eo pipefail：防 tee 管道掩蔽 pytest 失败退出码。
+      - name: Run pytest (full suite; heavy tests self-skip via skipif)
+        shell: bash
+        run: |
+          set -eo pipefail
+          python -m pytest tests/ -v \
+            -k "not cluster" \
+            --cov=src \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml \
+            --cov-report=html \
+            --tb=short \
+            2>&1 | tee /tmp/pytest-ci.log
+
+      - name: Surface failed tests as annotations
+        if: failure()
+        shell: bash
+        run: |
+          grep -E "^(FAILED|ERROR) " /tmp/pytest-ci.log | head -30 | while IFS= read -r line; do
+            echo "::error::${line:0:180}"
+          done
+          grep -E "^(FAILED|ERROR) " /tmp/pytest-ci.log | head -30 || echo "::error::no FAILED lines parsed (crash before summary?)"
+
+      - name: Upload coverage report (artifacts)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          # artifact 名称含 os 维度（任务71）：与 build job 的 3.12 腿同版本
+          # 共存，os 后缀消除 upload-artifact@v4 的同 run 重名报错
+          name: coverage-py3.12-macos-latest
+          path: |
+            coverage.xml
+            htmlcov/
+          retention-days: 14
+
+      - name: Upload coverage to Codecov
+        if: github.event_name == 'push' && github.ref_protected
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.xml
+          fail_ci_if_error: false   # 缺 token 不阻塞流水线
+
+      - name: Pipeline smoke test
+        id: smoke
+        run: |
+          python main.py --config config/pipeline_small.json
+
+      - name: Upload run/ artifact on smoke failure
+        if: failure() && steps.smoke.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          # os 字面量后缀防止与 build job（ubuntu）3.12 腿 artifact 重名
+          name: smoke-run-py3.12-macos-latest
           path: run/
           if-no-files-found: warn
           retention-days: 7

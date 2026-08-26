@@ -1,11 +1,15 @@
 # =============================================================================
 # AutoBatch 代码质量工作流
-# Phase 6 CI/CD 加固 + 任务61 修复：
+# Phase 6 CI/CD 加固 + 任务61 修复 + 任务78 修复：
 #   - 与 ci.yml 分工：ci.yml 跑测试矩阵 + smoke test；quality.yml 跑 lint + type-check + coverage 门禁
-#   - mypy 目标 python_version="3.10"（pyproject.toml；mypy 2.x 最低只支持 target 3.10，
-#     运行时也用 3.10 保证工具链一致。3.9 仅代码层支持：引擎依赖要求 >=3.10）
-#   - 覆盖率阈值门禁用 `coverage report --fail-under=60` 替代手写 XML 解析（更稳健）
-#   - coverage 数据收集合并为单一步骤（目的是门禁数据来源，非重复测试）
+#   - runner 用 Python 3.12（与 ci.yml 的 Linux 矩阵各腿版本对齐）；mypy 类型检查目标
+#     python_version="3.10"（pyproject.toml，mypy 2.x 最低只支持 target 3.10）——
+#     类型检查目标版本与 runner 运行时版本是两回事，二者并存是有意为之
+#   - 覆盖率门禁用 pytest 直出（任务78）：`pytest --cov=src --cov-fail-under=60`，
+#     门禁判断 = pytest 退出码（测试失败或覆盖率低于阈值即 job 失败）。
+#     不再依赖 tools/quality_collect.py 的中间收集结果做门禁判断——该步骤在 GHA
+#     runner 上有已知平台层故障（见步骤注释），现降级仅做产物归档
+#   - ruff check 范围含 tools/（quality_collect.py 等 CI 基础设施同样受 lint 约束）
 #   - 顶层 concurrency 取消同分支旧任务，节省 CI 资源
 # =============================================================================
 name: Quality / AutoBatch Code Quality
@@ -35,8 +39,9 @@ jobs:
         uses: actions/checkout@v4
 
       # -------------------------------------------------------------------------
-      # Python 3.10：mypy 2.x 最低支持 target/run 均为 3.10（见 pyproject.toml
-      # mypy python_version="3.10"）。3.9 仅代码层支持（引擎依赖要求 >=3.10）。
+      # Python 3.12：与 ci.yml Linux 矩阵版本对齐。mypy 的 python_version="3.10"
+      # （pyproject.toml）只是 mypy 2.x 的最低类型检查目标版本（mypy 2.x 不支持
+      # 更低的 target），与 runner 运行时版本无关——二者并存是有意为之。
       # -------------------------------------------------------------------------
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -55,11 +60,13 @@ jobs:
 
       # -------------------------------------------------------------------------
       # 1. ruff lint（pyproject.toml 配置）
+      #    范围含 tools/：quality_collect.py 等 CI 基础设施脚本此前零 lint 覆盖，
+      #    任务78 起纳入检查（违规已于任务78 内修复，不改变脚本行为）。
       # -------------------------------------------------------------------------
       - name: Ruff lint check
         run: |
           echo "::group::Ruff lint"
-          ruff check src/ tests/ scripts/ dashboard/ --config pyproject.toml
+          ruff check src/ tests/ tools/ scripts/ dashboard/ --config pyproject.toml
           echo "::endgroup::"
 
       # -------------------------------------------------------------------------
@@ -73,7 +80,8 @@ jobs:
 
       # -------------------------------------------------------------------------
       # 3. mypy 静态类型检查（仅 src/，渐进式启用）
-      #    Python 版本与 pyproject.toml 的 python_version="3.10" 对齐
+      #    类型检查目标版本以 pyproject.toml 的 python_version="3.10" 为准
+      #    （这是 mypy 的类型检查 target，不是 runner 的运行时版本 3.12）
       # -------------------------------------------------------------------------
       - name: Mypy type check
         run: |
@@ -82,31 +90,57 @@ jobs:
           echo "::endgroup::"
 
       # -------------------------------------------------------------------------
-      # 4. 收集覆盖率数据（pytest --cov，唯一目的是为阈值门禁提供数据）
-      #    注意：此处不重复跑测试逻辑，测试矩阵由 ci.yml 负责
-      #    此步骤仅生成 .coverage + coverage.xml 供下一步门禁使用
+      # 4. 覆盖率门禁（权威门禁，pytest 直出模式 —— 任务78 修复）
+      #    门禁判断 = pytest 退出码：测试失败、或覆盖率低于 60%
+      #    （--cov-fail-under=60）任一情形均非零退出，本步骤与 job 直接失败。
+      #    不再依赖 tools/quality_collect.py 的中间收集结果做门禁判断
+      #    （旧方案中 collect 步骤 continue-on-error + 门禁步骤的 if 条件依赖
+      #    collect 成功，导致门禁事实上从未执行；该脚本在 GHA runner 上另有
+      #    平台层故障，见下方步骤 5 注释）。
       #    排除 cluster 测试：CI 无 Docker Spark 集群，JVM 检查可能通过但
-      #    SparkContext 初始化会失败，导致整个 suite 非零退出
+      #    SparkContext 初始化会失败，导致整个 suite 非零退出。
+      #    阈值 60% 依据：本地 2026-08-25 覆盖率快照约 74.5%（22 文件口径）；
+      #    CI 上同样排除 cluster 测试、spark/cluster 依赖用例与本地同样经
+      #    skipif 跳过，60% 留有余量。
+      #    覆盖率报告（coverage.xml / htmlcov/）由本步骤同步生成，供后续
+      #    artifact 上传步骤归档。不使用 tee 管道：退出码直达步骤结论。
       # -------------------------------------------------------------------------
-      # 收集逻辑整体在 Python 脚本内（subprocess 直跑 pytest、自行落盘与打
-      # ::error:: 注解），绕开 bash 管道/YAML 层。
+      - name: Coverage gate (pytest --cov-fail-under=60)
+        id: coverage_gate
+        run: |
+          echo "::group::pytest coverage gate"
+          python -m pytest tests/ \
+            -k "not cluster" \
+            --cov=src \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml \
+            --cov-report=html \
+            --cov-fail-under=60 \
+            --tb=short
+          echo "::endgroup::"
+
+      # -------------------------------------------------------------------------
+      # 5. pytest 日志收集（仅归档用途，不参与门禁判断）
+      #    收集逻辑整体在 Python 脚本内（subprocess 直跑 pytest、自行落盘与打
+      #    ::error:: 注解），绕开 bash 管道/YAML 层；产物为
+      #    benchmarks/quality_pytest.log，供下一步 failure artifact 使用。
       #
-      # ⚠ 已知平台怪象（2026-08，连续 5 轮未解）：本步骤在 GHA runner 上以
-      # exit 1 零输出秒退——四种实现（bash tee 管道 / 显式 shell:bash /
-      # python subprocess 脚本）× 两种 Python(3.10/3.12) × 是否装引擎依赖
-      # 全部同一症状；本地 Windows/WSL/Docker(python:3.13-slim) 同命令均正常，
-      # 判定为 runner 平台层故障而非代码问题。pytest 断言职责由 ci.yml
-      # （全绿且含 main.py 实跑 smoke）承担；此处降级为非阻塞并保留日志
-      # artifact 供持续观察，恢复后移除 continue-on-error 即可收紧门禁.
-      - name: Collect coverage data
+      # ⚠ 已知平台怪象（2026-08，连续 5 轮未解，如实记录）：本步骤在 GHA
+      # runner 上以 exit 1 零输出秒退——四种实现（bash tee 管道 / 显式
+      # shell:bash / python subprocess 脚本）× 两种 Python(3.10/3.12) ×
+      # 是否装引擎依赖，全部同一症状；本地 Windows/WSL/Docker(python:3.13-slim)
+      # 同命令均正常，判定为 runner 平台层故障而非代码问题。
+      # 任务78 起门禁已由步骤 4「Coverage gate (pytest --cov-fail-under=60)」
+      # 直接承担，本步骤失败不影响任何门禁结论；保留 continue-on-error
+      # （归档失败不阻塞），该平台故障恢复后若确认不再需要日志归档，可连同
+      # 「Upload pytest log」步骤一并移除。
+      # -------------------------------------------------------------------------
+      - name: Collect pytest log (archive only)
         id: collect
         continue-on-error: true
         run: |
           python tools/quality_collect.py tests/ \
             -k "not cluster" \
-            --cov=src \
-            --cov-report=xml:coverage.xml \
-            --cov-report=html \
             --tb=short -q
 
       - name: Upload pytest log (failure diagnosis)
@@ -118,7 +152,9 @@ jobs:
           retention-days: 7
 
       # -------------------------------------------------------------------------
-      # 5. 上传覆盖率 artifacts（保留 14 天）
+      # 6. 上传覆盖率 artifacts（保留 14 天）
+      #    coverage.xml / htmlcov/ 由步骤 4 的门禁 pytest 生成；if: always()
+      #    保证即便门禁失败（覆盖率不达标/测试失败）报告仍可下载排查。
       # -------------------------------------------------------------------------
       - name: Upload coverage XML
         if: always()
@@ -136,15 +172,8 @@ jobs:
           path: htmlcov/
           retention-days: 14
 
-      # -------------------------------------------------------------------------
-      # 6. 覆盖率阈值门禁（用 coverage report --fail-under 替代手写 XML 解析）
-      #    coverage report 直接读取 .coverage 数据文件，低于 60% 时非零退出。
-      #    仅在 collect 成功产出数据时执行（collect 平台故障降级期间自动跳过，
-      #    跳过本身会在 job 内显式可见，不静默）.
-      # -------------------------------------------------------------------------
-      - name: Enforce coverage threshold (>= 60%)
-        if: steps.collect.outcome == 'success'
-        run: |
-          echo "::group::Coverage threshold"
-          coverage report --fail-under=60
-          echo "::endgroup::"
+      # 注：旧方案的独立门禁步骤「Enforce coverage threshold」（coverage report
+      # --fail-under=60，if 依赖 collect 步骤 outcome）已于任务78 移除——collect
+      # 在 GHA runner 上的平台层故障导致该条件恒不满足，门禁从未生效。门禁
+      # 职责现由步骤 4「Coverage gate (pytest --cov-fail-under=60)」的退出码
+      # 直接承担，不再经过任何中间步骤的条件判断。

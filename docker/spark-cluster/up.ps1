@@ -1,4 +1,14 @@
-﻿# ── up.ps1 ─────────────────────────────────────────────────────
+﻿param(
+    # 透传给 docker compose build 的额外构建参数（任务71 / #69审查H1 修复：此前脚本
+    # 无 param() 块，readme.md 文档中的 -BuildArg 用法无法生效，Phase 5 Iceberg 部署走不通）
+    # 示例（与 readme.md 一致）：
+    #   .\up.ps1 -BuildArg @("--build-arg","ENABLE_ICEBERG=true","--build-arg","SPARK_VERSION=4.1.0")
+    # 注意：ENABLE_ICEBERG=true 要求 SPARK_VERSION=4.1.0（见 Dockerfile 构建期断言），
+    #       两个 --build-arg 需一起传入。
+    [string[]]$BuildArg = @()
+)
+
+# ── up.ps1 ─────────────────────────────────────────────────────
 # 一键启动 AutoBatch Spark 集群
 # 步骤: build → up → 等待 Master 就绪 → 连接 MinIO
 # ───────────────────────────────────────────────────────────────
@@ -13,10 +23,27 @@ Write-Host ""
 
 # Step 1: 构建并启动
 Write-Host "[Step 1/4] 构建镜像并启动容器 ..." -ForegroundColor Cyan
-docker compose up -d --build
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "[ERROR] docker compose up 失败！" -ForegroundColor Red
-    exit 1
+if ($BuildArg.Count -gt 0) {
+    # 带构建参数：先 build（@BuildArg splatting 透传给 docker compose build），
+    # 再 up -d。不能走 `up -d --build`——该路径不携带 --build-arg，参数会丢失。
+    Write-Host "  透传构建参数: $($BuildArg -join ' ')" -ForegroundColor DarkGray
+    docker compose build @BuildArg
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[ERROR] docker compose build 失败！" -ForegroundColor Red
+        exit 1
+    }
+    docker compose up -d
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[ERROR] docker compose up 失败！" -ForegroundColor Red
+        exit 1
+    }
+} else {
+    # 缺省路径：与原行为完全一致（一步完成 build + up）
+    docker compose up -d --build
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[ERROR] docker compose up 失败！" -ForegroundColor Red
+        exit 1
+    }
 }
 Write-Host "[OK] 容器已启动" -ForegroundColor Green
 Write-Host ""

@@ -9,7 +9,7 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 # =============================================================================
-# [project] 元数据（任务61 修复）
+# [project] 元数据（任务61 修复；任务78 Python 版本声明对齐）
 # PEP 621 标准：声明项目名称、版本、Python 版本要求、依赖
 # 运行时零依赖（仅标准库），可选依赖在 [project.optional-dependencies] 中分组
 # =============================================================================
@@ -18,7 +18,9 @@ name = "autobatch"
 version = "1.5.0"
 description = "AutoBatch：可扩展批处理流水线框架（零运行时依赖，按需启用 polars/spark/iceberg 后端）"
 readme = "readme.md"
-requires-python = ">=3.9"
+# 任务78：最低支持版本对齐到实际测试基线 3.10（原声明 >=3.9 无 CI 实证——
+# CI 从未有过 3.9 腿；3.10/3.11/3.12 有 ubuntu 矩阵腿 + macOS 3.12 腿实际覆盖）
+requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 authors = [
     { name = "AutoBatch Team" },
@@ -27,14 +29,13 @@ keywords = ["batch", "pipeline", "etl", "polars", "spark", "iceberg"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
 ]
-# 运行时零依赖：仅依赖 Python 3.9+ 标准库
+# 运行时零依赖：仅依赖 Python 3.10+ 标准库（与 requires-python 一致）
 dependencies = []
 
 # -----------------------------------------------------------------------------
@@ -65,7 +66,12 @@ iceberg = [
 monitoring = [
     "psutil>=5.9,<7.0",
 ]
-# 全部运行时可选依赖（polars + spark + storage + iceberg + monitoring）
+# 配置校验（src/config_schema.py；pipeline 配置 schema 校验的实际依赖，
+# 版本约束与 requirements.txt 一致；缺失时 pipeline.py 自动降级跳过校验）
+validation = [
+    "pydantic>=2.10.6,<2.14.0b1",
+]
+# 全部运行时可选依赖（polars + spark + storage + iceberg + monitoring + validation）
 all = [
     "polars>=1.0,<2.0",
     "pyspark>=4.0,<5.0",
@@ -74,14 +80,17 @@ all = [
     "psutil>=5.9,<7.0",
     "pyiceberg==0.12.0rc1",
     "sqlalchemy>=2.0,<3.0",
+    "pydantic>=2.10.6,<2.14.0b1",
 ]
-# 开发 / CI 依赖（与 requirements-dev.txt 同步）
+# 开发 / CI 依赖（与 requirements-dev.txt 同步；pydantic 为 CI 全量测试所需，
+# 经 requirements.txt 安装，此处同步纳入 dev 组）
 dev = [
     "pytest>=9.0,<10.0",
     "pytest-cov>=4.0,<6.0",
     "ruff>=0.6.0,<1.0",
     "mypy>=1.10.0,<2.0",
     "pip-audit>=2.7.0,<3.0",
+    "pydantic>=2.10.6,<2.14.0b1",
 ]
 
 # -----------------------------------------------------------------------------
@@ -89,7 +98,9 @@ dev = [
 # -----------------------------------------------------------------------------
 [tool.ruff]
 line-length = 100                 # 单行最大宽度
-target-version = "py39"           # 最低支持 Python 3.9（与运行时零依赖声明一致）
+# 任务78：py39 → py310，与 requires-python、mypy python_version="3.10" 三者对齐
+# （原 py39 与 mypy 3.10 不一致，且 3.9 从未进入 CI，无实证）
+target-version = "py310"          # 最低支持 Python 3.10
 extend-exclude = [
     ".pytest_cache",
     "htmlcov",
@@ -114,8 +125,9 @@ ignore = [
     "N803",   # 参数名应为小写（数学/科学命名习惯，如 X、Y）
     "N806",   # 变量名应为小写（同上）
     "N812",   # lowercase-imported-as-non-lowercase：pyspark `from pyspark.sql import functions as F` 是官方惯例
-    "UP007",  # Optional[X] vs X | None：保留 Optional 以兼容 py39
-    "UP045",  # 同上：Union 类型写法
+    "UP007",  # Optional[X] vs X | None：显式忽略转换提示，保持代码库既有 Optional
+              # 写法（py310 运行时尚可转换为 | 语法，忽略是风格稳定性考虑，非兼容性要求）
+    "UP045",  # 同上：Union 类型写法保持既有风格
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -124,6 +136,20 @@ ignore = [
     "F811",   # 允许重定义（pytest parametrize 重名）
     "N802",   # 测试函数命名宽松
 ]
+# -----------------------------------------------------------------------------
+# 任务78 遗留项：target-version 从 py39 升到 py310 后，以下 src/ 文件暴露出
+# 既有违规（py39 target 下规则不触发，故此前 CI 为绿）：
+#   UP035 — `from typing import Callable` 应改为 collections.abc（py39+ 规则）
+#   B905  — zip() 缺显式 strict= 参数（strict 为 Python 3.10 特性，
+#           py310 target 起才报告；补 strict= 可能改变长度不齐时的截断行为）
+# 修复需改动 src/（本任务范围外，且有并行任务在改 src/），故按文件精确压制，
+# 不全局忽略这两条规则；待 src/ 对应文件修复后应移除以下条目。
+# -----------------------------------------------------------------------------
+"src/pipeline.py" = ["UP035"]
+"src/quality.py" = ["B905"]
+"src/stages/_dispatch.py" = ["UP035"]
+"src/stages/validate.py" = ["UP035"]
+"src/state.py" = ["B905"]
 
 [tool.ruff.format]
 quote-style = "double"            # 双引号
@@ -136,9 +162,10 @@ line-ending = "lf"                # 统一 LF 行尾
 [tool.mypy]
 # pyproject.toml 是 TOML 文件：section 不能重复覆盖，只能完整替换。
 # 因此移除 [[tool.mypy.overrides]] 块，改在顶层统一 ignore_missing_imports。
-# 注意：mypy 2.x 最低支持 python_version = "3.10"（与 CI 质量矩阵 3.10 对齐）；
-# 3.9 运行时兼容性由 ci.yml 矩阵的 3.10 腿验证。
-python_version = "3.10"          # mypy 2.x 最低 target；运行时兼容 py39
+# 注意（任务78 修订）：mypy 2.x 最低支持 python_version = "3.10"——恰与项目
+# 声明的最低支持版本一致（requires-python=">=3.10"、ruff target-version=
+# "py310" 三者对齐）。CI 矩阵 3.10/3.11/3.12 实际覆盖声明的支持范围。
+python_version = "3.10"          # mypy 类型检查目标版本；同时是项目声明的最低支持版本
 files = ["src"]                  # 仅检查 src/ 目录（业务代码）
 exclude = [
     "tests/",

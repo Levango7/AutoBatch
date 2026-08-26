@@ -8,6 +8,14 @@
 #   - 启用 Iceberg 时需把 SPARK_VERSION 改为 4.1.0 + ICEBERG_VERSION=1.11.0
 #   - JAR: iceberg-spark-runtime-4.1_2.13-1.11.0.jar + iceberg-aws-bundle-1.11.0.jar
 #   - 缺省 ENABLE_ICEBERG=false，不影响现有 cluster 测试（Spark 4.2.0 保持）
+#
+# 供应链校验（二轮审查 H-5，任务79）：
+#   - 所有外部下载（Spark tarball + 5 类 JAR）均钉扎官方校验和
+#     （downloads.apache.org / archive.apache.org / repo1.maven.org）
+#   - 下载后立即校验，失败即 exit 1（fail-fast，绝不产出带病镜像）
+#   - 校验和不依赖下载镜像源：JAR 可从阿里云镜像下载，但校验值取自
+#     repo1.maven.org 官方，防止"镜像源与下载源同时被污染"
+#   - 各校验值来源与获取日期见同目录 CHECKSUMS.md
 # ────────────────────────────────────────────────────────────────
 
 FROM eclipse-temurin:17-jre
@@ -20,12 +28,20 @@ LABEL description="Spark Standalone cluster node (Master/Worker)"
 ARG SPARK_VERSION=4.2.0
 ARG HADOOP_AWS_VERSION=3.5.0
 ARG AWS_SDK_V2_BUNDLE_VERSION=2.35.4
+# ── 供应链校验和（钉扎官方值，版本与校验和必须同步变更） ────────
+# 来源：repo1.maven.org 官方 .sha1（获取日期与 URL 见 CHECKSUMS.md）
+# 若升级版本 ARG 而忘记更新校验和 ARG，构建会在校验步骤 fail-fast
+ARG HADOOP_AWS_SHA1=9e594525d264c0db653c7f68da98b245f7d61ea5
+ARG AWS_SDK_V2_BUNDLE_SHA1=7252265e3970b214708e68a8b74a8fa8c875af1e
 # Phase 5: Iceberg Spark extensions（可选，缺省关闭）
 # 启用方式：docker build --build-arg ENABLE_ICEBERG=true --build-arg SPARK_VERSION=4.1.0 .
 ARG ENABLE_ICEBERG=false
 ARG ICEBERG_VERSION=1.11.0
 ARG ICEBERG_SPARK_MAJOR=4.1
 ARG ICEBERG_SCALA_VERSION=2.13
+# Iceberg JAR 官方 SHA1（对应 ICEBERG_VERSION=1.11.0 + 4.1_2.13 缺省组合）
+ARG ICEBERG_SPARK_RUNTIME_SHA1=f9b1e4a18797c58ae406104ef5c75d1b64a373c5
+ARG ICEBERG_AWS_BUNDLE_SHA1=afe5b22dd5bc2d2c0639049b06a92dae2545cac7
 
 # ── 系统依赖：curl + tini + python3 + pip ──────────────────────
 RUN apt-get update && \
@@ -85,6 +101,29 @@ RUN set -eux; \
         exit 1; \
     fi; \
     \
+    # ── 供应链校验（任务79）：版本 → 官方钉扎 SHA512 ─────────────
+    # 无论实际下载自哪个镜像源，一律对照官方钉扎值校验，失败即 exit 1。
+    # 校验和来源（获取日期 2026-08-27，详见 CHECKSUMS.md）：
+    #   4.2.0 ← https://downloads.apache.org/spark/spark-4.2.0/spark-4.2.0-bin-hadoop3.tgz.sha512
+    #   4.1.0 ← https://archive.apache.org/dist/spark/spark-4.1.0/spark-4.1.0-bin-hadoop3.tgz.sha512
+    #   3.5.5 ← https://archive.apache.org/dist/spark/spark-3.5.5/spark-3.5.5-bin-hadoop3.tgz.sha512
+    # 未在清单中的版本（如升级 SPARK_VERSION 忘更新）直接拒绝构建。
+    case "${SPARK_VER}" in \
+        4.2.0) SPARK_TGZ_SHA512="3a6559e8546ff387db8fe7a04b8fe4008853b467b972c2e343df8e14a81450534777719fc5d4998dd96519a86fdf9de140cee753c61e2e94db044d5f9555ddc4" ;; \
+        4.1.0) SPARK_TGZ_SHA512="fff7f929d98779b096a2d2395b1b9db1ce277660f3852dd45e1457c373013f2669074315252181a3cea291d8f3a726c70f7f9b247e723edbf8080f40888edde1" ;; \
+        3.5.5) SPARK_TGZ_SHA512="ec5ff678136b1ff981e396d1f7b5dfbf399439c5cb853917e8c954723194857607494a89b7e205fce988ec48b1590b5caeae3b18e1b5db1370c0522b256ff376" ;; \
+        *) \
+            echo ">>> [FATAL] Spark ${SPARK_VER} 无钉扎 SHA512，供应链校验不可跳过！"; \
+            echo ">>> 请从 downloads.apache.org / archive.apache.org 获取该版本官方 .sha512 并更新本文件"; \
+            exit 1; \
+            ;; \
+    esac; \
+    echo ">>> 校验 Spark ${SPARK_VER} SHA512 ..."; \
+    echo "${SPARK_TGZ_SHA512}  /tmp/${SPARK_TGZ}" | sha512sum -c - || { \
+        echo ">>> [FATAL] Spark ${SPARK_VER} SHA512 校验失败（文件可能被篡改）！"; \
+        exit 1; \
+    }; \
+    \
     tar -xzf /tmp/${SPARK_TGZ} -C /opt/ && \
     ln -s /opt/spark-${SPARK_VER}-bin-hadoop3 /opt/spark && \
     rm -f /tmp/${SPARK_TGZ} && \
@@ -119,6 +158,12 @@ RUN set -eux; \
         echo ">>> [FATAL] hadoop-aws 下载失败！"; \
         exit 1; \
     fi; \
+    # 供应链校验（任务79）：对照 repo1.maven.org 官方钉扎 SHA1，失败即 exit 1
+    echo ">>> 校验 hadoop-aws SHA1 ..."; \
+    echo "${HADOOP_AWS_SHA1}  /tmp/${HADOOP_AWS_JAR}" | sha1sum -c - || { \
+        echo ">>> [FATAL] hadoop-aws SHA1 校验失败（文件可能被篡改）！"; \
+        exit 1; \
+    }; \
     cp /tmp/${HADOOP_AWS_JAR} ${SPARK_HOME}/jars/ && \
     rm -f /tmp/${HADOOP_AWS_JAR} && \
     echo ">>> hadoop-aws 安装完成"
@@ -140,12 +185,20 @@ RUN set -eux; \
         echo ">>> [FATAL] aws-sdk-v2-bundle 下载失败！"; \
         exit 1; \
     fi; \
+    # 供应链校验（任务79）：对照 repo1.maven.org 官方钉扎 SHA1，失败即 exit 1
+    echo ">>> 校验 aws-sdk-v2-bundle SHA1 ..."; \
+    echo "${AWS_SDK_V2_BUNDLE_SHA1}  /tmp/${AWS_SDK_JAR}" | sha1sum -c - || { \
+        echo ">>> [FATAL] aws-sdk-v2-bundle SHA1 校验失败（文件可能被篡改）！"; \
+        exit 1; \
+    }; \
     cp /tmp/${AWS_SDK_JAR} ${SPARK_HOME}/jars/ && \
     rm -f /tmp/${AWS_SDK_JAR} && \
     echo ">>> aws-sdk-v2-bundle 安装完成"
 
 # ── Analytics Accelerator S3（hadoop-aws 3.5.0 传递依赖） ──────
 ARG ANALYTICS_ACCELERATOR_VERSION=1.3.1
+# 供应链校验：repo1.maven.org 官方 SHA1（见 CHECKSUMS.md）
+ARG ANALYTICS_ACCELERATOR_SHA1=6c9bd0f6c440c9a78e82d272f5f0252d942419f6
 RUN set -eux; \
     echo ">>> 下载 analyticsaccelerator-s3 ${ANALYTICS_ACCELERATOR_VERSION} ..."; \
     JAR_NAME="analyticsaccelerator-s3-${ANALYTICS_ACCELERATOR_VERSION}.jar"; \
@@ -163,6 +216,12 @@ RUN set -eux; \
         echo ">>> [FATAL] analyticsaccelerator-s3 下载失败！"; \
         exit 1; \
     fi; \
+    # 供应链校验（任务79）：对照 repo1.maven.org 官方钉扎 SHA1，失败即 exit 1
+    echo ">>> 校验 analyticsaccelerator-s3 SHA1 ..."; \
+    echo "${ANALYTICS_ACCELERATOR_SHA1}  /tmp/${JAR_NAME}" | sha1sum -c - || { \
+        echo ">>> [FATAL] analyticsaccelerator-s3 SHA1 校验失败（文件可能被篡改）！"; \
+        exit 1; \
+    }; \
     cp /tmp/${JAR_NAME} ${SPARK_HOME}/jars/ && \
     rm -f /tmp/${JAR_NAME} && \
     echo ">>> analyticsaccelerator-s3 安装完成"
@@ -191,6 +250,18 @@ RUN PYSPARK_VER=$(cat /opt/spark/.version) && \
 # JAR 来源：
 #   iceberg-spark-runtime-${ICEBERG_SPARK_MAJOR}_${ICEBERG_SCALA_VERSION}-${ICEBERG_VERSION}.jar
 #   iceberg-aws-bundle-${ICEBERG_VERSION}.jar
+#
+# ── 构建期防护（任务71） ────────────────────────────────────────
+# 下方 ENABLE_ICEBERG 块下载的是 Iceberg 4.1 runtime JAR，必须配合 SPARK_VERSION=4.1.0
+# （ARG 缺省 4.2.0），否则运行期不兼容。此前仅靠注释警告，这里改为显式断言：
+# ENABLE_ICEBERG=true 且 SPARK_VERSION!=4.1.0 时立即终止构建，避免产出带病镜像。
+# ARG 作用域：SPARK_VERSION / ENABLE_ICEBERG 均已在上方声明（单 stage，作用域有效）。
+RUN if [ "${ENABLE_ICEBERG}" = "true" ] && [ "${SPARK_VERSION}" != "4.1.0" ]; then \
+        echo ">>> [FATAL] ENABLE_ICEBERG=true requires SPARK_VERSION=4.1.0 (got ${SPARK_VERSION})." && \
+        echo ">>> Pass --build-arg SPARK_VERSION=4.1.0 --build-arg ENABLE_ICEBERG=true together." && \
+        exit 1; \
+    fi
+
 RUN if [ "${ENABLE_ICEBERG}" = "true" ]; then \
         set -eux; \
         echo ">>> Phase 5: 安装 Iceberg Spark extensions ${ICEBERG_VERSION} (Spark ${ICEBERG_SPARK_MAJOR} Scala ${ICEBERG_SCALA_VERSION})"; \
@@ -209,6 +280,14 @@ RUN if [ "${ENABLE_ICEBERG}" = "true" ]; then \
             echo ">>> [FATAL] iceberg-spark-runtime 下载失败！"; \
             exit 1; \
         fi; \
+        # 供应链校验（任务79）：对照 repo1.maven.org 官方钉扎 SHA1，失败即 exit 1
+        # 注意：钉扎值对应缺省组合 ICEBERG_VERSION=1.11.0 + 4.1_2.13，
+        # 若覆盖这些 ARG，必须同步更新 ICEBERG_SPARK_RUNTIME_SHA1
+        echo ">>> 校验 iceberg-spark-runtime SHA1 ..."; \
+        echo "${ICEBERG_SPARK_RUNTIME_SHA1}  /tmp/${ICEBERG_SPARK_JAR}" | sha1sum -c - || { \
+            echo ">>> [FATAL] iceberg-spark-runtime SHA1 校验失败（文件可能被篡改）！"; \
+            exit 1; \
+        }; \
         cp /tmp/${ICEBERG_SPARK_JAR} ${SPARK_HOME}/jars/ && \
         rm -f /tmp/${ICEBERG_SPARK_JAR} && \
         echo ">>> iceberg-spark-runtime 安装完成"; \
@@ -228,6 +307,13 @@ RUN if [ "${ENABLE_ICEBERG}" = "true" ]; then \
             echo ">>> [FATAL] iceberg-aws-bundle 下载失败！"; \
             exit 1; \
         fi; \
+        # 供应链校验（任务79）：对照 repo1.maven.org 官方钉扎 SHA1，失败即 exit 1
+        # 注意：钉扎值对应缺省 ICEBERG_VERSION=1.11.0，覆盖时须同步更新 SHA1
+        echo ">>> 校验 iceberg-aws-bundle SHA1 ..."; \
+        echo "${ICEBERG_AWS_BUNDLE_SHA1}  /tmp/${ICEBERG_AWS_JAR}" | sha1sum -c - || { \
+            echo ">>> [FATAL] iceberg-aws-bundle SHA1 校验失败（文件可能被篡改）！"; \
+            exit 1; \
+        }; \
         cp /tmp/${ICEBERG_AWS_JAR} ${SPARK_HOME}/jars/ && \
         rm -f /tmp/${ICEBERG_AWS_JAR} && \
         echo ">>> iceberg-aws-bundle 安装完成"; \

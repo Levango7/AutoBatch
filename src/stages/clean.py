@@ -30,6 +30,7 @@ from typing import Any
 
 from ..helpers import (
     PipelineContext,
+    _get_storage_backend,
     _table_exists,
     as_float,
     as_int,
@@ -88,12 +89,19 @@ def _clean_orders_polars(ctx: PipelineContext, log) -> tuple[int, Any, list[str]
     cfg = ctx.config
     cconf = cfg.get("clean", {})
     src = os.path.join(ctx.run_dir, "02_valid", "valid_orders.csv")
-    if not os.path.exists(src):
+    if not _table_exists(src, cfg):
         log.warn("no valid orders", reason="file_missing")
         return 0, None, []
 
-    # 所有列 Utf8，保留原字符串表示（产物兼容）
-    df = pl.read_csv(src, infer_schema_length=0)
+    # storage.backend='parquet'/'iceberg' 时读 .csv.parquet（上游 pyarrow 写全 String，
+    # 读回保持 Utf8 与 local_csv 的 infer_schema_length=0 一致）；local_csv 保持
+    # 原有 pl.read_csv 行为（table_read 的 read_options 会解析日期/数值，破坏
+    # 与 Python 路径逐字段一致）。
+    if _get_storage_backend(cfg) != "local_csv":
+        df = table_read(src, cfg)
+    else:
+        df = pl.read_csv(src, infer_schema_length=0)
+    # Polars backend 下 table_read 返回 DataFrame；派生列需要 base_fields 为原始列名
     rows_in = df.height
     dedup_cols = cconf.get("dedup_columns", ["order_id"])
     fill = cconf.get("fill_missing", {})
@@ -119,7 +127,10 @@ def _clean_orders_polars(ctx: PipelineContext, log) -> tuple[int, Any, list[str]
     # cast(strict=False) 把非法值变 null，fill_null(0) 对齐 as_int/as_float 的 `or 0`
     qty = pl.col("quantity").cast(pl.Float64, strict=False).fill_null(0.0)
     price = pl.col("unit_price").cast(pl.Float64, strict=False).fill_null(0.0)
-    df = df.with_columns(((qty * price).round(2)).alias("total_amount"))
+    # 转回 Utf8：与 python 路径 str(round(...)) 一致，parquet 写出时保留 String
+    #（否则 polars 分支写 .parquet 会把 total_amount 存为 Float64，与 python
+    # 路径的 pa.string() schema 不一致，破坏“逐字段一致”承诺）。
+    df = df.with_columns(((qty * price).round(2)).cast(pl.Utf8).alias("total_amount"))
 
     # is_anomaly 标记
     df = df.with_columns(
@@ -288,8 +299,11 @@ def _run_polars(ctx: PipelineContext, log, cl_dir: str) -> dict[str, Any]:
     # customers/products 透传：读 Utf8 写 Utf8，保证产物与 Python 路径一致
     for name in ("customers", "products"):
         src = os.path.join(ctx.run_dir, "02_valid", "valid_" + name + ".csv")
-        if os.path.exists(src):
-            ref_df = pl.read_csv(src, infer_schema_length=0)
+        if _table_exists(src, ctx.config):
+            if _get_storage_backend(ctx.config) != "local_csv":
+                ref_df = table_read(src, ctx.config)
+            else:
+                ref_df = pl.read_csv(src, infer_schema_length=0)
             ref_fields = list(ref_df.columns)
             table_write(
                 os.path.join(cl_dir, name + "_clean.csv"),

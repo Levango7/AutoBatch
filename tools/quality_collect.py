@@ -14,11 +14,16 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 
 LOG_PATH = os.path.join("benchmarks", "quality_pytest.log")
 
 
 def main(argv: list[str]) -> int:
+    # 首行即打 START 标记：若 runner 平台层在解释器启动前拦截，job 日志里
+    # 连 START 都不会出现→判定为平台故障；若 START 在而 DONE 缺→pytest 层问题。
+    t0 = time.time()
+    print("[qcollect] START t=%.3f pid=%d" % (t0, os.getpid()), flush=True)
     cmd = [sys.executable, "-m", "pytest", *argv]
     print("[qcollect] run:", " ".join(cmd), flush=True)
     proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
@@ -40,6 +45,7 @@ def main(argv: list[str]) -> int:
             for x in lines[-40:]:
                 if x.strip():
                     print(f"::error::TAIL|{x[:170]}", flush=True)
+    print("[qcollect] DONE t=%.3f elapsed=%.1fs" % (time.time(), time.time() - t0), flush=True)
     return proc.returncode
 
 

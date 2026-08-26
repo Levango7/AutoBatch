@@ -215,6 +215,13 @@ def _table_write_parquet(
         df_or_rows.write.mode("overwrite").parquet(target)
         return n
     elif engine_backend == "polars":
+        import polars as pl  # lazy import
+
+        # 兼容 List[Dict] 输入（ingest 的 parquet 分支传 rows，python 路径
+        # 用 pyarrow 处理 list，polars 路径需显式转 DataFrame 再写）。
+        if not hasattr(df_or_rows, "write_parquet"):
+            fields = fields or (list(df_or_rows[0].keys()) if df_or_rows else [])
+            df_or_rows = pl.DataFrame(df_or_rows, schema=fields, orient="row")
         if is_s3:
             opts = _build_polars_s3_options(cfg)
             df_or_rows.write_parquet(target, compression=compression, storage_options=opts)

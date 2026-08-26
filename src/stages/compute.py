@@ -298,13 +298,19 @@ def _customer_value_incremental(
 def _load_clean_polars(ctx: PipelineContext, name: str):
     """读 03_clean/<name>_clean.csv 为 polars.DataFrame（所有列 Utf8）.
 
-    Returns None when file missing.
+    local_csv 下用 ``pl.read_csv(infer_schema_length=0)`` 保留 Utf8；
+    parquet/iceberg 下读 .csv.parquet（上游 pyarrow 写全 String，读回保持
+    Utf8 与 local_csv 一致）。Returns None when file missing.
     """
     import polars as pl  # lazy import
 
+    from ..helpers import _get_storage_backend, table_read
+
     path = os.path.join(ctx.run_dir, "03_clean", name + "_clean.csv")
-    if not os.path.exists(path):
+    if not _table_exists(path, ctx.config):
         return None
+    if _get_storage_backend(ctx.config) != "local_csv":
+        return table_read(path, ctx.config)
     return pl.read_csv(path, infer_schema_length=0)
 
 

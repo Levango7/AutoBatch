@@ -389,7 +389,7 @@ Phase 3 性能优势：
 | 维度 | AutoBatch（单机原型） | AutoBatch（Phase 5 终态） | Airflow + Spark + Iceberg | dbt + Snowflake | 纯 Spark |
 |---|---|---|---|---|---|
 | 部署复杂度 | 零依赖，`python main.py` 即跑 | Docker Compose 一键集群 | 多组件编排（Airflow + Spark + Iceberg + MinIO） | 云托管，零运维 | 集群部署 + JDK + 网络配置 |
-| 规模上限 | **Spark 容器单机实测至 500 万行全链路**（227.7s，DQ 0.9994；Docker 15GB VM 内存边界止步于 10M，见 benchmarks/README.md）；python/polars 单机百万级（1M 行 polars 80s）；亿行级为设计目标，验证工具已就绪（`tools/bench_scale_cluster.py`，需 ≥48GB 内存环境） | 亿行级（多机线性扩展，设计目标） | 亿行级+ | 亿行级（云弹性） | 亿行级+ |
+| 规模上限 | **Spark 容器单机实测至 1000 万行全链路**（251.6s，DQ 0.9994；10M clean 阶段 OOM 由 driver 侧 toPandas 收集引发，已修复，26GB VM 下通过，见 benchmarks/README.md）；python/polars 单机百万级（1M 行 polars 80s）；亿行级为设计目标，验证工具已就绪（`tools/bench_scale_cluster.py`，需 ≥48GB 内存环境） | 亿行级（多机线性扩展，设计目标） | 亿行级+ | 亿行级（云弹性） | 亿行级+ |
 | 增量处理 | Phase 1 高水位（零依赖） | Iceberg snapshot diff | 需自建或依赖湖表 | 增量模型（dbt incremental） | 需自建或依赖湖表 |
 | 湖表能力 | ❌（CSV 文件） | ✅ ACID + time travel + schema evolution | ✅（Iceberg/Delta/Hudi） | ✅（Snowflake 内置） | ✅（Iceberg/Delta/Hudi） |
 | 质量规则 | 8 类配置驱动，内置 | 同左 + Spark SQL 向量化 | Great Expectations / Deequ | dbt tests | Deequ |

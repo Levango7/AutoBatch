@@ -20,18 +20,21 @@ benchmarks/
 上传 MinIO → Spark 引擎经 S3 直读跑完整五阶段 → 每次运行的阶段耗时/行数/DQ
 落盘 `runs/<batch>.json` 作为可提交证据。
 
-**已实测（Docker Desktop 单机 VM：15GB 内存 / 32 vCPU，Spark local[4-8]，Parquet/S3）：**
+**已实测（Docker Desktop 单机 VM：26GB 内存 / 32 vCPU，Spark local[8]，Parquet/S3）：**
 
 | 规模 | pipeline 耗时 | DQ Score | 证据 |
 |---|---|---|---|
 | 100 万行 | 151 s | 0.9994 | `runs/bench-local-1000000-d29e27.json` |
-| **500 万行** | **227.7 s** | 0.9994 | `runs/bench-local-5000000-1817bb.json` |
+| 500 万行 | 227.7 s | 0.9994 | `runs/bench-local-5000000-1817bb.json` |
+| **1000 万行** | **251.6 s** | 0.9994 | `runs/bench-local-10000000-f2e765.json` |
 
-5M 分阶段：ingest 22.7s / validate 58.4s / clean 95.0s / compute 37.9s / output 13.4s。
+10M 分阶段：ingest 51.9s / validate 97.6s / clean 41.2s / compute 43.9s / output 15.5s。
 
-**规模边界（实测结论）**：15GB VM 下 1000 万行的 clean 阶段（全列去重 shuffle）
-会触顶 OOM——这是执行环境内存边界而非代码缺陷；亿行级验证需 ≥48GB 内存的
-单机或真集群横向扩容。命令已就绪：
+**规模边界（实测结论）**：1000 万行此前在 15GB VM 下 clean 阶段触顶 OOM，
+根因是 clean 阶段 `df.toPandas().to_dict()` 把全量数据收集进 driver Python
+堆（10M 行 ≈ 9.8GB RSS）——代码缺陷而非环境边界。修复（改从磁盘读，
+见 `src/stages/clean.py`）并升级 VM 到 26GB 后 10M 全链路通过且 DQ 保真。
+亿行级仍需更大内存或真集群横向扩容；命令已就绪：
 
 ```bash
 # ≥48GB 内存环境（或 Docker VM 内存调大后）直接执行：

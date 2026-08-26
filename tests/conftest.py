@@ -908,11 +908,48 @@ def _minio_available() -> bool:
 MINIO_AVAILABLE = _minio_available()
 
 
+# PyIceberg 可用性检查（用于 Iceberg 测试 skipif）
+def _pyiceberg_available() -> bool:
+    """检查 PyIceberg 是否可用（导入测试 + 基础功能）。"""
+    try:
+        import pyiceberg  # noqa: F401
+        import pyarrow  # noqa: F401
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+PYICEBERG_AVAILABLE = _pyiceberg_available()
+
+
 # ----------------------------------------------------------------------
 # Phase 4 Iceberg storage fixture（见 docs/evolution.md §6.x）
 # ----------------------------------------------------------------------
 @pytest.fixture
 def iceberg_env(_same_drive_tmp_root, request):
+    """Iceberg storage 测试环境：SQL catalog + SQLite + 本地 warehouse.
+
+    在同盘临时目录下复制 pipeline_small.json，把 storage.backend 改为 "iceberg"，
+    配 SQL catalog（SQLite，零额外服务），warehouse 指向本地临时目录.
+
+    返回 dict:
+        cfg            — 已配置好的配置 dict（storage.backend="iceberg"）
+        cfg_path       — 配置文件路径
+        work_dir       — 工作目录（绝对路径，同盘）
+        data_dir       — data/raw 目录
+        run_root       — run 根目录（ROOT/run）
+        warehouse_dir  — Iceberg warehouse 目录
+        catalog_db     — SQLite catalog 数据库路径
+        orders_path    — orders.csv 路径
+        customers_path — customers.csv 路径
+        products_path  — products.csv 路径
+
+    cleanup: 测试结束后清理本 fixture 创建的 test-iceberg-* run_dir.
+    """
+    if not PYICEBERG_AVAILABLE:
+        pytest.skip("pyiceberg not installed or unavailable")
+
+    work_dir = tempfile.mkdtemp(prefix="autobatch_iceberg_", dir=_same_drive_tmp_root)
     """Iceberg storage 测试环境：SQL catalog + SQLite + 本地 warehouse.
 
     在同盘临时目录下复制 pipeline_small.json，把 storage.backend 改为 "iceberg"，
@@ -1134,6 +1171,8 @@ def spark_iceberg_env(_same_drive_tmp_root, request):
 
     cleanup: 测试结束后清理 test-spark-iceberg-* run_dir + 还原环境变量.
     """
+    if not PYICEBERG_AVAILABLE:
+        pytest.skip("pyiceberg not installed or unavailable")
     # 跨平台探测 Spark/Hadoop 路径（环境变量优先，系统路径次之，Windows 回退）
     spark_paths = detect_spark_paths()
     old_env = _build_spark_env(spark_paths)

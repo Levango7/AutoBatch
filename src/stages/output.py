@@ -27,6 +27,7 @@ from typing import Any
 from ..helpers import (
     ROOT,
     PipelineContext,
+    _get_storage_backend,
     csv_lines,
     file_sha256,
     json_save,
@@ -189,17 +190,21 @@ def _write_orders_final_python(ctx: PipelineContext, out_dir: str) -> tuple[int,
 
 
 def _write_orders_final_polars(ctx: PipelineContext, out_dir: str) -> tuple[int, int]:
-    """Polars 路径：pl.read_csv → 加标记列 → table_write.
+    """Polars 路径：读 03_clean → 加标记列 → table_write.
 
-    读时 ``infer_schema_length=0`` 保留所有列为 Utf8，保证写出 CSV 与
-    Python 路径逐字段一致。
+    local_csv 下用 ``pl.read_csv(infer_schema_length=0)`` 保留所有列为 Utf8；
+    parquet/iceberg 下读 .csv.parquet（上游 pyarrow 写全 String，读回保持
+    Utf8 与 Python 路径一致）。保证写出产物与 Python 路径逐字段一致。
     """
     import polars as pl  # lazy import
 
-    from ..helpers import table_write
+    from ..helpers import table_read, table_write
 
     src = os.path.join(ctx.run_dir, "03_clean", "orders_clean.csv")
-    df = pl.read_csv(src, infer_schema_length=0)
+    if _get_storage_backend(ctx.config) != "local_csv":
+        df = table_read(src, ctx.config)
+    else:
+        df = pl.read_csv(src, infer_schema_length=0)
     rows_in = df.height
     # 加标记列（与 Python 路径一致：_batch_id, _source_file）
     df = df.with_columns(

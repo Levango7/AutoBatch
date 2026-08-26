@@ -2,16 +2,19 @@
 
 Phase 2a 增加 Polars 列式分支（``ctx.engine_backend == "polars"``）：
 - 去重用 ``df.unique(subset=..., keep="first", maintain_order=True)``
-- 补缺用 ``pl.when(col == "").then(default).otherwise(col)``
-- ``total_amount`` 用 ``(quantity * unit_price).round(2)`` 表达式
+- 补缺用 ``pl.when(is_null() | strip=="" ).then(default).otherwise(col)``
+- ``total_amount`` 用 ``(quantity * unit_price * (1 - discount)).round(2)`` 表达式
+  （三引擎统一：discount 列存在时扣减，解析失败/缺失按 0）
 - ``is_anomaly`` 用 ``pl.col("order_id").is_in(outlier_keys)`` 标记
 - 写出用 ``table_write``
 
 Phase 2b 增加 Spark 分布式分支（``ctx.engine_backend == "spark"``）：
-- 去重用 ``df.dropDuplicates(["order_id"])``（Spark DataFrame API）
-- 补缺用 ``df.fillna(fill_missing)``（Spark 用 fillna，不是 fill_null）
+- 去重用窗口 ``row_number()==1`` 按稳定行序（rdd.zipWithIndex + cache 物化）
+  保留首次出现，对齐 Python seen-set keep-first（原 dropDuplicates 非确定）
+- 补缺用 ``F.when(null 或 strip=="" → default)``（对齐 Python 语义）
 - ``total_amount`` 用 ``F.round(F.col("quantity") * F.col("unit_price") * (1 - F.col("discount")), 2)``；
-  当前数据集无 ``discount`` 列时退化为 ``F.round(qty * price, 2)`` 与 Python/Polars 路径对齐
+  三引擎统一：discount 列存在时扣减（解析失败/null 按 0），无该列时退化为
+  ``F.round(qty * price, 2)``，与 Python/Polars 路径结果一致
 - ``is_anomaly`` 用 ``F.when(col("order_id").isin(outlier_keys), lit("1")).otherwise(lit("0"))``
   条件表达式（与 Python/Polars 路径的 outlier_keys 集合标记语义一致，参见 docs/evolution.md §4.3.2.2）
 - 读入用 ``table_read(path, cfg, spark=ctx.spark_session)``
@@ -67,7 +70,10 @@ def _clean_orders(ctx: PipelineContext, log) -> tuple[int, list[dict[str, Any]],
                 row[col] = default
         qty = as_int(row.get("quantity")) or 0
         price = as_float(row.get("unit_price")) or 0.0
-        row["total_amount"] = round(qty * price, 2)
+        # 三引擎统一：discount 列存在（含值为空/不可解析）时按 0 折扣参与计算；
+        # 无 discount 列时 row.get 返回 None → 0.0，结果与旧公式一致。
+        discount = as_float(row.get("discount")) or 0.0
+        row["total_amount"] = round(qty * price * (1.0 - discount), 2)
         row[flag_col] = "1" if row.get("order_id") in outlier_keys else "0"
         kept.append(row)
     log.info("clean orders", rows_in=len(rows), rows_out=len(kept), dup_dropped=dropped)
@@ -114,24 +120,36 @@ def _clean_orders_polars(ctx: PipelineContext, log) -> tuple[int, Any, list[str]
     df = df.unique(subset=dedup_cols, keep="first", maintain_order=True)
     dropped = rows_in - df.height
 
-    # 补缺：空字符串替换为 default（与 Python `str(v).strip() == ""` 一致）
+    # 补缺：null 或空白字符串替换为 default（与 Python
+    # `v is None or str(v).strip() == ""` 一致）。
+    # 注：旧实现只替换空字符串，polars read_csv 把空字段读为 null 时不触发
+    # 替换，与 Python 路径分歧——条件补上 is_null。
     for col, default in fill.items():
         if col in df.columns:
             df = df.with_columns(
-                pl.when(pl.col(col).cast(pl.Utf8).str.strip_chars() == "")
+                pl.when(pl.col(col).is_null() | (pl.col(col).cast(pl.Utf8).str.strip_chars() == ""))
                 .then(pl.lit(str(default)))
                 .otherwise(pl.col(col))
                 .alias(col)
             )
 
-    # total_amount = round(quantity * unit_price, 2)
+    # total_amount = round(quantity * unit_price * (1 - discount), 2)
+    # 三引擎统一：discount 列存在时扣减折扣（对齐 Spark 公式）；列缺失或
+    # 解析失败/空值按 0 处理（strict=False cast → null → fill_null(0)，
+    # 对齐 as_float(...) or 0.0）。
     # cast(strict=False) 把非法值变 null，fill_null(0) 对齐 as_int/as_float 的 `or 0`
     qty = pl.col("quantity").cast(pl.Float64, strict=False).fill_null(0.0)
     price = pl.col("unit_price").cast(pl.Float64, strict=False).fill_null(0.0)
+    if "discount" in df.columns:
+        disc = pl.col("discount").cast(pl.Float64, strict=False).fill_null(0.0)
+    else:
+        disc = pl.lit(0.0)
     # 转回 Utf8：与 python 路径 str(round(...)) 一致，parquet 写出时保留 String
-    #（否则 polars 分支写 .parquet 会把 total_amount 存为 Float64，与 python
+    # （否则 polars 分支写 .parquet 会把 total_amount 存为 Float64，与 python
     # 路径的 pa.string() schema 不一致，破坏“逐字段一致”承诺）。
-    df = df.with_columns(((qty * price).round(2)).cast(pl.Utf8).alias("total_amount"))
+    df = df.with_columns(
+        ((qty * price * (pl.lit(1.0) - disc)).round(2)).cast(pl.Utf8).alias("total_amount")
+    )
 
     # is_anomaly 标记
     df = df.with_columns(
@@ -155,11 +173,54 @@ def _clean_orders_polars(ctx: PipelineContext, log) -> tuple[int, Any, list[str]
     return rows_in, df, out_fields
 
 
+def _dedup_keep_first_spark(df: Any, dedup_cols: list[str]) -> tuple[int, Any]:
+    """Spark 确定性去重：按稳定行序保留重复组第一条，返回 (rows_in, deduped_df).
+
+    ``dropDuplicates`` 不保证保留重复组中的哪一行（Spark 文档明确非确定），
+    与 Python seen-set keep-first / Polars unique(keep="first") 分歧。这里用
+    窗口 ``row_number()==1`` 判定：
+
+    - 行号由 ``rdd.zipWithIndex()`` 在数据本身上派生，随后立即 ``cache()`` +
+      ``count()`` 物化——所有下游 action（dropped 计数、写出、rows_out）
+      共享同一份物理行序，保留哪一行完全确定且可复现。
+    - zipWithIndex 后 ``rdd.toDF()`` 的结构为 ``_1``（原行 Row 折叠成的
+      struct 列）+ ``_2``（Long 索引列），需把 ``_1.<col>`` 逐一展开还原，
+      并把 ``_2`` 重命名为 ``_row_idx``；返回前剔除 ``_row_idx`` 保持原 schema。
+    - null key：partitionBy 把 null 视为同一组参与去重，与 Python seen-set 中
+      ``row.get(c, "") 组成的 tuple``（None 作为真实 key）语义一致。
+    - 窗口函数不允许直接出现在 WHERE 子句（SQLSTATE 42601
+      WINDOW_FUNCTION_NOT_ALLOWED_IN_CLAUSE），必须先 ``withColumn`` 物化
+      ``row_number`` 再按列过滤。
+    """
+    from pyspark.sql import functions as F
+    from pyspark.sql.window import Window
+
+    indexed = (
+        df.rdd.zipWithIndex()
+        .toDF()
+        .select(
+            *[F.col("_1." + c).alias(c) for c in df.columns],
+            F.col("_2").alias("_row_idx"),
+        )
+    )
+    indexed = indexed.cache()
+    rows_in = indexed.count()  # 立即物化缓存，后续所有 action 行序一致
+    w = Window.partitionBy(*dedup_cols).orderBy(F.col("_row_idx"))
+    deduped = (
+        indexed.withColumn("_rn", F.row_number().over(w))
+        .filter(F.col("_rn") == 1)
+        .drop("_row_idx", "_rn")
+    )
+    return rows_in, deduped
+
+
 def _clean_orders_spark(ctx: PipelineContext, log) -> tuple[int, Any, list[str]]:
     """Spark 分布式实现：去重 / 补缺 / total_amount / is_anomaly.
 
     通过 ``table_read`` 读入 SparkDataFrame（``spark.read.csv`` 默认 inferSchema），
-    去重用 ``dropDuplicates``，补缺用 ``fillna``，``total_amount`` 用 Spark 表达式，
+    去重用窗口 ``row_number()==1`` 按稳定行序保留首次出现（``_dedup_keep_first_spark``，
+    替代非确定的 dropDuplicates），补缺用 ``F.when(null 或空白, default)``
+    （对齐 Python 的 None/strip=="" 语义），``total_amount`` 用 Spark 表达式，
     ``is_anomaly`` 用 ``F.when(...)`` 条件表达式标记。
 
     Args:
@@ -182,27 +243,52 @@ def _clean_orders_spark(ctx: PipelineContext, log) -> tuple[int, Any, list[str]]
 
     # Spark 路径读入：table_read 在 backend="spark" 下返回 SparkDataFrame
     df = table_read(src, cfg, spark=ctx.spark_session)
-    rows_in = df.count()  # 触发 action 取行数
     dedup_cols = cconf.get("dedup_columns", ["order_id"])
     fill = cconf.get("fill_missing", {})
     flag_col = cconf.get("flag_column", "is_anomaly")
 
-    # 去重：dropDuplicates 保留首次出现（与 Python seen-set / Polars unique(keep="first") 对齐）
-    df = df.dropDuplicates(dedup_cols)
-    dropped = rows_in - df.count()
+    # 去重：按稳定行序保留首次出现（对齐 Python seen-set / Polars
+    # unique(keep="first")）。旧实现的 dropDuplicates 不保证保留重复组中的
+    # 哪一行（Spark 文档明确非确定），注释却声称"保留首次出现"，与 Python
+    # 路径实际分歧。改为窗口 row_number()==1 判定：
+    # - orderBy 用 rdd.zipWithIndex() 派生的行号，zipWithIndex 后立即
+    #   cache()+count() 物化——所有下游 action 共享同一份行序，判定确定；
+    #   （zipWithIndex 后 toDF 把原行折叠为 struct 列 `_1` + 索引列 `_2`，
+    #    须展开 `_1.*` 还原原始列）
+    # - partitionBy 把 null key 视为同一组，与 Python seen-set 中
+    #   tuple(None)/tuple("") 作为真实 key 参与去重的行为一致。
+    rows_in, df = _dedup_keep_first_spark(df, dedup_cols)
+    dropped = rows_in - df.count()  # 去重丢弃数 = 读入行数 - 保留行数
 
-    # 补缺：Spark fillna 按列填默认值（与 Python `str(v).strip() == ""` 替换语义对齐）
-    if fill:
-        df = df.fillna(fill)
+    # 补缺：null 或空白字符串 → default（对齐 Python `v is None or
+    # str(v).strip() == ""`；旧实现 fillna 只填 null，parquet/cluster 模式下
+    # 字符串列残留的 "" 不会被替换，与 Python 分歧）。
+    for col, default in fill.items():
+        if col in df.columns:
+            df = df.withColumn(
+                col,
+                F.when(
+                    F.col(col).isNull() | (F.trim(F.col(col).cast("string")) == ""),
+                    F.lit(str(default)),
+                ).otherwise(F.col(col)),
+            )
 
     # total_amount = round(quantity * unit_price * (1 - discount), 2)
-    # 若 discount 列存在则用完整公式，否则退化为 qty * price（与 Python/Polars 路径对齐）
+    # 三引擎统一：discount 列存在时扣减折扣，解析失败/null 按 0 处理
+    # （coalesce 对齐 python as_float(...) or 0.0；旧实现直接
+    # `1 - cast(discount)`，非法 discount 会产出 null total_amount）。
+    # 用 try_cast 而非 cast：Spark 4.x 默认 ANSI 开启，cast 对非法值
+    # （如 "abc"）抛 CAST_INVALID_INPUT 而不是返回 null，只有 try_cast 在
+    # ANSI 开/关下都保证"解析失败 → null → coalesce 0"的 python 语义。
     # cluster 模式 ingest 用 createDataFrame(str_rows)，quantity/unit_price 是 string，
-    # 需先 cast 成 double（单机模式 inferSchema 已是 double，cast 无副作用）。
+    # 需先 cast 成 double（单机模式 inferSchema 已是 double，cast 无副作用；
+    # 这两列经 validate 的 completeness/range 规则校验，值必为合法数值，
+    # ANSI 模式下 cast 不会失败）。
     qty = F.col("quantity").cast("double")
     price = F.col("unit_price").cast("double")
     if "discount" in df.columns:
-        amt_expr = F.round(qty * price * (F.lit(1.0) - F.col("discount").cast("double")), 2)
+        disc = F.coalesce(F.col("discount").try_cast("double"), F.lit(0.0))
+        amt_expr = F.round(qty * price * (F.lit(1.0) - disc), 2)
     else:
         amt_expr = F.round(qty * price, 2)
     df = df.withColumn("total_amount", amt_expr)

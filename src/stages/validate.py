@@ -154,7 +154,10 @@ def run(ctx: PipelineContext, log) -> dict[str, Any]:
             log.warn("no rules for dataset", dataset=name)
             continue
         path = _select_source_path(ctx, raw_dir, finfo)
-        src_rel_by_name[name] = os.path.relpath(path, ctx.run_dir)
+        # 血缘/manifest 声明统一用 "/" 分隔：Windows 上 os.path.relpath 产生
+        # 反斜杠路径，而 output._register_edges 用 "/" 规范化的 artifact key
+        # 匹配，不归一的话 validate 阶段的全部血缘边在 Windows 上被静默丢弃.
+        src_rel_by_name[name] = os.path.relpath(path, ctx.run_dir).replace("\\", "/")
 
         if is_spark:
             from pyspark.sql import functions as F

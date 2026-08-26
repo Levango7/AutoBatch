@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import functools
 import hashlib
 import importlib
 import json
@@ -12,7 +14,8 @@ import sys
 import threading
 import time
 import traceback
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any, Optional
 
 try:
     # 配置校验是可选增强：pydantic 未安装时跳过校验，保持核心路径零第三方依赖
@@ -27,6 +30,7 @@ from .helpers import (
     StageLog,
     _apply_spark_base_config,
     _get_engine_backend,
+    _get_storage_backend,
     _table_exists,
     abs_path,
     batch_id_new,
@@ -41,7 +45,7 @@ from .logging_setup import close_logging, setup_logging
 from .metrics import MetricsRecorder
 from .monitoring import HealthServer, MetricsSampler, check_alerts, load_monitoring_config
 from .openlineage import OpenLineageEmitter
-from .state import StateStore
+from .state import _DERIVED_COLS, _DIMENSION_COLS, StateStore, recompute_derived
 
 STAGES = ["ingest", "validate", "clean", "compute", "output"]
 
@@ -341,6 +345,15 @@ def _run_with_timeout(
     timeout_seconds=None / <=0 时不启用超时，直接在当前线程执行 fn（向后兼容，
     也避免无谓的线程开销）.
 
+    任务 #74 M17：
+    - 超时路径把未结束的 worker 线程挂到异常的 ``stage_thread`` 属性上
+      （setattr：StageTimeoutError 未声明该字段），供重试逻辑在退避窗口内
+      做 bounded join——尽量等僵尸线程自己退出后再重试，缩小新旧 attempt
+      并发写产物的竞态窗口（线程无法强杀，残留风险见任务报告）.
+    - done_event 已置位但 holder 既无 value 也无 error 的极端竞态下，原实现
+      直接取 result_holder["value"] 会抛 KeyError（对调用方不可辨识）；
+      改为抛 RuntimeError 显式化，可被重试机制正常处理.
+
     Args:
         fn:              无参可调用，封装了 stage 执行逻辑.
         timeout_seconds: 超时阈值（秒），None 或 <=0 表示不限制.
@@ -352,7 +365,8 @@ def _run_with_timeout(
         fn() 的返回值.
 
     Raises:
-        StageTimeoutError: 超时（fn 未在阈值内完成）.
+        StageTimeoutError: 超时（fn 未在阈值内完成）；携带 stage_thread 引用.
+        RuntimeError:      工作线程置位完成事件但未留下结果/异常.
         Exception:        fn 抛出的任何异常原样向上传播.
     """
     if not timeout_seconds or timeout_seconds <= 0:
@@ -375,9 +389,21 @@ def _run_with_timeout(
     worker.start()
     if not done_event.wait(timeout=timeout_seconds):
         elapsed = time.monotonic() - start
-        raise StageTimeoutError(stage_name, batch_id, attempt, timeout_seconds, elapsed)
+        err = StageTimeoutError(stage_name, batch_id, attempt, timeout_seconds, elapsed)
+        # 任务 #74 M17：挂上僵尸 worker 引用，重试逻辑据此 bounded join.
+        # 用 setattr：StageTimeoutError 未声明该动态字段，直接赋值会被 mypy 拒绝.
+        setattr(err, "stage_thread", worker)  # noqa: B010 - 动态附加字段（见 docstring）
+        raise err
     if "error" in result_holder:
         raise result_holder["error"]
+    if "value" not in result_holder:
+        # 任务 #74 M17：极端竞态防护——done_event 已 set 但 holder 无 value/error
+        # （如工作线程在 finally 前被中断）。原实现取 ["value"] 抛 KeyError，
+        # 调用方无法区分"stage 失败"与"基础设施故障"；显式 RuntimeError 后
+        # 可进入重试/backoff 常规路径.
+        raise RuntimeError(
+            f"stage thread terminated without result (stage={stage_name}, batch={batch_id})"
+        )
     return result_holder["value"]
 
 
@@ -445,14 +471,97 @@ def _run_stage_with_retry(
         if cleanup_on_retry:
             _cleanup_stage_output(stage_name, ctx.run_dir, logger)
 
-        try:
-            summary = _run_with_timeout(
-                lambda: stage_fn(ctx, slog),
-                timeout_s,
-                stage_name,
-                batch_id,
-                attempt,
+        # 任务 #74 M17：重试 attempt 使用独立 StageLog（logs/<stage>_attempt<n>.jsonl），
+        # 避免超时后无法强杀的前一 attempt 僵尸线程继续写同一份日志造成交错
+        # （attempt 0 沿用调用方打开的主日志文件，成功后无需额外清理）.
+        attempt_ctx: contextlib.AbstractContextManager[StageLog]
+        if attempt == 0:
+            attempt_ctx = contextlib.nullcontext(slog)
+        else:
+            attempt_ctx = StageLog(
+                os.path.join(ctx.run_dir, "logs", f"{stage_name}_attempt{attempt}.jsonl"),
+                batch_id=batch_id,
+                stage=stage_name,
             )
+
+        with attempt_ctx as attempt_slog:
+            try:
+                summary = _run_with_timeout(
+                    # partial 立即绑定当前 attempt 的 slog（lambda 捕获循环变量
+                    # 会触发 B023，且语义上更脆弱）
+                    functools.partial(stage_fn, ctx, attempt_slog),
+                    timeout_s,
+                    stage_name,
+                    batch_id,
+                    attempt,
+                )
+            except Exception as exc:  # noqa: BLE001
+                # 仅捕获 Exception，让 KeyboardInterrupt/SystemExit 正常传播
+                # （重试逻辑不应吞掉用户主动中断信号）。
+                last_exc = exc
+                last_tb = traceback.format_exc()
+                err_msg = f"{type(exc).__name__}: {exc}"
+                # 结构化日志：stage / batch / attempt / error / traceback
+                logger.error(
+                    "stage attempt failed",
+                    extra={
+                        "stage": stage_name,
+                        "batch": batch_id,
+                        "attempt": attempt,
+                        "max_retries": max_retries,
+                        "error": err_msg,
+                    },
+                )
+                attempt_slog.error(
+                    "stage attempt failed",
+                    attempt=attempt,
+                    max_retries=max_retries,
+                    error=err_msg,
+                    traceback=last_tb,
+                )
+
+                if attempt >= max_retries:
+                    # 重试耗尽，跳出循环抛 StageExecutionError
+                    break
+
+                # 计算指数退避：min(base * 2^attempt, max)
+                backoff = min(backoff_base * (2**attempt), backoff_max)
+                logger.info(
+                    "stage retry scheduled",
+                    extra={
+                        "stage": stage_name,
+                        "batch": batch_id,
+                        "attempt": attempt,
+                        "backoff_seconds": backoff,
+                    },
+                )
+                attempt_slog.info("stage retry scheduled", attempt=attempt, backoff_seconds=backoff)
+                # 任务 #74 M17：超时失败的旧 worker 线程仍在运行（Python 线程不可强杀）。
+                # 退避前先 bounded join：线程在窗口内退出则只补睡剩余时间；
+                # 窗口耗尽仍存活则记录泄漏告警后继续重试（重试前的输出目录清理
+                # 覆盖大部分残留产物；ctx/state 的僵尸写为残留风险，见任务报告）。
+                zombie_worker = getattr(exc, "stage_thread", None)
+                if zombie_worker is not None and zombie_worker.is_alive():
+                    wait_start = time.monotonic()
+                    zombie_worker.join(timeout=backoff)
+                    if zombie_worker.is_alive():
+                        logger.error(
+                            "timed-out stage thread still alive after backoff window; "
+                            "retrying anyway (Python threads cannot be killed)",
+                            extra={
+                                "stage": stage_name,
+                                "batch": batch_id,
+                                "attempt": attempt,
+                            },
+                        )
+                    remaining = backoff - (time.monotonic() - wait_start)
+                    if remaining > 0:
+                        time.sleep(remaining)
+                else:
+                    # 非超时失败路径：恰好 sleep 一次完整退避
+                    # （test_error_handling.py 的退避行为契约）.
+                    time.sleep(backoff)
+                continue
             if attempt > 0:
                 logger.info(
                     "stage succeeded after retry",
@@ -460,48 +569,6 @@ def _run_stage_with_retry(
                 )
                 slog.info("stage succeeded after retry", attempt=attempt)
             return summary
-        except Exception as exc:  # noqa: BLE001
-            # 仅捕获 Exception，让 KeyboardInterrupt/SystemExit 正常传播
-            # （重试逻辑不应吞掉用户主动中断信号）。
-            last_exc = exc
-            last_tb = traceback.format_exc()
-            err_msg = f"{type(exc).__name__}: {exc}"
-            # 结构化日志：stage / batch / attempt / error / traceback
-            logger.error(
-                "stage attempt failed",
-                extra={
-                    "stage": stage_name,
-                    "batch": batch_id,
-                    "attempt": attempt,
-                    "max_retries": max_retries,
-                    "error": err_msg,
-                },
-            )
-            slog.error(
-                "stage attempt failed",
-                attempt=attempt,
-                max_retries=max_retries,
-                error=err_msg,
-                traceback=last_tb,
-            )
-
-            if attempt >= max_retries:
-                # 重试耗尽，跳出循环抛 StageExecutionError
-                break
-
-            # 计算指数退避：min(base * 2^attempt, max)
-            backoff = min(backoff_base * (2**attempt), backoff_max)
-            logger.info(
-                "stage retry scheduled",
-                extra={
-                    "stage": stage_name,
-                    "batch": batch_id,
-                    "attempt": attempt,
-                    "backoff_seconds": backoff,
-                },
-            )
-            slog.info("stage retry scheduled", attempt=attempt, backoff_seconds=backoff)
-            time.sleep(backoff)
 
     # 重试耗尽仍失败 → 抛 StageExecutionError（携带完整上下文）。
     # 超时例外：StageTimeoutError 是 StageExecutionError 子类，保持原类型
@@ -534,8 +601,14 @@ def _run_stage_with_retry(
 #
 # 恢复的状态：quality（validate 写入 manifest）、source、lineage 边
 # （output 的 _register_edges 按 target 键覆盖写，恢复旧边后重跑 output
-# 会幂等重建）。水位不涉及——失败路径本就不推进水位（两阶段提交），
-# 续跑成功后由 _advance_and_merge 正常推进一次。
+# 会幂等重建）。此外任务 #74 C1/C2 还恢复**重跑下游 stage 所需的内存态**：
+#   - ingest 条目携带 ingested 文件描述列表（validate 的输入）与该批次
+#     staged 的水位/快照（staged_state，增量两阶段提交的暂存值）；
+#   - validate 条目携带 outlier_keys（clean 的输入）。
+# 不恢复会导致续跑 validate 零校验（DQ 虚报 1.0）、clean 缺键，以及
+# 增量提交丢失 staged 水位（下批重复聚合翻倍）。水位正式值不涉及——失败
+# 路径本就不推进水位（两阶段提交），续跑成功后由 _advance_and_merge 的
+# commit_batch 正常提升一次。
 # ---------------------------------------------------------------------------
 # 必需文件相对 run_dir 根目录（quality_summary.json 由 validate 写在批次根，
 # 见 stages/validate.py 的 json_save(ctx.run_dir, ...)）
@@ -600,6 +673,117 @@ def _stage_outputs_intact(stage: str, run_dir: str) -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# 任务 #74 C1/C2：续跑内存态的持久化/恢复辅助
+# ---------------------------------------------------------------------------
+# stage 成功时仅在 ctx 内存里产生下游必需的中间态（ingest 的 ingested 文件
+# 列表与 staged 水位；validate 的 outlier_keys）。续跑跳过成功 stage 后，
+# 重跑的下游 stage 读到的是全新空 ctx：validate 迭代空 ingested → 零校验
+# （DQ 虚报 1.0）；clean 缺 outlier_keys。因此把各 stage 的内存态随 manifest
+# 条目持久化，续跑恢复段再搬回 ctx；staged 水位的真正回填发生在初始化窗口
+# 的 ctx.state = store.load() 之后（见 _restore_staged_state 调用点）。
+
+# staged 字段集（与 StateStore.set_new_watermark / set_new_snapshot_id 的
+# 暂存键保持一致；抽取/回填只搬这些键，不扩散其他状态）。
+_STAGED_TABLE_KEYS = ("new_watermark", "new_seen_row_count", "new_batch_id")
+_STAGED_SNAPSHOT_KEYS = ("new_snapshot_id", "new_batch_id")
+
+
+def _extract_staged_state(state: dict[str, Any]) -> dict[str, Any]:
+    """Extract staged watermarks/snapshot ids from ctx.state ({} when none).
+
+    Task #74 C2: staged fields exist only in the crashed process's memory
+    (two-phase commit never writes them to disk). Persisting them in the
+    ingest stage's manifest entry lets a resume run restore them, so
+    ``commit_batch`` can promote this batch's watermark/snapshot exactly
+    once; without the restore the watermark would not advance and the NEXT
+    batch would re-aggregate this batch's rows (double counting).
+    """
+    out: dict[str, Any] = {}
+    for tname, info in (state.get("tables") or {}).items():
+        staged = {k: info[k] for k in _STAGED_TABLE_KEYS if k in info}
+        if staged:
+            out.setdefault("tables", {})[tname] = staged
+    for sname, info in (state.get("iceberg_snapshots") or {}).items():
+        staged = {k: info[k] for k in _STAGED_SNAPSHOT_KEYS if k in info}
+        if staged:
+            out.setdefault("iceberg_snapshots", {})[sname] = staged
+    return out
+
+
+def _restore_staged_state(state: dict[str, Any], staged: dict[str, Any]) -> None:
+    """Write back staged keys produced by ``_extract_staged_state``.
+
+    MUST run after ``store.load()`` (initialization window): ctx.state first
+    reflects on-disk state, then the staged values are overlaid so the
+    batch-end ``commit_batch`` promotes them exactly once. Missing table
+    sections are recreated (first-batch crash recovery: state.json may be
+    empty while the failed manifest carries the staged values).
+    """
+    for tname, info in (staged.get("tables") or {}).items():
+        state.setdefault("tables", {}).setdefault(tname, {}).update(info)
+    for sname, info in (staged.get("iceberg_snapshots") or {}).items():
+        state.setdefault("iceberg_snapshots", {}).setdefault(sname, {}).update(info)
+
+
+def _stage_resume_payload(st: dict[str, Any]) -> dict[str, Any]:
+    """Collect resume-relevant keys from a previous manifest stage entry.
+
+    ``Manifest.add_stage(extra=...)`` flattens keys onto the entry top level
+    (see lineage.py ``entry.update(extra)``), while the lineage wrap loop
+    nests ``lineage_decl`` under ``entry["extra"]``. Read leniently: top
+    level first, nested ``extra`` second.
+    """
+    extra = st.get("extra", {}) or {}
+    payload: dict[str, Any] = {}
+    for key in ("ingested", "staged_state", "outlier_keys", "lineage_decl"):
+        if key in st:
+            payload[key] = st[key]
+        elif key in extra:
+            payload[key] = extra[key]
+    return payload
+
+
+def _rebuild_aggregates_from_disk(ctx: PipelineContext, logger) -> dict[str, Any]:
+    """compute 被续跑跳过时，从 04_aggregates 产物重建 ctx.aggregates.
+
+    任务 #74 C1 补丁：output stage 消费 compute 写入 ctx.aggregates 的内存态
+    （dashboard_data.json 等）。compute 被续跑跳过后若不做重建，output 拿到
+    空聚合直接报错。产物完整性已由 _stage_outputs_intact 校验（04_aggregates
+    非空是 compute 续跑的前置条件），此处用 table_read 按 backend/storage
+    自动路由读回，形状与 compute 写入时一致：
+        {"daily", "category", "region_channel",
+         "customer_value": {"top", "tiers"}, "kpi"}.
+    必须在初始化窗口内调用（spark 路径需要 ctx.spark_session 已就绪）。
+    """
+    agg_dir = os.path.join(ctx.run_dir, "04_aggregates")
+
+    def _rows(fname: str) -> list[dict[str, Any]]:
+        path = os.path.join(agg_dir, fname)
+        if not _table_exists(path, ctx.config):
+            return []
+        result = table_read(path, ctx.config, spark=ctx.spark_session)
+        if ctx.engine_backend == "polars":
+            return result.to_dicts() if result is not None and result.height > 0 else []
+        if ctx.engine_backend == "spark":
+            return [row.asDict() for row in result.collect()]
+        rows, _ = result
+        return rows
+
+    kpi_path = os.path.join(agg_dir, "kpi.json")
+    kpi = json_load(kpi_path) if os.path.isfile(kpi_path) else {}
+    return {
+        "daily": _rows("daily_sales.csv"),
+        "category": _rows("category_stats.csv"),
+        "region_channel": _rows("region_channel_stats.csv"),
+        "customer_value": {
+            "top": _rows("customer_value.csv"),
+            "tiers": _rows("customer_tier.csv"),
+        },
+        "kpi": kpi,
+    }
+
+
 def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
     run_root = abs_path(cfg["pipeline"].get("run_dir", "run"))
     os.makedirs(run_root, exist_ok=True)
@@ -632,6 +816,13 @@ def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
     # --- Resume (断点续跑) ---
     resumed_stages = set()
     resume_active = False
+    # 任务 #74 C2：从失败 manifest 收集 ingest 暂存的水位/快照，待初始化窗口
+    # ctx.state = store.load() 之后回填（此处 ctx.state 尚未加载，先收集）。
+    staged_to_restore: dict[str, Any] = {}
+    # 任务 #74 C1 补丁：compute 被续跑跳过时，其产物 ctx.aggregates（内存态）
+    # 不会被重建，而 output 直接消费它 → 必须在初始化窗口从 04_aggregates
+    # 磁盘产物重建（见 _rebuild_aggregates_from_disk）。
+    resume_aggregates_restore = False
     prev = _load_resume_plan(cfg, batch_id, run_dir, digest, logger)
     if prev is not None:
         resume_active = True
@@ -648,12 +839,27 @@ def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
                 # 检查产物是否完整
                 if _stage_outputs_intact(stage_name, run_dir):
                     resumed_stages.add(stage_name)
-                    # 复制 stage 记录到当前 manifest
+                    if stage_name == "compute":
+                        # compute 不会重跑 → 其内存产物 ctx.aggregates 需从磁盘重建
+                        resume_aggregates_restore = True
+                    # 任务 #74 C1+C2：从上次 manifest 条目取回续跑所需的内存态.
+                    # add_stage(extra=...) 平铺到条目顶层，两种位置都兼容读取.
+                    payload = _stage_resume_payload(st)
+                    if payload.get("ingested"):
+                        ctx.ingested = [dict(x) for x in payload["ingested"]]
+                    if payload.get("outlier_keys"):
+                        ctx.outlier_keys = set(payload["outlier_keys"])
+                    for section, tables in (payload.get("staged_state") or {}).items():
+                        for tname, info in tables.items():
+                            staged_to_restore.setdefault(section, {})[tname] = dict(info)
+                    # 复制 stage 记录到当前 manifest（并把续跑键再次持久化进
+                    # 新条目——若本轮再次失败，下一次 resume 仍能恢复）.
                     extra = st.get("extra", {}) or {}
                     extra["resumed"] = True
-                    # lineage_decl 由 add_stage(extra={...}) 平铺到 stage entry 顶层，
-                    # 也可能嵌套在 extra 里（两种写法都兼容）.
-                    lineage_decl = st.get("lineage_decl") or extra.get("lineage_decl", {})
+                    for key in ("ingested", "staged_state", "outlier_keys"):
+                        if key in payload:
+                            extra[key] = payload[key]
+                    lineage_decl = payload.get("lineage_decl") or {}
                     if lineage_decl:
                         for target, ups in lineage_decl.items():
                             # 快照是全量累积视图：按 target 覆盖写，与正常运行期
@@ -681,6 +887,10 @@ def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
                     # 产物不完整，不能续跑，回退全量执行
                     resume_active = False
                     resumed_stages.clear()
+                    resume_aggregates_restore = False
+                    # 任务 #74 C2：全量重跑会由 ingest 重新 stage 水位，
+                    # 已收集的旧 staged 值必须丢弃（否则会叠加出幻影水位）.
+                    staged_to_restore = {}
                     # 重置 manifest/ctx/metrics 为全新状态——恢复循环可能已把
                     # 前序 stage 写进 metrics，不重置会导致全量重跑后 stages 重复
                     manifest = Manifest(batch_id, digest, run_dir)
@@ -740,8 +950,36 @@ def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
             ctx.state = store.load()
             ctx.state_path = store.state_path
             ctx.incremental_enabled = True
+            # 任务 #74 C4 崩溃恢复：把上一次已越过原子提交点、但替换未完成的
+            # 暂存聚合收尾（幂等；无 pending 标记时为空操作）。必须早于任何
+            # stage 执行与本批次的 merge 暂存，保证所有读方看到的都是正式聚合.
+            completed_pending = store.complete_pending_aggregates(ctx.state)
+            if completed_pending:
+                logger.info(
+                    "pending aggregates completed from prior commit",
+                    extra={"stage": "pipeline", "aggregates": completed_pending},
+                )
+            # 任务 #74 C2：回填 resume 段从失败 manifest 收集的 staged 水位/
+            # 快照。必须在 store.load() 之后执行——ctx.state 此刻才反映磁盘
+            # 态；批次末尾 commit_batch 会把它们正式提升（恰好一次）。
+            if staged_to_restore:
+                _restore_staged_state(ctx.state, staged_to_restore)
+                logger.info(
+                    "staged watermark/snapshot restored from failed manifest",
+                    extra={"stage": "pipeline", "batch": batch_id},
+                )
             logger.info(
                 "incremental mode enabled", extra={"stage": "pipeline", "state_dir": state_dir}
+            )
+
+        # 任务 #74 C1 补丁：compute 被续跑跳过时，从 04_aggregates 磁盘产物
+        # 重建 ctx.aggregates（output 直接消费该内存态）。必须放在 spark 会
+        # 话初始化之后（spark backend 读回需要 ctx.spark_session 已就绪）。
+        if resume_active and resume_aggregates_restore:
+            ctx.aggregates = _rebuild_aggregates_from_disk(ctx, logger)
+            logger.info(
+                "ctx.aggregates rebuilt from disk for resumed compute",
+                extra={"stage": "pipeline", "batch": batch_id},
             )
 
         # 任务41 监控告警：加载 config/monitoring.json（缺省 disabled）.
@@ -836,7 +1074,29 @@ def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
                 rows_in = summary.get("rows_in", 0)
                 rows_out = summary.get("rows_out", 0)
                 dur = int((time.monotonic() - start) * 1000)
-                manifest.add_stage(name, "success", rows_in, rows_out, dur, log_path)
+                # 任务 #74 C1+C2：把重跑下游 stage 必需的内存态持久化到
+                # manifest 条目，供续跑恢复（读侧见 _stage_resume_payload）：
+                #   ingest   → ingested（validate 的输入）+ staged_state（C2）
+                #   validate → outlier_keys（clean 的输入）
+                stage_extra: dict[str, Any] = {}
+                if name == "ingest":
+                    if ctx.ingested:
+                        stage_extra["ingested"] = [dict(x) for x in ctx.ingested]
+                    staged_state = _extract_staged_state(ctx.state)
+                    if staged_state:
+                        stage_extra["staged_state"] = staged_state
+                elif name == "validate":
+                    if ctx.outlier_keys:
+                        stage_extra["outlier_keys"] = sorted(ctx.outlier_keys)
+                manifest.add_stage(
+                    name,
+                    "success",
+                    rows_in,
+                    rows_out,
+                    dur,
+                    log_path,
+                    extra=stage_extra or None,
+                )
                 metrics.record_stage(name, "success", dur, rows_in, rows_out)
                 # Collect lineage declarations from this stage into the shared map.
                 for target, ups in summary.get("lineage", {}).items():
@@ -896,6 +1156,22 @@ def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
 
                 break
 
+        # 任务 #74 C3+C4：两阶段提交前移到 manifest 定稿之前。全部 stage 成功
+        # 时才提交（水位/快照提升 + 聚合合并，见 _advance_and_merge 的暂存台账
+        # 协议）。提交失败不再被吞掉：把批次标记为 failed，使随后持久化的
+        # manifest/status.json 反映真实终态；staged 值未提升、台账未登记，
+        # 重跑本批次幂等（详见 docs/evolution.md §3.3.5 更新说明）。
+        if overall == "success" and incremental_enabled and store is not None:
+            try:
+                _advance_and_merge(ctx, store, logger)
+            except Exception as exc:  # noqa: BLE001
+                overall = "failed"
+                error_msg = f"commit phase failed: {type(exc).__name__}: {exc}"
+                logger.error(
+                    "commit phase failed, batch marked failed",
+                    extra={"stage": "pipeline", "batch": batch_id, "error": error_msg},
+                )
+
         # 把本轮收集的 lineage_decls 快照写回各 stage 条目，供下次 resume 恢复.
         # 只覆盖成功或失败（已记录）的 stage；output 是最后一个必然执行的 stage.
         for entry in manifest.stages:
@@ -917,12 +1193,8 @@ def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
             },
         )
 
-        # Two-phase commit: advance watermarks + merge aggregates into state/ ONLY
-        # when every stage succeeded. On failure we deliberately skip this block so
-        # state.json keeps the old watermark and the next run re-reads the same
-        # delta (idempotent retry). See docs/evolution.md §3.3.5.
-        if overall == "success" and incremental_enabled and store is not None:
-            _advance_and_merge(ctx, store, logger)
+        # Two-phase commit 已前移到本块之前（任务 #74 C3/C4）；失败批次到此
+        # 保持 state.json 不变，重跑同批次重新读取同一 delta（幂等）。
 
         # Finalise and persist metrics.
         total_dur = int((time.monotonic() - pipeline_start) * 1000)
@@ -1028,74 +1300,112 @@ def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
 
 
 def _advance_and_merge(ctx: PipelineContext, store: StateStore, logger) -> None:
-    """Commit watermarks and merge this batch's aggregates into state/.
+    """Commit watermarks/snapshots and merge aggregates (task #74 C3/C4).
 
-    Called only after every stage succeeded. Watermarks staged by ingest via
-    ``StateStore.set_new_watermark`` are promoted to ``watermark_value`` and
-    persisted. Each aggregate csv in ``04_aggregates/`` is merged into
-    ``state/aggregates/`` so the next incremental run sees the full history.
+    Called only after every stage succeeded. Order of operations implements the
+    "staging ledger" atomic commit protocol (task #74 C4):
 
-    backend 路由（参见 docs/evolution.md §4.4.2.2）：
-        "python" — Python dict 累加（StateStore.merge_aggregate），行为不变
-        "polars" — pl.concat + group_by.agg 列式合并（Phase 2a）
-        "spark"  — history.union(delta).groupBy(key).agg() 分布式合并（Phase 2b）
+        1. Idempotency gate: batch_id already in the ``merged_batches`` ledger
+           (crash AFTER a successful commit point, e.g. inside metrics.finish)
+           → skip everything; re-merging would double-count aggregates.
+        2. Aggregate staging: merged results are written ONLY to
+           ``state/aggregates_pending/{name}.csv`` (``merge_aggregate_staged``
+           on the python/polars path; ``write_pending_aggregate`` on the
+           spark/local path). Official aggregates are untouched.
+        3. ATOMIC COMMIT POINT: ``commit_batch`` — one state.json save that
+           (a) promotes staged watermarks (``new_watermark`` →
+           ``watermark_value`` + ``cumulative_row_count``), (b) promotes staged
+           Iceberg snapshot ids (superset of the old ``commit_all``), (c)
+           registers batch_id in the ledger, (d) records the pending marker.
+           Failure propagates to run_pipeline (task #74 C3: never swallow).
+        4. Replacement finish: ``complete_pending_aggregates`` os.replaces each
+           staged file into the official aggregate. A crash between 3 and 4 is
+           recovered at next startup by the initialization window.
 
-    Phase 4: incremental.mode="iceberg_snapshot_diff" 时，额外提交 Iceberg
-    snapshot id（``store.commit_snapshot_id``），与 watermark commit 并存。
-    Iceberg 表的 merge 由 pyiceberg table.append/overwrite 在 stage 内完成，
-    此处不重复 merge 数据，只持久化 snapshot id 用于下次增量.
+    Crash-window analysis: crash BEFORE step 3 → staged files are recomputed
+    and overwritten on re-run; watermarks/ledger untouched; re-run idempotent.
+    Crash AFTER step 3 → ledger blocks re-merge, marker drives replacement
+    recovery; staged files hold the COMPLETE merged result, so replacing is
+    idempotent.
+
+    Residual window (declared trade-off): spark + S3/parquet storage cannot
+    atomically os.replace into S3, so that path writes the merged result
+    directly to the official aggregate via table_write (merge-before-commit),
+    guarded only by the ledger; a "merge succeeded, crash before commit_batch"
+    re-run would double-count that batch once — see _merge_aggregate_spark.
+
+    backend 路由不变（python/polars/spark，参见 docs/evolution.md §4.4.2.2）。
+    Iceberg 表的数据 merge 仍由 stage 内 pyiceberg append/overwrite 完成，
+    此处只经 commit_batch 持久化 staged snapshot id。
     """
-    # Phase 4: Iceberg snapshot id 提交与 watermark 提交合并为单次原子
-    # commit_all，避免原两步提交中间失败导致 (watermark, snapshot_id)
-    # 不一致。仅在 incremental.mode="iceberg_snapshot_diff" 且有 staged
-    # snapshot id 时才同时提交两者；否则 commit_all 退化为仅提升 watermark
-    # （snapshot 段无 new_snapshot_id 时跳过，行为与 commit_watermark 等价）。
-    inc_mode = ctx.config.get("incremental", {}).get("mode", "high_watermark")
-    has_iceberg_snaps = bool(ctx.state.get("iceberg_snapshots"))
-    use_commit_all = inc_mode == "iceberg_snapshot_diff" and has_iceberg_snaps
+    state = ctx.state
+    batch_id = ctx.batch_id
 
-    if use_commit_all:
-        try:
-            store.commit_all(ctx.state, ctx.batch_id)
-            logger.info(
-                "watermark + iceberg snapshot id committed atomically",
-                extra={"stage": "pipeline", "batch": ctx.batch_id},
-            )
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "commit_all failed, ignoring", extra={"stage": "pipeline"}, exc_info=True
-            )
-    else:
-        store.commit_watermark(ctx.state, ctx.batch_id)
-        logger.info("watermark committed", extra={"stage": "pipeline", "batch": ctx.batch_id})
-
-    agg_dir = os.path.join(ctx.run_dir, "04_aggregates")
-    if not os.path.isdir(agg_dir):
-        return
-    for name, fields, key_cols in _AGGREGATE_SPECS:
-        batch_csv = os.path.join(agg_dir, name + ".csv")
-        if not _table_exists(batch_csv, ctx.config):
-            continue
-        if ctx.engine_backend == "spark":
-            _merge_aggregate_spark(ctx, store, name, fields, key_cols, batch_csv, logger)
-            continue
-        # python/polars 路径：用 table_read 读 04_aggregates（兼容 parquet storage）
-        # polars backend 下 table_read 返回 polars.DataFrame，需转 List[Dict]
-        result = table_read(batch_csv, ctx.config)
-        if ctx.engine_backend == "polars":
-            new_rows = result.to_dicts() if result is not None and result.height > 0 else []
-        else:
-            new_rows, _ = result
-        if not new_rows:
-            # No rows in this batch for the aggregate; still ensure the
-            # historical file exists so downstream reads do not fail.
-            if not os.path.exists(store.get_aggregate_path(name)):
-                store.save_aggregate(name, fields, [])
-            continue
-        merged_count = store.merge_aggregate(name, fields, new_rows, key_cols)
+    if store.is_batch_merged(state, batch_id):
         logger.info(
-            "aggregate merged",
-            extra={"stage": "compute", "agg": name, "new": len(new_rows), "total": merged_count},
+            "batch already in merged_batches ledger, skipping merge (idempotent)",
+            extra={"stage": "pipeline", "batch": batch_id},
+        )
+        return
+
+    pending: dict[str, str] = {}
+    agg_dir = os.path.join(ctx.run_dir, "04_aggregates")
+    if os.path.isdir(agg_dir):
+        for name, fields, key_cols in _AGGREGATE_SPECS:
+            batch_csv = os.path.join(agg_dir, name + ".csv")
+            if not _table_exists(batch_csv, ctx.config):
+                continue
+            if ctx.engine_backend == "spark":
+                staged_path = _merge_aggregate_spark(
+                    ctx, store, name, fields, key_cols, batch_csv, logger
+                )
+                if staged_path:
+                    pending[name] = staged_path
+                continue
+            # python/polars 路径：用 table_read 读批次聚合（兼容 parquet storage）；
+            # polars backend 下 table_read 返回 polars.DataFrame，需转 List[Dict]
+            result = table_read(batch_csv, ctx.config)
+            if ctx.engine_backend == "polars":
+                new_rows = result.to_dicts() if result is not None and result.height > 0 else []
+            else:
+                new_rows, _ = result
+            if not new_rows:
+                # 本批次该聚合无行；仍确保历史文件存在使下游读取不失败。
+                # 空文件创建不涉及累加，直接写正式路径（与暂存协议无冲突）.
+                if not os.path.exists(store.get_aggregate_path(name)):
+                    store.save_aggregate(name, fields, [])
+                continue
+            # 任务 #74 C4：合并结果只写暂存文件，正式聚合不动.
+            merged_count, staged_path = store.merge_aggregate_staged(
+                name, fields, new_rows, key_cols
+            )
+            pending[name] = staged_path
+            logger.info(
+                "aggregate merge staged",
+                extra={
+                    "stage": "compute",
+                    "agg": name,
+                    "new": len(new_rows),
+                    "total": merged_count,
+                },
+            )
+
+    # 原子提交点（任务 #74 C4）：水位/快照提升 + 台账登记 + pending 标记
+    # 一次性保存。异常直接向上传播（任务 #74 C3：不得吞掉），由 run_pipeline
+    # 把批次标记 failed——提交未完成时 staged 值未提升、台账未登记，
+    # 重跑本批次是幂等的。
+    store.commit_batch(state, batch_id, pending_aggregates=pending or None)
+    logger.info(
+        "batch committed (watermark + ledger + aggregates marker)",
+        extra={"stage": "pipeline", "batch": batch_id, "pending_aggregates": len(pending)},
+    )
+
+    # 替换收尾：暂存文件原子替换进正式聚合；此后清除标记。
+    if pending:
+        completed = store.complete_pending_aggregates(state)
+        logger.info(
+            "staged aggregates replaced into official paths",
+            extra={"stage": "pipeline", "batch": batch_id, "aggregates": completed},
         )
 
 
@@ -1107,26 +1417,37 @@ def _merge_aggregate_spark(
     key_cols: list[str],
     batch_csv: str,
     logger,
-) -> None:
+) -> Optional[str]:
     """Spark 分布式聚合合并：history.union(delta).groupBy(key).agg().
 
-    用 ``table_read`` 读历史聚合（若存在）与本批次增量，``unionByName``
-    合并后 ``groupBy(key_cols).agg(F.sum(num_cols))`` 累加数值列，写出用
-    ``table_write`` 统一 IO 层（Spark CSV 目录或 S3 Parquet）。派生列
-    （avg_order_value/revenue_share/rank）在 Spark 路径下不重算——与
-    Phase 2a polars 分支保持一致的设计简化，下游若需精确派生列可回退
-    python backend。参见 docs/evolution.md §4.4.2.2 / §4.6.1。
+    任务 #74 M12：全字段列保留（修复 tier/city/rank 等列丢失）：
+      - 非派生数值列（orders/units/revenue/customers）：sum 累加；
+      - 维度列（tier/city/category/region/channel）："delta 优先，历史兜底"
+        ``coalesce(max(when(_merge_src=1, col)), max(col))``，避免 union+sum
+        路径把字符串维度列直接丢掉；
+      - 派生列（avg_order_value/revenue_share/rank）：聚合结果 collect 回
+        driver 后用 ``state.recompute_derived`` 重算（与 python 路径共享同一
+        实现，两引擎产物一致）。
+
+    任务 #74 C4 暂存协议：local 存储下合并结果写暂存文件
+    （write_pending_aggregate），返回路径由调用方交给 commit_batch 登记、
+    complete_pending_aggregates 原子替换进正式聚合。S3/parquet 目标无法
+    os.replace 原子替换 → 保持 table_write 直写正式聚合（merge-before-commit），
+    重复累加由 merged_batches 台账兜底；"merge 成功但 commit_batch 前崩溃"
+    的重跑窗口会令该批次重复累加一次——S3 场景以运维监控补偿（显式权衡，
+    与调用方 _advance_and_merge docstring 的残留窗口声明对应）。
 
     读路径用 ``table_read`` 而非 ``spark.read.csv``，使 cluster+S3 模式下
     能自动从 S3 读 Parquet 产物（compute stage 用 table_write 写到 S3），
-    非 cluster 模式（local_csv/本地 parquet）行为不变。写路径同理用
-    ``table_write``，使历史聚合在 cluster+S3 模式下写到 S3，下次增量运行
-    可读到。
+    非 cluster 模式（local_csv/本地 parquet）行为不变。写路径同理。
 
     注意：Spark 写本地文件需要 hadoop.dll（Windows NativeIO）。在缺
     hadoop.dll 的环境下本函数会抛 Py4J 错误——这是环境限制，由调用方
-    （增量+Spark 测试）用 pytest.mark.skipif 跳过。代码逻辑本身完整正确，
-    在有 hadoop.dll 的环境（Linux / 装齐 hadoop.dll 的 Windows）可直接运行。
+    （增量+Spark 测试）用 pytest.mark.skipif 跳过。
+
+    Returns:
+        暂存文件路径（local_csv 存储；待提交点登记后替换进正式聚合）；
+        空 delta 落空文件或 S3/parquet 直写时返回 None.
     """
     from pyspark.sql import functions as F  # lazy import
 
@@ -1147,57 +1468,89 @@ def _merge_aggregate_spark(
         logger.info(
             "aggregate merged (spark, empty delta)", extra={"stage": "compute", "agg": name}
         )
-        return
+        return None
 
-    # 数值列累加；非数值非派生列（tier/city 等）取 delta 最新值；
-    # 派生列（avg_order_value/revenue_share/rank）不参与累加。
-    derived_cols = {"avg_order_value", "revenue_share", "rank"}
     non_key = [f for f in fields if f not in key_cols]
-    num_cols = [
-        f
-        for f in non_key
-        if f not in derived_cols and f not in ("tier", "city", "category", "region", "channel")
-    ]
+    num_cols = [f for f in non_key if f not in _DERIVED_COLS and f not in _DIMENSION_COLS]
+    # 任务 #76：排除分组键——维度列同时是 groupBy key 时（category_stats 的
+    # category、region_channel_stats 的 region+channel、customer_tier 的 tier），
+    # 若再 alias 为同名的聚合列会与分组键列重名，下游 select 抛
+    # [AMBIGUOUS_REFERENCE]。分组键列由 groupBy 天然保留且组内取值相同，
+    # "delta 优先" coalesce 对其无意义（与 python 路径 _merge_into 跳过
+    # key_set 的语义一致）。
+    dim_cols = [f for f in non_key if f in _DIMENSION_COLS]
 
     # 辅助函数：按 fields 对齐 df 的列，缺失列用 null 填充。
-    # 历史聚合产物（_merge_aggregate_spark 写回的）只含 key_cols + num_cols，
-    # 缺派生列（avg_order_value/revenue_share/rank），直接 select(fields) 会
-    # 报 UNRESOLVED_COLUMN。delta_df 由 compute stage 写出，含全部 fields。
+    # 旧版本写回的历史产物只含 key_cols + num_cols，缺派生列/维度列，
+    # 直接 select 会报 UNRESOLVED_COLUMN。delta_df 由 compute stage 写出，
+    # 含全部 fields。
     def _align_columns(df):
         existing = set(df.columns)
         return df.select(*[F.col(f) if f in existing else F.lit(None).alias(f) for f in fields])
 
+    # _merge_src 标记列（hist=0, delta=1）：维度列 "delta 优先、历史兜底"
+    # 靠它实现（任务 #74 M12）。
+    src_col = "_merge_src"
+    agg_exprs = [F.sum(c).alias(c) for c in num_cols]
+    agg_exprs += [
+        F.coalesce(
+            F.max(F.when(F.col(src_col) == 1, F.col(c))),
+            F.max(F.col(c)),
+        ).alias(c)
+        for c in dim_cols
+    ]
+    if not agg_exprs:
+        # 仅含 key/派生列的规格：占位聚合保证 groupBy.agg 合法（当前
+        # _AGGREGATE_SPECS 不会走到此分支，防御性保留）。
+        agg_exprs = [F.max(F.lit(0)).alias("_placeholder")]
+
     if _table_exists(hist_path, ctx.config):
         hist_df = table_read(hist_path, ctx.config, spark=ctx.spark_session)
         # unionByName 按列名对齐，避免列顺序差异
-        merged = (
+        combined = (
             _align_columns(hist_df)
-            .unionByName(_align_columns(delta_df))
-            .groupBy(list(key_cols))
-            .agg(*[F.sum(c).alias(c) for c in num_cols])
+            .withColumn(src_col, F.lit(0))
+            .unionByName(_align_columns(delta_df).withColumn(src_col, F.lit(1)))
         )
     else:
-        # 无历史：本批次即全量，仍按 key 聚合一次（去重 + 累加）
-        merged = (
-            _align_columns(delta_df)
-            .groupBy(list(key_cols))
-            .agg(*[F.sum(c).alias(c) for c in num_cols])
-        )
+        # 无历史：本批次即全量，src=0 → 维度列 coalesce 回退 max(col)，
+        # 语义等价于批内去重 + 累加
+        combined = _align_columns(delta_df).withColumn(src_col, F.lit(0))
 
-    # 写回 state/aggregates/{name}.csv（统一 IO 层：cluster+S3 写 S3 Parquet，
-    # local_csv 写 Spark CSV 目录，多分区 part 文件）。
-    # 注意：必须在 table_write 之前计算 total，或直接用 table_write 的返回值。
-    # 因为 table_write 会覆盖 hist_path，之后再触发 merged.count() 会重新读
-    # hist_df（依赖 hist_path），此时 hist_path 已被覆盖，旧 part 文件不存在，
-    # 导致 FAILED_READ_FILE.FILE_NOT_EXIST。
+    merged = combined.groupBy(list(key_cols)).agg(*agg_exprs)
     spark_cfg = ctx.config.get("engine", {}).get("spark", {}) or {}
     if spark_cfg.get("write_single_file", False):
         merged = merged.coalesce(1)
-    total = table_write(hist_path, merged, ctx.config, spark=ctx.spark_session)
+
+    # 任务 #74 M12：collect 回 driver 重算派生列（与 python 路径共享
+    # recompute_derived；缺失的派生键由该函数直接填充）。当前聚合产物维度
+    # （按日/类目/区域渠道/客户粒度，量级 < 10^5 行）对 driver 安全。
+    keep_cols = [f for f in fields if f not in _DERIVED_COLS]
+    rows = [row.asDict() for row in merged.select(keep_cols).collect()]
+    recompute_derived(rows, fields)
+
+    if _get_storage_backend(ctx.config) == "local_csv":
+        # 任务 #74 C4：写暂存文件 → commit_batch 登记标记 →
+        # complete_pending_aggregates 原子替换进正式聚合。
+        staged_path = store.write_pending_aggregate(name, fields, rows)
+        logger.info(
+            "aggregate merge staged (spark)",
+            extra={"stage": "compute", "agg": name, "new": delta_count, "total": len(rows)},
+        )
+        return staged_path
+
+    # S3/parquet：无法原子替换，直写正式聚合（残留窗口见 docstring）。
+    # 全列转字符串后建 DataFrame，与 table_write 的 S3 写出约定一致。
+    out_rows = [["" if row.get(f) is None else str(row.get(f)) for f in fields] for row in rows]
+    out_df = spark.createDataFrame(out_rows, schema=list(fields))
+    if spark_cfg.get("write_single_file", False):
+        out_df = out_df.coalesce(1)
+    total = table_write(hist_path, out_df, ctx.config, spark=ctx.spark_session)
     logger.info(
-        "aggregate merged (spark)",
+        "aggregate merged (spark, direct write)",
         extra={"stage": "compute", "agg": name, "new": delta_count, "total": total},
     )
+    return None
 
 
 def main(argv: list[str]) -> int:

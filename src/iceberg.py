@@ -21,6 +21,28 @@ _ICEBERG_CATALOG_LOCK = threading.Lock()
 _ICEBERG_CATALOG_CACHE: dict[tuple[str, str, str, str], Any] = {}
 
 
+def _normalize_catalog_uri(catalog_uri: str) -> str:
+    """把相对路径的 SQLite catalog URI 解析为相对项目 ROOT 的绝对路径.
+
+    缺省值 ``sqlite:///state/iceberg_catalog.db``（及配置中同样的相对路径写法）
+    的路径部分是相对路径，catalog DB 落盘位置将依赖进程 CWD——不同入口/不同
+    CWD 下会用上不同的 DB 文件，只读 CWD 下还会直接失败。统一把 sqlite URI 的
+    路径部分解析为基于 ROOT 的绝对路径，保证跨入口行为一致。
+    已是绝对路径的 URI（包括测试显式传入的临时路径）与其他 scheme
+    （http://、s3:// 等）原样返回，不受影响.
+    """
+    prefix = "sqlite:///"
+    if not catalog_uri.startswith(prefix):
+        return catalog_uri
+    rel = catalog_uri[len(prefix) :]
+    if not rel or os.path.isabs(rel):
+        return catalog_uri
+    # 局部导入避免循环依赖（helpers.py 反向导入本模块全部符号）
+    from .helpers import ROOT
+
+    return prefix + os.path.join(ROOT, rel).replace(os.sep, "/")
+
+
 def _get_iceberg_catalog(cfg: dict[str, Any]) -> Any:
     """加载 Iceberg catalog（lazy import pyiceberg；同配置复用缓存实例）."""
     try:
@@ -33,7 +55,9 @@ def _get_iceberg_catalog(cfg: dict[str, Any]) -> Any:
     ice_cfg = cfg.get("storage", {}).get("iceberg", {}) or {}
     name = ice_cfg.get("catalog_name", "autobatch")
     catalog_type = ice_cfg.get("catalog_type", "sql")
-    catalog_uri = ice_cfg.get("catalog_uri", "sqlite:///state/iceberg_catalog.db")
+    catalog_uri = _normalize_catalog_uri(
+        ice_cfg.get("catalog_uri", "sqlite:///state/iceberg_catalog.db")
+    )
     warehouse = ice_cfg.get("warehouse", "state/warehouse")
     if warehouse.startswith("file:///"):
         warehouse = warehouse[len("file:///") :]
@@ -106,6 +130,33 @@ def _iceberg_spark_full_name(path: str, cfg: dict[str, Any]) -> str:
     return f"{catalog_name}.{path}"
 
 
+def _spark_table_exists(spark: Any, full_name: str) -> bool:
+    """判断 Spark catalog 中目标表是否已存在.
+
+    Spark 3.4+ 提供 ``spark.catalog.tableExists``（Spark 4.x 为标准 API），
+    旧版本回退到 ``spark.table()`` 元数据探测。探测也失败（如 catalog 连接
+    异常）时视为表不存在：此时走建表路径，若表实际存在 createOrReplace 会
+    因与 append 相同的写入路径（同 catalog、同权限）而同样失败并快速报错，
+    不会出现"探测误判 + 覆盖写成功"的数据丢失组合.
+    """
+    try:
+        return bool(spark.catalog.tableExists(full_name))
+    except AttributeError:
+        # Spark < 3.4 无 tableExists API，走下方 spark.table 探测
+        pass
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "tableExists check failed for %s (%s), falling back to spark.table probe",
+            full_name,
+            e,
+        )
+    try:
+        spark.table(full_name)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _table_read_iceberg(
     path: str,
     cfg: dict[str, Any],
@@ -171,15 +222,27 @@ def _table_write_iceberg(
         try:
             if mode == "overwrite":
                 df.writeTo(full_name).createOrReplace()
-            else:
+            elif _spark_table_exists(spark, full_name):
+                # 表已存在：只允许 append。旧实现里 append 失败即无条件
+                # createOrReplace 回退，任何瞬态错误（S3 抖动、catalog 超时）
+                # 都会用本批 df 覆盖整表历史数据（C6 数据丢失级缺陷）。
+                # 现在 append 真正失败时记录原始异常后原样抛出，绝不覆盖.
                 try:
                     df.writeTo(full_name).append()
                 except Exception:  # noqa: BLE001
-                    logger.warning(
-                        "append failed (table may not exist), falling back to createOrReplace for %s",
+                    logger.exception(
+                        "failed to append to existing Iceberg table %s via Spark; "
+                        "refusing to overwrite table history, re-raising",
                         full_name,
                     )
-                    df.writeTo(full_name).createOrReplace()
+                    raise
+            else:
+                # 合法兜底：表不存在时建表（行为与旧实现的建表路径一致）
+                logger.info(
+                    "Iceberg table %s not found in Spark catalog, creating via createOrReplace",
+                    full_name,
+                )
+                df.writeTo(full_name).createOrReplace()
         except Exception as e:  # noqa: BLE001
             raise RuntimeError(f"failed to {mode} Iceberg table {full_name} via Spark: {e}") from e
         return n_rows

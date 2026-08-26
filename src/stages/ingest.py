@@ -21,7 +21,9 @@ See docs/evolution.md §3.3.2.
 from __future__ import annotations
 
 import csv
+import logging
 import os
+from datetime import date, datetime
 from typing import Any, Optional
 
 from ..helpers import (
@@ -39,6 +41,80 @@ from ..helpers import (
     sha256_of,
     table_write,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _rows_to_str_rows(
+    rows: list[dict[str, Any]], fields: list[str]
+) -> list[dict[str, Optional[str]]]:
+    """将 List[Dict] 转为 spark.createDataFrame 可接受的行格式.
+
+    非空值转 string（与 CSV 语义一致）；空字符串 '' 与缺失字段统一转 None
+    （与单机模式 spark.read.csv inferSchema=True 一致，避免 Spark 4.x 严格
+    cast 对 '' 抛 CAST_INVALID_INPUT）。
+
+    M1 修复：csv.DictReader 对短行缺失字段填 restval=None——键存在值为 None，
+    ``r.get(f, "")`` 返回 None 而非默认值 ""，旧实现 ``str(None)`` 产生字面量
+    "None" 且通过 ``!= ""`` 校验被写入数据。这里用 ``is None`` 判空保证
+    None 安全；"0" 等 falsy 字符串原样保留。
+    """
+    out: list[dict[str, Optional[str]]] = []
+    for r in rows:
+        row: dict[str, Optional[str]] = {}
+        for f in fields:
+            v = r.get(f)
+            row[f] = None if v is None or v == "" else str(v)
+        out.append(row)
+    return out
+
+
+def _normalize_watermark(value: Any) -> Optional[str]:
+    """把水位值归一化为字符串，统一跨引擎口径.
+
+    目的：spark 的 ``F.max`` / polars 的 ``pl.col(...).max()`` 对 timestamp/
+    date 列返回 datetime/date 对象，直接 ``str()`` 得到 "2026-08-15 00:00:00"
+    （空格分隔）；而 python 路径取源 CSV 原始字符串（ISO-8601，"T" 分隔）。
+    跨引擎切换批次时两种口径的字符串比较不一致，存在重读/漏读风险。本函数
+    把 date/datetime 归一为 ISO-8601（date → "%Y-%m-%d"，datetime →
+    "%Y-%m-%dT%H:%M:%S"）；字符串原样返回（python 路径的源字符串本身即 CSV
+    原样，不做改写）；None → None。
+    """
+    if value is None:
+        return None
+    # datetime 是 date 的子类，必须先判 datetime
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%dT%H:%M:%S")
+    if isinstance(value, date):
+        return value.strftime("%Y-%m-%d")
+    return str(value)
+
+
+# 数值型水位列启发式 warning：纯数值 ID 列做水位时字符串字典序比较会错乱
+# （"9" > "10"），跨批次每表只提示一次（模块级集合去重），仅提示不改行为。
+_NUMERIC_WM_WARNED: set[str] = set()
+
+
+def _maybe_warn_numeric_watermark(name: str, wm_value: Optional[str]) -> None:
+    """水位值疑似纯数值（无日期/时间分隔符）时每表 warning 一次.
+
+    启发式判定：不含 '-' 且不含 ':' 且去掉至多一个小数点后全为数字
+    （如 "1001" / "123.45"）→ 疑似数值 ID 列；含 '-' 或 ':' 视为日期/
+    时间水位，不告警。每个表名只告警一次（跨批次去重）。
+    """
+    if wm_value is None or name in _NUMERIC_WM_WARNED:
+        return
+    if "-" in wm_value or ":" in wm_value:
+        return
+    if not wm_value.replace(".", "", 1).isdigit():
+        return
+    _NUMERIC_WM_WARNED.add(name)
+    logger.warning(
+        "table '%s' watermark '%s' looks numeric; string (lexicographic) comparison "
+        "can mis-order values like '9' vs '10' — consider a time-based watermark column",
+        name,
+        wm_value,
+    )
 
 
 def run(ctx: PipelineContext, log) -> dict[str, Any]:
@@ -161,13 +237,7 @@ def _ingest_full_spark(
         # 多机模式：Driver 端读本地 CSV → createDataFrame → table_write
         # Worker 无法访问宿主机文件路径，必须由 Driver 读入数据再分发
         rows_data, fields = csv_read(src)
-        # 将 List[Dict] 转为 Spark 可接受的格式：非空值转 string（与 CSV 语义一致），
-        # 空字符串 '' 转 None（与单机模式 spark.read.csv inferSchema=True 一致，
-        # 避免 Spark 4.x 严格 cast 对 '' 抛 CAST_INVALID_INPUT）。
-        str_rows = [
-            {f: (v if v != "" else None) for f in fields for v in [str(r.get(f, ""))]}
-            for r in rows_data
-        ]
+        str_rows = _rows_to_str_rows(rows_data, fields)
         df = spark.createDataFrame(str_rows)
         rows = table_write(dst, df, cfg, spark=spark)
     else:
@@ -238,10 +308,7 @@ def _ingest_incremental(
             if cluster.get("enabled"):
                 # 多机模式：Driver 端读本地 CSV → createDataFrame → table_write
                 rows_data, fields = csv_read(src)
-                str_rows = [
-                    {f: (v if v != "" else None) for f in fields for v in [str(r.get(f, ""))]}
-                    for r in rows_data
-                ]
+                str_rows = _rows_to_str_rows(rows_data, fields)
                 df = spark.createDataFrame(str_rows)
             else:
                 opts = cfg.get("engine", {}).get("spark", {}).get("read_options", {}) or {}
@@ -253,7 +320,8 @@ def _ingest_incremental(
             from pyspark.sql import functions as _F
 
             new_wm_raw = df.agg(_F.max(wm_col).alias("m")).collect()[0]["m"]
-            new_wm = str(new_wm_raw) if new_wm_raw is not None else None
+            # 跨引擎口径归一：timestamp 列 agg 结果是 datetime，统一 ISO-8601
+            new_wm = _normalize_watermark(new_wm_raw)
         elif _get_storage_backend(ctx.config) == "parquet":
             # parquet storage：读源 CSV → table_write 写 parquet，水位从源 CSV 算
             cfg = ctx.config
@@ -265,6 +333,8 @@ def _ingest_incremental(
             sha = copy_file(src, dst)
             rows = csv_lines(dst)
             new_wm = _compute_watermark(dst, wm_col, backend=ctx.engine_backend)
+        # 启发式告警：水位疑似纯数值 ID 列时每表提示一次（不改变行为）
+        _maybe_warn_numeric_watermark(name, new_wm)
         _stage_new_watermark(ctx, name, new_wm, rows)
         entry = {
             "name": name,
@@ -302,6 +372,8 @@ def _ingest_incremental(
         sha = sha256_of(dst + ".parquet")
     else:
         sha = sha256_of(dst)
+    # 启发式告警：水位疑似纯数值 ID 列时每表提示一次（不改变行为）
+    _maybe_warn_numeric_watermark(name, new_wm)
     _stage_new_watermark(ctx, name, new_wm, rows)
     entry = {
         "name": name,
@@ -377,7 +449,8 @@ def _copy_incremental(
         assert ctx is not None
         return _copy_incremental_spark(ctx, src, dst, wm_col, wm_value)
     if backend == "polars":
-        return _copy_incremental_polars(src, dst, wm_col, wm_value)
+        assert ctx is not None
+        return _copy_incremental_polars(ctx, src, dst, wm_col, wm_value)
     new_rows: list[dict[str, str]] = []
     max_wm: Optional[str] = wm_value
     fields: list[str] = []
@@ -423,10 +496,7 @@ def _copy_incremental_spark(
     if cluster.get("enabled"):
         # 多机模式：Driver 端读本地 CSV → createDataFrame → filter
         rows_data, fields = csv_read(src)
-        str_rows = [
-            {f: (v if v != "" else None) for f in fields for v in [str(r.get(f, ""))]}
-            for r in rows_data
-        ]
+        str_rows = _rows_to_str_rows(rows_data, fields)
         df = spark.createDataFrame(str_rows)
     else:
         # 单机模式：spark.read.csv 直接读源文件
@@ -439,7 +509,10 @@ def _copy_incremental_spark(
     table_write(dst, filtered, cfg, spark=spark)
     if rows > 0:
         new_wm_raw = filtered.agg(F.max(wm_col).alias("m")).collect()[0]["m"]
-        new_wm = str(new_wm_raw) if new_wm_raw is not None else wm_value
+        # 跨引擎口径归一：timestamp 列 agg 结果是 datetime，统一 ISO-8601
+        new_wm = _normalize_watermark(new_wm_raw)
+        if new_wm is None:
+            new_wm = wm_value
     else:
         # 无符合行：水位保持不动
         new_wm = wm_value
@@ -447,31 +520,42 @@ def _copy_incremental_spark(
 
 
 def _copy_incremental_polars(
-    src: str, dst: str, wm_col: str, wm_value: str
+    ctx: PipelineContext, src: str, dst: str, wm_col: str, wm_value: str
 ) -> tuple[int, Optional[str], list[str]]:
     """Polars 流式过滤增量拷贝.
 
     用 ``pl.scan_csv(src).filter(pl.col(wm_col) > wm_value).collect()`` 流式
     扫描 + 谓词下推，比 Python 逐行 ``csv.DictReader`` 快 5-10 倍。无符合行
-    时仍写只含 header 的空 CSV，保证下游可打开。水位用 polars max 表达式。
+    时仍写只含 header 的空文件（CSV 或 parquet，由 table_write 路由决定），
+    保证下游可打开。水位用 polars max 表达式，经 ``_normalize_watermark``
+    归一为 ISO-8601（跨引擎口径一致）。
+
+    C7 修复：写出一律经统一 ``table_write(dst, df, cfg)`` 路由——旧实现无视
+    storage backend 直接 ``df.write_csv(dst)``，storage.backend="parquet" 时
+    下游 ``table_read`` 强制读 ``dst + ".parquet"``，要么 FileNotFoundError
+    崩溃，要么静默读到上批遗留的 ``.parquet`` 陈旧 delta；修复后与 python
+    分支（_copy_incremental）和 spark 分支（_copy_incremental_spark）对齐。
     """
     import polars as pl
 
+    cfg = ctx.config
     # 取 header（用 csv 模块，避免 polars 读全量；与 python 路径字段顺序一致）
     with open(src, encoding="utf-8-sig", newline="") as f:
         src_fields = next(csv.reader(f))
     lf = _strip_bom_polars(pl.scan_csv(src))
     df = lf.filter(pl.col(wm_col) > wm_value).collect()
     if df.height > 0:
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        df.write_csv(dst)
         new_wm_raw = df.select(pl.col(wm_col).max()).item()
-        new_wm = str(new_wm_raw) if new_wm_raw is not None else wm_value
+        # 跨引擎口径归一：polars 推断出的 datetime/date 统一 ISO-8601
+        new_wm = _normalize_watermark(new_wm_raw)
+        if new_wm is None:
+            new_wm = wm_value
     else:
-        # 写空 CSV（只有 header），水位保持不动
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        pl.DataFrame(schema={f: pl.Utf8 for f in src_fields}).write_csv(dst)
+        # 空 delta：写只含 header 的空文件（schema 保留列与列序），水位保持不动
+        df = pl.DataFrame(schema={f: pl.Utf8 for f in src_fields})
         new_wm = wm_value
+    # 统一 table_write 路由：local_csv → dst(CSV)；parquet → dst+".parquet"（本地或 S3）
+    table_write(dst, df, cfg)
     return df.height, new_wm, src_fields
 
 
@@ -481,10 +565,15 @@ def _compute_watermark(
     """Scan a csv and return the max value of ``wm_col`` (string compare).
 
     ``backend="polars"`` 时用 ``pl.scan_csv(path).select(pl.col(wm_col).max())``
-    流式聚合；``backend="python"`` 走原 csv_read 路径，行为不变。
+    流式聚合；``backend="python"`` 走原 csv_read 路径，保持源字符串 max 语义
+    不变（源 CSV 本身即 ISO-8601 原样，无需归一）。
 
     ``backend="spark"`` 时用 ``spark.read.csv(path).agg(F.max(wm_col))``
     分布式聚合（Spark DataFrame 聚合表达式），参见 docs/evolution.md §4.3.2.4。
+
+    spark/polars 分支的 max 结果是 datetime/date 对象（列被类型推断时），
+    统一经 ``_normalize_watermark`` 归一为 ISO-8601，保证跨引擎切换批次时
+    字符串比较口径一致（否则 str(datetime) 带空格分隔符）。
     """
     # 引擎特定逻辑——非函数级 dispatch：backend 已作为参数透传，
     # 这是参数化分支（caller 传入 ctx.engine_backend），保留内联。
@@ -493,13 +582,14 @@ def _compute_watermark(
 
         df = _strip_bom_spark(spark.read.csv(path, header=True, inferSchema=True))
         val = df.agg(F.max(wm_col).alias("m")).collect()[0]["m"]
-        return str(val) if val is not None else None
+        return _normalize_watermark(val)
     if backend == "polars":
         import polars as pl
 
         lf = _strip_bom_polars(pl.scan_csv(path))
         val = lf.select(pl.col(wm_col).max()).collect().item()
-        return str(val) if val is not None else None
+        return _normalize_watermark(val)
+    # python 路径：取源 CSV 原始字符串做 max，语义保持不变
     rows, _ = csv_read(path)
     vals = [r[wm_col] for r in rows if r.get(wm_col)]
     return max(vals) if vals else None

@@ -20,6 +20,7 @@ Phase 2b 增加 Spark 分布式分支（``ctx.engine_backend == "spark"``）：
 
 from __future__ import annotations
 
+import hashlib
 import os
 from datetime import date, datetime
 from typing import Any
@@ -54,6 +55,50 @@ def _jsonify(value: Any) -> Any:
     return value
 
 
+def _rel_to_root(p: str) -> str:
+    """计算 p 相对 ROOT 的路径并归一为 "/" 分隔.
+
+    Windows 上跨盘符调用 os.path.relpath 抛 ValueError，此时回退为绝对路径
+    （同样 "/" 归一）。_register_artifacts 与 _register_edges 必须使用同一个
+    回退逻辑，保证回退后血缘边前缀匹配与 artifact key 命名空间仍然一致.
+    """
+    try:
+        return os.path.relpath(p, ROOT).replace("\\", "/")
+    except ValueError:
+        return os.path.abspath(p).replace("\\", "/")
+
+
+def _dir_part_files(dirpath: str) -> list[str]:
+    """收集目录型产物下的数据分片文件（相对路径、"/" 分隔、排序）.
+
+    Spark local_csv 后端把 stage 产物写为目录（内含 part-00000-* 分区文件）。
+    跳过 "_" / "." 开头的元数据文件（_SUCCESS、.crc 等）。返回排序后的相对
+    路径列表，保证 digest 计算的确定性.
+    """
+    parts: list[str] = []
+    for root, _dirs, files in os.walk(dirpath):
+        for fname in files:
+            if fname.startswith(("_", ".")):
+                continue
+            rel = os.path.relpath(os.path.join(root, fname), dirpath)
+            parts.append(rel.replace("\\", "/"))
+    return sorted(parts)
+
+
+def _dir_artifact_digest(dirpath: str, parts: list[str]) -> str:
+    """目录型产物摘要："dir:" 前缀 + 排序文件清单及各文件内容的联合 sha256.
+
+    单文件 sha256 无法表示目录产物；对（排序文件名 \\0 文件内容 sha256）
+    取摘要既保留清单信息又保留内容敏感性。"dir:" 前缀让消费方（dashboard/
+    血缘工具）可区分目录型与文件型产物.
+    """
+    h = hashlib.sha256()
+    for rel in parts:
+        h.update(rel.encode("utf-8") + b"\0")
+        h.update(file_sha256(os.path.join(dirpath, rel)).encode("ascii"))
+    return "dir:" + h.hexdigest()
+
+
 def _register_artifacts(ctx: PipelineContext) -> None:
     manifest = ctx.manifest
     kind_map = {
@@ -71,11 +116,23 @@ def _register_artifacts(ctx: PipelineContext) -> None:
             continue
         for fn in sorted(os.listdir(base)):
             fp = os.path.join(base, fn)
-            if not os.path.isfile(fp):
-                continue
-            rel = os.path.relpath(fp, ROOT).replace("\\", "/")
-            rows = csv_lines(fp) if fn.endswith(".csv") else None
-            manifest.add_artifact(rel, kind, rows, file_sha256(fp))
+            rel = _rel_to_root(fp)
+            if os.path.isdir(fp):
+                # spark local_csv 后端的 stage 产物是目录（part-00000-* 分区
+                # 文件）。旧实现 os.path.isfile 过滤把目录全部跳过 → spark 后端
+                # manifest 零产物、血缘边全部被 _register_edges 静默丢弃（M14）。
+                # 现在聚合目录内分片文件登记为一个 artifact：行数为各分片之和
+                # （Spark CSV 每个分片都带 header，csv_lines 逐文件去头后求和），
+                # 摘要用 "dir:" 前缀的联合 sha256。parquet 分片为二进制，
+                # rows 置 None（csv_lines 无语义）.
+                parts = _dir_part_files(fp)
+                rows = None
+                if fn.endswith(".csv"):
+                    rows = sum(csv_lines(os.path.join(fp, part)) for part in parts)
+                manifest.add_artifact(rel, kind, rows, _dir_artifact_digest(fp, parts))
+            elif os.path.isfile(fp):
+                rows = csv_lines(fp) if fn.endswith(".csv") else None
+                manifest.add_artifact(rel, kind, rows, file_sha256(fp))
 
 
 def _register_edges(ctx: PipelineContext) -> int:
@@ -88,10 +145,11 @@ def _register_edges(ctx: PipelineContext) -> int:
     as artifacts, and register the surviving edges. Returns the edge count.
     """
     manifest = ctx.manifest
-    # run_dir 可能被配置改名（缺省 "run"），前缀必须与 _register_stage_artifacts
-    # 里 os.path.relpath(fp, ROOT) 产生的命名空间一致，否则所有血缘边被静默丢弃。
+    # run_dir 可能被配置改名（缺省 "run"），前缀必须与 _register_artifacts
+    # 里 _rel_to_root(fp) 产生的命名空间一致，否则所有血缘边被静默丢弃。
     # 注意 ctx.run_dir 已包含 batch_id（= run_root/<batch_id>），不可再拼接。
-    run_dir_rel = os.path.relpath(ctx.run_dir, ROOT).replace("\\", "/").strip("/")
+    # _rel_to_root 内含跨盘符 ValueError 回退（与 artifact key 同一回退逻辑）。
+    run_dir_rel = _rel_to_root(ctx.run_dir).strip("/")
     prefix = f"{run_dir_rel}/"
     count = 0
     for target_rel, upstream_rels in ctx.lineage_decls.items():
@@ -135,7 +193,11 @@ def _declare_lineage(ctx: PipelineContext) -> dict[str, list]:
     agg_upstreams = []
     if os.path.isdir(agg_dir):
         for fn in sorted(os.listdir(agg_dir)):
-            if os.path.isfile(os.path.join(agg_dir, fn)):
+            fp = os.path.join(agg_dir, fn)
+            # 目录也算聚合产物：spark local_csv 后端把聚合结果写为目录
+            # （part-* 分区文件），与 _register_artifacts 的目录登记口径一致，
+            # 否则 spark 后端 dashboard_data.json 的血缘边丢失.
+            if os.path.isfile(fp) or os.path.isdir(fp):
                 agg_upstreams.append("04_aggregates/" + fn)
     if agg_upstreams:
         lineage["05_output/dashboard_data.json"] = agg_upstreams
@@ -175,6 +237,24 @@ def run(ctx: PipelineContext, log) -> dict[str, Any]:
     return {"rows_in": rows_in, "rows_out": rows_out, "lineage": lineage}
 
 
+def _resolve_orders_source_rel(ctx: PipelineContext) -> str:
+    """推导 orders_final 的 _source_file 标记列（实际读取的上游路径）.
+
+    历史实现硬编码 "data/raw/orders.csv"，与 ingest 阶段实际拷贝的源路径
+    （可能是绝对路径/其他盘符目录，增量模式还可能是 orders_incremental.csv）
+    不符。现从 ctx.ingested 中 name="orders" 条目的 copied_to 推导并归一
+    "/" 分隔；条目缺失时（如 output 阶段被单独调用的测试场景）回退到历史
+    常量，保证兼容。copied_to 由 ingest 相对 ROOT 计算，跨盘时 ingest 侧已
+    有自身处理，这里仅做分隔符归一与防御.
+    """
+    for finfo in ctx.ingested:
+        if finfo.get("name") == "orders":
+            rel = str(finfo.get("copied_to") or "").replace("\\", "/")
+            if rel:
+                return rel
+    return "data/raw/orders.csv"
+
+
 def _write_orders_final_python(ctx: PipelineContext, out_dir: str) -> tuple[int, int]:
     """Python 路径：table_read → 加标记列 → table_write.
 
@@ -185,9 +265,10 @@ def _write_orders_final_python(ctx: PipelineContext, out_dir: str) -> tuple[int,
     src = os.path.join(ctx.run_dir, "03_clean", "orders_clean.csv")
     orders, fields = table_read(src, cfg)
     marker_fields = fields + ["_batch_id", "_source_file"]
+    source_rel = _resolve_orders_source_rel(ctx)
     for r in orders:
         r["_batch_id"] = ctx.batch_id
-        r["_source_file"] = "data/raw/orders.csv"
+        r["_source_file"] = source_rel
     table_write(os.path.join(out_dir, "orders_final.csv"), orders, cfg, fields=marker_fields)
     return len(orders), len(orders)
 
@@ -212,7 +293,7 @@ def _write_orders_final_polars(ctx: PipelineContext, out_dir: str) -> tuple[int,
     # 加标记列（与 Python 路径一致：_batch_id, _source_file）
     df = df.with_columns(
         pl.lit(ctx.batch_id).alias("_batch_id"),
-        pl.lit("data/raw/orders.csv").alias("_source_file"),
+        pl.lit(_resolve_orders_source_rel(ctx)).alias("_source_file"),
     )
     table_write(os.path.join(out_dir, "orders_final.csv"), df, ctx.config)
     return rows_in, df.height
@@ -235,7 +316,7 @@ def _write_orders_final_spark(ctx: PipelineContext, out_dir: str) -> tuple[int, 
 
     # 加标记列（与 Python/Polars 路径一致：_batch_id, _source_file）
     df = df.withColumn("_batch_id", F.lit(ctx.batch_id)).withColumn(
-        "_source_file", F.lit("data/raw/orders.csv")
+        "_source_file", F.lit(_resolve_orders_source_rel(ctx))
     )
     table_write(
         os.path.join(out_dir, "orders_final.csv"),

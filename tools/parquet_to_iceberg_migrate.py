@@ -29,6 +29,7 @@ incremental.mode="iceberg_snapshot_diff" 跑增量.
     - 迁移不删除原 Parquet 文件（保留作为备份）
     - Iceberg 表的 schema 用全 StringType（与 CSV 语义一致，便于 round-trip）
 """
+
 from __future__ import annotations
 
 import argparse
@@ -66,6 +67,7 @@ def _read_parquet_to_arrow(parquet_path: str, cfg: dict[str, Any]) -> Any:
     if parquet_path.startswith("s3://") or parquet_path.startswith("s3a://"):
         # S3/MinIO：用 pyarrow.fs.S3FileSystem
         from src.helpers import _get_s3_filesystem, _s3_uri_to_bucket_key  # noqa: E402
+
         fs = _get_s3_filesystem(cfg)
         key = _s3_uri_to_bucket_key(parquet_path)
         return pq.read_table(key, filesystem=fs)
@@ -161,20 +163,26 @@ def migrate_one(
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(
-        description="Migrate Phase 3 S3 Parquet to Iceberg table"
+    parser = argparse.ArgumentParser(description="Migrate Phase 3 S3 Parquet to Iceberg table")
+    parser.add_argument(
+        "--config", default="config/pipeline.json", help="Pipeline config file path"
     )
-    parser.add_argument("--config", default="config/pipeline.json",
-                        help="Pipeline config file path")
-    parser.add_argument("--parquet-path",
-                        help="Source Parquet file path (local or s3:// URI)")
-    parser.add_argument("--iceberg-table",
-                        help="Target Iceberg table name (e.g. warehouse.orders_clean)")
-    parser.add_argument("--batch", action="append", default=[],
-                        help="Batch migrate: iceberg_table=parquet_logical_path "
-                             "(e.g. warehouse.orders=orders/orders_clean)")
-    parser.add_argument("--overwrite", action="store_true",
-                        help="Overwrite existing Iceberg table (default: append)")
+    parser.add_argument("--parquet-path", help="Source Parquet file path (local or s3:// URI)")
+    parser.add_argument(
+        "--iceberg-table", help="Target Iceberg table name (e.g. warehouse.orders_clean)"
+    )
+    parser.add_argument(
+        "--batch",
+        action="append",
+        default=[],
+        help="Batch migrate: iceberg_table=parquet_logical_path "
+        "(e.g. warehouse.orders=orders/orders_clean)",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing Iceberg table (default: append)",
+    )
     args = parser.parse_args(argv)
 
     # 加载 config
@@ -182,45 +190,51 @@ def main(argv: list[str]) -> int:
 
     # 确保 storage.backend="iceberg"（迁移需要 Iceberg catalog 配置）
     if cfg.get("storage", {}).get("backend") != "iceberg":
-        print(f"WARNING: storage.backend is '{cfg.get('storage', {}).get('backend')}', "
-              f"not 'iceberg'. Using storage.iceberg config for catalog.")
+        print(
+            f"WARNING: storage.backend is '{cfg.get('storage', {}).get('backend')}', "
+            f"not 'iceberg'. Using storage.iceberg config for catalog."
+        )
 
     results = []
 
     # 单个迁移
     if args.parquet_path and args.iceberg_table:
-        result = migrate_one(args.parquet_path, args.iceberg_table, cfg,
-                             overwrite=args.overwrite)
+        result = migrate_one(args.parquet_path, args.iceberg_table, cfg, overwrite=args.overwrite)
         results.append(result)
 
     # 批量迁移
     for batch_spec in args.batch:
         if "=" not in batch_spec:
-            print(f"ERROR: invalid --batch spec '{batch_spec}', "
-                  f"expected iceberg_table=parquet_logical_path")
+            print(
+                f"ERROR: invalid --batch spec '{batch_spec}', "
+                f"expected iceberg_table=parquet_logical_path"
+            )
             return 1
         iceberg_table, parquet_logical = batch_spec.split("=", 1)
         # 把逻辑路径解析为 S3 URI
         from src.helpers import _resolve_s3_path  # noqa: E402
+
         parquet_uri = _resolve_s3_path(parquet_logical, cfg)
-        result = migrate_one(parquet_uri, iceberg_table, cfg,
-                             overwrite=args.overwrite)
+        result = migrate_one(parquet_uri, iceberg_table, cfg, overwrite=args.overwrite)
         results.append(result)
 
     if not results:
-        print("ERROR: no migration specified. Use --parquet-path + --iceberg-table "
-              "or --batch iceberg_table=parquet_logical_path")
+        print(
+            "ERROR: no migration specified. Use --parquet-path + --iceberg-table "
+            "or --batch iceberg_table=parquet_logical_path"
+        )
         return 1
 
     # 输出结果
     print(f"\nMigration complete: {len(results)} table(s)")
     for r in results:
-        print(f"  {r['parquet_path']} -> {r['iceberg_table']}: "
-              f"{r['rows']} rows, {r['snapshots']} snapshot(s), "
-              f"current snapshot_id={r['snapshot_id']}")
+        print(
+            f"  {r['parquet_path']} -> {r['iceberg_table']}: "
+            f"{r['rows']} rows, {r['snapshots']} snapshot(s), "
+            f"current snapshot_id={r['snapshot_id']}"
+        )
     return 0
 
 
 if __name__ == "__main__":
-
     sys.exit(main(sys.argv[1:]))

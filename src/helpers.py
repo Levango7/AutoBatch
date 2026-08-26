@@ -610,6 +610,10 @@ class StageLog:
 
     batch_id / stage 为可选参数（向后兼容）：未传时缺省空串 / "pipeline"，
     既有调用方（如 tests/conftest.py 的 _make_log）无需修改即可工作.
+
+    close 后置 ``_closed`` 标志：close 幂等（双重 close 安全），close 后再
+    emit 为安全 no-op（原实现会因写已关闭文件句柄抛 ValueError，异常清理
+    路径上容易产生二次异常）.
     """
 
     def __init__(self, path: str, batch_id: str = "", stage: str = "pipeline"):
@@ -617,9 +621,14 @@ class StageLog:
         self.path = path
         self.batch_id = batch_id
         self.stage = stage
+        self._closed = False
         self._fh = open(path, "a", encoding="utf-8")
 
     def emit(self, level: str, msg: str, **extra: Any) -> None:
+        if self._closed:
+            # close 后 emit 安全 no-op：不再写已关闭的文件句柄（原行为抛
+            # ValueError）。丢弃的日志属于生命周期结束后的尾随调用.
+            return
         rec = {
             "ts": utc_ts(),
             "level": level,
@@ -641,6 +650,10 @@ class StageLog:
         self.emit("ERROR", msg, **extra)
 
     def close(self) -> None:
+        if self._closed:
+            # 幂等：双重 close 安全 no-op
+            return
+        self._closed = True
         self._fh.close()
 
     def __enter__(self) -> StageLog:

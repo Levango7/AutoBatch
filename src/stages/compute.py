@@ -33,8 +33,11 @@ Phase 2b Spark 分支（``ctx.engine_backend == "spark"``）：
 四个聚合用 ``groupBy().agg()`` 分布式实现，customer_value Top N 用窗口函数
 ``F.row_number().over(Window.orderBy(F.desc("revenue")))``。读入用
 ``table_read``，写出用 ``table_write``，``ctx.aggregates`` 用 ``df.toPandas().to_dict()``
-收集到 driver 为 List[Dict]（小数据量安全）。向后兼容：``engine.backend="python"/"polars"``
-时行为不变。参见 docs/evolution.md §4.3.2.2 / §4.4.2.1。
+收集到 driver 为 List[Dict]（小数据量安全）。增量模式下 customer_value/tier 用
+``_customer_value_incremental_spark`` 输出未按 top_n 截断的 delta 客户 buckets
+（tiers 仅计 history 中不存在的真新客户），与 Python/Polars 增量语义对齐。
+向后兼容：``engine.backend="python"/"polars"`` 时行为不变。
+参见 docs/evolution.md §4.3.2.2 / §4.4.2.1。
 """
 
 from __future__ import annotations
@@ -513,11 +516,21 @@ def _customer_value_incremental_polars(
         )
 
     # tier/city: 优先 history (tier_h)，否则 customers (tier)，否则 ""
+    # 注：tier_for_agg 需把空串视同缺失（对齐 python
+    # `history_meta[cid]["tier"] or "unknown"`）——coalesce 只跳过 null 不跳过
+    # ""，历史客户 tier 为 "" 时旧实现分桶到 ""，python 分桶到 "unknown"。
+    # tier_final/city_final 保持原式：python cv 行对历史空 tier 原样保留，
+    # coalesce(tier_h, tier) 已与之等价（"" 非 null，直接命中）。
+    def _blank_to_null(name: str):
+        return pl.when(pl.col(name) == "").then(pl.lit(None, dtype=pl.Utf8)).otherwise(pl.col(name))
+
     ranked = ranked.with_columns(
         pl.coalesce(["tier_h", "tier"]).fill_null("").alias("tier_final"),
         pl.coalesce(["city_h", "city"]).fill_null("").alias("city_final"),
         # tier for aggregation: 优先 tier_h，否则 tier，否则 "unknown"
-        pl.coalesce(["tier_h", "tier"]).fill_null("unknown").alias("tier_for_agg"),
+        pl.coalesce([_blank_to_null("tier_h"), _blank_to_null("tier")])
+        .fill_null("unknown")
+        .alias("tier_for_agg"),
         # is_new: 不在 history_meta（tier_h is null）→ 1，否则 0
         pl.when(pl.col("tier_h").is_not_null()).then(0).otherwise(1).alias("is_new"),
     )
@@ -590,8 +603,14 @@ def daily_sales_spark(orders):
         orders.groupBy("order_date")
         .agg(
             F.count("*").alias("orders"),
-            # cast("int") 对齐 Python 路径 as_int(quantity) 累加（Spark sum 返回 double）
-            F.sum("quantity").cast("int").alias("units"),
+            # 先 cast 再 sum：cluster 模式 createDataFrame 的列全是 string，
+            # F.sum("quantity") 直接抛 AnalysisException；try_cast long 还与
+            # Python as_int 语义对齐（非整数值如 "5.5" → null，不贡献 units，
+            # 等价 as_int(...) or 0）。用 try_cast 而非 cast：Spark 4.x 默认
+            # ANSI 开启，cast 对 "5.5" 等非整数值抛 CAST_INVALID_INPUT，
+            # 只有 try_cast 在 ANSI 开/关下都返回 null。单机 inferSchema
+            # 数值列 try_cast 无副作用。
+            F.sum(F.col("quantity").try_cast("long")).cast("int").alias("units"),
             F.sum(F.col("total_amount").cast(DecimalType(20, 2))).alias("_raw_revenue_dec"),
         )
         .withColumn("_raw_revenue", F.col("_raw_revenue_dec").cast("double"))
@@ -619,8 +638,10 @@ def category_stats_spark(orders, products):
     # decimal(20,2) 累加 total_amount 避免浮点误差（与 daily_sales_spark 同理）
     agg = df.groupBy("category").agg(
         F.count("*").alias("orders"),
-        # cast("int") 对齐 Python 路径 as_int(quantity) 累加（Spark sum 返回 double）
-        F.sum("quantity").cast("int").alias("units"),
+        # 先 cast 再 sum（同 daily_sales_spark）：string 列直接 sum 抛
+        # AnalysisException；try_cast long 对齐 as_int 语义（非法值 → null → 0），
+        # 且 ANSI 开启时不抛异常（cast 会抛 CAST_INVALID_INPUT）
+        F.sum(F.col("quantity").try_cast("long")).cast("int").alias("units"),
         F.sum(F.col("total_amount").cast(DecimalType(20, 2))).cast("double").alias("revenue"),
     )
     # total 用未 round 的 revenue（与 Python `sum(b["revenue"] for b in buckets.values())` 一致）
@@ -720,6 +741,105 @@ def customer_value_spark(orders, customers, top_n: int):
         .select("tier", "customers", "revenue")
     )
     return {"top": top, "tiers": tiers}
+
+
+def _customer_value_incremental_spark(
+    orders: Any,
+    customers: Any,
+    history_meta: dict[str, dict[str, str]],
+    spark_session: Any,
+) -> tuple[Any, Any]:
+    """增量 customer_value / customer_tier buckets，Spark 实现.
+
+    语义与 ``_customer_value_incremental``（python）/
+    ``_customer_value_incremental_polars`` 对齐：
+
+    - cv 输出 delta 内**全部**受影响客户的聚合行（不做 top_n 截断），供
+      pipeline ``_advance_and_merge`` 按 key 累加。旧实现直接复用全量语义的
+      ``customer_value_spark``：rank<=top_n 会截断 top_n 之外的老客户增量
+      revenue（跨批少计），且 tiers 用 count(*) 把 delta 内全部客户（含老
+      客户）计入 tier 客户数（跨批重复膨胀）——两者都在此修正。
+    - tier/city：优先 ``history_meta``（来自 state/aggregates/
+      customer_value.csv，读取路径复用 ``_history_customer_meta``），否则取
+      本批 customers 表，否则 ""。
+    - tier_rows 的 customers 仅计 history 中不存在的真新客户（anti join
+      语义：tier_h 为 null ⟺ cid 不在 history），revenue 用未 round 的
+      累加值（对齐 python `t["revenue"] += b["revenue"]` 后输出再 round）。
+    - rank 按 delta revenue 降序（对齐 python sorted key=-revenue）；
+      revenue 并列时按 customer_id 升序保证 spark 内部确定性。
+    - tier 分桶把空串视同缺失（对齐 python `or "unknown"`）。
+
+    Returns:
+        (cv_df, tier_df)，列结构分别与 customer_value.csv / customer_tier.csv
+        一致（customer_id/tier/city/orders/revenue/rank；tier/customers/revenue）。
+    """
+    from pyspark.sql import functions as F
+    from pyspark.sql.types import DecimalType
+    from pyspark.sql.window import Window
+
+    # delta orders 按客户聚合 orders / revenue（decimal 累加对齐全量路径）
+    buckets = orders.groupBy("customer_id").agg(
+        F.count("*").alias("orders"),
+        F.sum(F.col("total_amount").cast(DecimalType(20, 2))).cast("double").alias("_raw_revenue"),
+    )
+    # 关键：不做 row_number <= top_n 截断——输出全部受影响客户
+    ranked = buckets.withColumn(
+        "rank",
+        F.row_number().over(Window.orderBy(F.desc("_raw_revenue"), F.asc("customer_id"))),
+    ).withColumn("revenue", F.round(F.col("_raw_revenue"), 2))
+
+    # history_meta → 小表（列名 tier_h/city_h 避免与 customers 表 tier/city 冲突）
+    if history_meta:
+        hist_df = spark_session.createDataFrame(
+            [
+                (cid, meta.get("tier", ""), meta.get("city", ""))
+                for cid, meta in history_meta.items()
+            ],
+            ["customer_id", "tier_h", "city_h"],
+        )
+        ranked = ranked.join(hist_df, "customer_id", "left")
+    else:
+        ranked = ranked.withColumn("tier_h", F.lit(None).cast("string")).withColumn(
+            "city_h", F.lit(None).cast("string")
+        )
+
+    if customers is not None and customers.count() > 0:
+        ranked = ranked.join(customers.select("customer_id", "tier", "city"), "customer_id", "left")
+    else:
+        ranked = ranked.withColumn("tier", F.lit(None).cast("string")).withColumn(
+            "city", F.lit(None).cast("string")
+        )
+
+    # cv 行：tier/city 优先 history → customers → ""（对齐 python；历史客户
+    # 不在本批 customers 表，coalesce(tier_h, tier) 即"历史优先"）
+    cv_df = ranked.select(
+        "customer_id",
+        F.coalesce(F.col("tier_h"), F.col("tier"), F.lit("")).alias("tier"),
+        F.coalesce(F.col("city_h"), F.col("city"), F.lit("")).alias("city"),
+        "orders",
+        "revenue",
+        "rank",
+    )
+
+    # tier 行：空串视同缺失（对齐 python `history tier or "unknown"`），
+    # 故 coalesce 前把 tier_h/tier 的 "" 转 null；customers 仅计真新客户
+    def _blank_to_null(name: str) -> Any:
+        return F.when(F.col(name) == "", F.lit(None).cast("string")).otherwise(F.col(name))
+
+    tier_for_agg = F.coalesce(
+        _blank_to_null("tier_h"), _blank_to_null("tier"), F.lit("unknown")
+    ).alias("tier")
+    is_new = F.when(F.col("tier_h").isNull(), F.lit(1)).otherwise(F.lit(0))
+    tier_df = (
+        ranked.groupBy(tier_for_agg)
+        .agg(
+            F.sum(is_new).cast("long").alias("customers"),
+            F.round(F.sum("_raw_revenue"), 2).alias("revenue"),
+        )
+        .orderBy("tier")
+        .select("tier", "customers", "revenue")
+    )
+    return cv_df, tier_df
 
 
 def _spark_df_to_dicts(df):
@@ -1011,25 +1131,38 @@ def _run_spark(ctx: PipelineContext, log, agg_dir: str, cconf: dict[str, Any]) -
     customers = _load_clean_spark(ctx, "customers")
     products = _load_clean_spark(ctx, "products")
 
-    if orders is None or orders.count() == 0:
+    orders_count = 0 if orders is None else orders.count()
+    if orders_count == 0:
         return _skip_result(ctx, agg_dir, cconf, log)
-
-    # 增量模式当前在 Spark 路径下走全量聚合（增量 merge 待 pipeline.py 改造），
-    # 与 Python/Polars 路径行为对齐：feed delta orders to the bucketing functions。
-    # 增量 customer_value/tier 的 history_meta 恢复走 _history_customer_meta（load_csv）。
-    if ctx.incremental_enabled:
-        # 增量模式：history_meta 用 load_csv 读 state/aggregates/customer_value.csv
-        # （与 Python/Polars 路径一致），tier/city 优先 history_meta 否则 customers 表。
-        # Spark 路径下 cv_top/cv_tiers 用全量 customer_value_spark 计算（delta orders），
-        # rank 按 delta revenue 降序（与 Python sorted key=-revenue 一致）。
-        log.info(
-            "compute incremental buckets (spark): using full bucketing on delta orders",
-        )
 
     daily_df = daily_sales_spark(orders)
     cats_df = category_stats_spark(orders, products)
     rcs_df = region_channel_stats_spark(orders)
-    cv = customer_value_spark(orders, customers, int(cconf.get("top_n_customers", 20)))
+
+    if ctx.incremental_enabled:
+        # 增量模式：输出与 Python/Polars 语义对齐的增量 buckets
+        # （_customer_value_incremental_spark）。
+        # 旧实现直接复用全量语义 customer_value_spark，存在两处跨引擎分歧：
+        # (1) rank<=top_n 截断使 top_n 之外老客户的增量 revenue 被丢弃、跨批少计；
+        # (2) tiers 用 count(*) 把 delta 内全部客户计进 tier 客户数，跨批重复膨胀
+        # （python 只统计 cid not in history_meta 的真新客户）。
+        # history_meta 读取路径复用 _history_customer_meta（load_csv），与
+        # Python/Polars 路径一致。
+        history_meta = _history_customer_meta(ctx)
+        spark_session = ctx.spark_session
+        assert spark_session is not None, "spark compute 路径必须持有 SparkSession"
+        cv_top_df, cv_tiers_df = _customer_value_incremental_spark(
+            orders, customers, history_meta, spark_session
+        )
+        cv = {"top": cv_top_df, "tiers": cv_tiers_df}
+        log.info(
+            "compute incremental buckets (spark)",
+            new_orders=orders_count,
+            affected_customers=cv_top_df.count(),
+            history_customers=len(history_meta),
+        )
+    else:
+        cv = customer_value_spark(orders, customers, int(cconf.get("top_n_customers", 20)))
 
     # 写出 CSV（table_write 在 spark backend 下调 df.write.mode("overwrite").csv）
     table_write(
@@ -1052,8 +1185,8 @@ def _run_spark(ctx: PipelineContext, log, agg_dir: str, cconf: dict[str, Any]) -
     )
 
     # ctx.aggregates 存 List[Dict]（与 Python/Polars 路径格式对齐，供 output stage 消费）
+    # orders_count 复用入口处的 count() 结果，避免重复 action
     daily_dicts = _spark_df_to_dicts(daily_df)
-    orders_count = orders.count()
     kpi = _compute_kpi(orders_count, daily_dicts, cconf.get("currency", "CNY"))
     json_save(os.path.join(agg_dir, "kpi.json"), kpi)
     ctx.aggregates = {

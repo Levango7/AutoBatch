@@ -355,8 +355,14 @@ class RuleEngine:
 
         # uniqueness: is_duplicated & ~is_first_distinct（只标记重复的后续行，与 python 路径一致）
         # 注：polars 1.43+ 移除了 Expr.is_first()，改用 is_first_distinct()。
+        # null/空串 key 豁免：is_duplicated 把 null 归为同一组，第 2 条及以后的
+        # null 行会被误判重复——与 python 路径（跳过 None/"" key）不一致。
+        # 统一为 python 语义：null/空串 key 不参与 uniqueness 判定，其缺失由
+        # completeness 规则负责。
         for c in (rconf.get("uniqueness") or {}).get("columns", []):
-            expr = pl.col(c).is_duplicated() & ~pl.col(c).is_first_distinct()
+            cs = pl.col(c).cast(pl.Utf8)
+            null_key = cs.is_null() | (cs.str.strip_chars() == "")
+            expr = ~null_key & cs.is_duplicated() & ~cs.is_first_distinct()
             add_expr_mask("uniqueness", "duplicate_key:" + c, expr)
 
         # range: null 或超出 [min, max]（str.replace_all 去千位分隔符，与 as_float 一致）
@@ -591,39 +597,83 @@ class RuleEngine:
         - F.col(c).cast("string") 把任意类型转为字符串，与 python 路径 row.get(c) 一致
         - F.trim(vs) == "" 判断空白字符串，与 python str(v).strip() == "" 一致
         - uniqueness 用窗口函数 row_number > 1 标记重复的后续行（与 polars
-          is_duplicated & ~is_first_distinct 语义一致）
+          is_duplicated & ~is_first_distinct 语义一致）；null/空串 key 不参与
+          判定（对齐 python 路径），窗口 orderBy 用物化的稳定行号 _row_idx
         - referential 用 left_anti join 一次找出孤儿 key 集合，再 isin 标记
         - format 用 F.when(vs.isNull() | trim==""，False).otherwise(~rlike)，
-          null/空字符串视为通过（与 python/polars 一致）
-        - _line 用 monotonically_increasing_id + 2（Spark 无文件行号概念，
-          仅作唯一标识，不对应原文件行号）
+          null/空字符串视为通过（与 python/polars 一致）；rlike 前缀补 ^ 与
+          python re.match 的前缀锚定对齐
+        - _line = _row_idx + 2（_row_idx 为物化稳定行号；单文件 CSV 读入时
+          对应原文件行序，多分区下为确定性的行标识）
 
-        本方法为调度入口，子逻辑拆为 ``_spark_collect_masks`` /
-        ``_spark_apply_masks`` / ``_spark_outlier`` /
-        ``_spark_counters`` / ``_spark_good_bad`` 五个子方法.
+        本方法为调度入口，子逻辑拆为 ``_spark_indexed`` /
+        ``_spark_collect_masks`` / ``_spark_apply_masks`` / ``_spark_outlier`` /
+        ``_spark_counters`` / ``_spark_good_bad`` 六个子方法.
         """
         rconf = self.rules
-        n = df.count()  # 触发 action 获取行数
         if not rconf:
             return df, df.limit(0), [], set()
 
+        # 0. 生成并物化稳定行号列 _row_idx（uniqueness 窗口与 _line 都依赖它；
+        # 参见 _spark_indexed 注释：monotonically_increasing_id 非确定性不可用）
+        df_indexed, n = self._spark_indexed(df)
+
         # 1. 各规则 fail mask（Spark Expr）
-        expr_masks, reason_specs, rule_masks = self._spark_collect_masks(df, rconf, spark)
+        expr_masks, reason_specs, rule_masks = self._spark_collect_masks(df_indexed, rconf, spark)
 
         # 2. 把 mask 加到 df，合并 bad_mask
-        dfm, all_mask_cols = self._spark_apply_masks(df, expr_masks)
+        dfm, all_mask_cols = self._spark_apply_masks(df_indexed, expr_masks)
 
         # 3. outlier 检测（collect 到 driver 算 bounds，只标记不拒收）
-        outlier_indices, outlier_count = self._spark_outlier(df, rconf)
+        outlier_indices, outlier_count = self._spark_outlier(df_indexed, rconf)
 
         # 4. counters（与 python/polars 路径对齐：每行每个子规则单独计数）
         counters = self._spark_counters(dfm, rule_masks, n, rconf, outlier_count)
 
-        # 5. good / bad + reason 文本
+        # 5. good / bad + reason 文本（df 原样传入仅作 bad 为空时的 schema 兜底）
         good_df, bad_df = self._spark_good_bad(df, dfm, all_mask_cols, reason_specs)
 
         stats = self._build_stats(counters)
         return good_df, bad_df, stats, outlier_indices
+
+    @staticmethod
+    def _spark_indexed(df: Any) -> tuple[Any, int]:
+        """生成并物化稳定行号列 ``_row_idx``，返回 ``(indexed_df, row_count)``.
+
+        为什么不能用 ``F.monotonically_increasing_id()``：它是非确定性表达式，
+        每次 action（counters 聚合、good/bad 过滤、坏行写出）都会重新求值执行
+        计划并重新生成 ID——同一组重复行被标记为 rn>1 的成员可能前后不一致，
+        导致统计计数与实际隔离行不自洽。
+
+        因此用 ``rdd.zipWithIndex()`` 在数据本身上派生行号，并立即
+        ``cache()`` + ``count()`` 物化，所有下游 action 共享同一份物理行号。
+
+        注：``zipWithIndex`` 后 ``rdd.toDF()`` 的结构是两列——``_1`` 为原行
+        Row 折叠成的 struct 列，``_2`` 为 Long 索引列；须把 ``_1.<col>`` 逐一
+        展开还原为原始列，并把 ``_2`` 重命名为 ``_row_idx``。
+
+        空表短路：``rdd.zipWithIndex().toDF()`` 在空 RDD 上做 schema 推断会调
+        ``rdd.first()`` 抛 ``ValueError: RDD is empty``（增量批次中某表零新增
+        行时 validate 即拿到空 DataFrame）。空表直接补 null ``_row_idx`` 列返
+        回行计数 0，下游 lazy 检查自然产出零违规/空 good・bad，与
+        python/polars 空表语义一致（checked=0, pass_rate=1.0）。
+        """
+        from pyspark.sql import functions as F
+
+        if df.rdd.isEmpty():
+            return df.withColumn("_row_idx", F.lit(None).cast("long")), 0
+
+        indexed = (
+            df.rdd.zipWithIndex()
+            .toDF()
+            .select(
+                *[F.col("_1." + c).alias(c) for c in df.columns],
+                F.col("_2").alias("_row_idx"),
+            )
+        )
+        indexed = indexed.cache()
+        n = indexed.count()  # 立即物化：后续所有 action 读同一份缓存
+        return indexed, n
 
     def _spark_collect_masks(
         self, df: Any, rconf: dict[str, Any], spark: Any
@@ -662,12 +712,18 @@ class RuleEngine:
             add_expr_mask("completeness", "missing_required:" + col, expr)
 
         # uniqueness: 窗口函数 row_number > 1（标记重复的后续行，与 polars
-        # is_duplicated & ~is_first_distinct 语义一致）。用 monotonically_increasing_id
-        # 作为 orderBy 保证 partition 内行顺序确定。
+        # is_duplicated & ~is_first_distinct 语义一致）。
+        # - orderBy 用 _spark_indexed 物化的稳定行号 _row_idx：保证 counters
+        #   与 good/bad 过滤等所有 action 对"保留哪一条重复行"的判断一致。
+        # - null/空串 key 豁免：partitionBy 把 null 归为同组会误判后续 null 行
+        #   重复——统一为 python 语义（跳过 None/"" key，缺失由 completeness
+        #   负责），这里对 null key 强制 rn=1 使其不被标记。
         for c in (rconf.get("uniqueness") or {}).get("columns", []):
-            w = Window.partitionBy(c).orderBy(F.monotonically_increasing_id())
-            expr = F.row_number().over(w) > 1
-            add_expr_mask("uniqueness", "duplicate_key:" + c, expr)
+            vs = F.col(c).cast("string")
+            null_key = vs.isNull() | (F.trim(vs) == "")
+            w = Window.partitionBy(c).orderBy(F.col("_row_idx"))
+            rn = F.when(null_key, F.lit(1)).otherwise(F.row_number().over(w))
+            add_expr_mask("uniqueness", "duplicate_key:" + c, rn > 1)
 
         # range: null 或超出 [min, max]（cast double 与 as_float 一致）
         for rng in rconf.get("range", []):
@@ -716,31 +772,47 @@ class RuleEngine:
 
         # format (regex): F.col.rlike（Java regex）
         # null 或空字符串视为通过（与 python/polars 一致）
+        # 前缀锚定对齐：python 路径用 re.match（前缀锚定），而 rlike 等价
+        # re.search（无锚定）——同一模式 "ORD-\d{8}" 下 "XORD-12345678"
+        # python 判失败、旧 spark 判通过。统一为锚定语义：前面补 ^
+        # （模式本身以 ^ 开头时保持幂等）。
         # 注：Java regex 与 python re 在常见模式（ORD-\d{8}、ISO 日期）下等价；
         # 复杂回溯/命名分组等差异在本项目配置中不会触发。
         for col, pat in (rconf.get("format", {}) or {}).items():
             vs = F.col(col).cast("string")
-            expr = F.when(vs.isNull() | (F.trim(vs) == ""), False).otherwise(~vs.rlike(pat))
+            anchored = pat if pat.startswith("^") else "^" + pat
+            expr = F.when(vs.isNull() | (F.trim(vs) == ""), False).otherwise(~vs.rlike(anchored))
             add_expr_mask("format", "format_violation:" + col, expr)
 
-        # date_valid: F.coalesce(F.to_date(...), ...) 多格式解析
+        # date_valid: F.try_to_timestamp 完整时间戳解析 + 秒级边界比较
         # 与 python date_parse 的三种格式（%Y-%m-%d、%Y-%m-%dT%H:%M:%S、
-        # %Y-%m-%d %H:%M:%S）一致。to_date 解析失败返回 null。
+        # %Y-%m-%d %H:%M:%S）一致。解析失败返回 null。
+        # 边界比较必须用完整 timestamp：旧实现 to_date 截断到日粒度，
+        # max="2026-12-31" 时同日 23:59:59 的行被 spark 放行，而 python 路径
+        # 按 datetime 精确比较（> 2026-12-31 00:00:00）会拦截——三引擎分歧。
+        # 统一为 python 语义：配置值也按 timestamp 解析（纯日期配置取当日
+        # 00:00:00，与 date_parse("2026-12-31") → datetime 零点一致）。
+        # 用 try_to_timestamp 而非 to_timestamp：Spark 4.x 默认 ANSI 开启，
+        # to_timestamp 对不匹配格式的输入直接抛 CANNOT_PARSE_TIMESTAMP，
+        # coalesce 无法落到下一格式；try_ 族解析失败返回 null，与 python
+        # date_parse 解析失败返回 None 的语义一致（ANSI 开/关均成立）。
         dconf = rconf.get("date_valid") or {}
         date_min = dconf.get("min")
         date_max = dconf.get("max")
         for col in dconf.get("columns", []):
             vs = F.col(col).cast("string")
+            # 注：try_to_timestamp 的 format 参数为 ColumnOrName，裸字符串会被
+            # 解析为列名（UNRESOLVED_COLUMN），必须用 F.lit 包裹成字面量
             parsed = F.coalesce(
-                F.to_date(vs, "yyyy-MM-dd"),
-                F.to_date(vs, "yyyy-MM-dd'T'HH:mm:ss"),
-                F.to_date(vs, "yyyy-MM-dd HH:mm:ss"),
+                F.try_to_timestamp(vs, F.lit("yyyy-MM-dd'T'HH:mm:ss")),
+                F.try_to_timestamp(vs, F.lit("yyyy-MM-dd HH:mm:ss")),
+                F.try_to_timestamp(vs, F.lit("yyyy-MM-dd")),
             )
             expr = parsed.isNull()
             if date_min:
-                expr = expr | (parsed < F.lit(date_min).cast("date"))
+                expr = expr | (parsed < F.lit(str(date_min)).cast("timestamp"))
             if date_max:
-                expr = expr | (parsed > F.lit(date_max).cast("date"))
+                expr = expr | (parsed > F.lit(str(date_max)).cast("timestamp"))
             add_expr_mask("date_valid", "invalid_date:" + col, expr)
 
         return expr_masks, reason_specs, rule_masks
@@ -773,38 +845,19 @@ class RuleEngine:
         return dfm, all_mask_cols
 
     @staticmethod
-    def _outlier_bounds_from_vals(vals: list, oc: dict[str, Any]) -> Optional[tuple]:
-        """由数值序列计算 outlier 边界（IQR / zscore，三引擎共用）.
-
-        与 :meth:`_outlier_bounds`（rows/cfg 签名，python 路径）不同：
-        本方法直接接收已 cast 的数值列表，供 Spark 路径与 validate 阶段复用.
-
-        Args:
-            vals: 非空数值列表（调用方保证长度足够）.
-            oc:   outlier 规则配置（method/factor）.
-
-        Returns:
-            (lower, upper) 元组；sd=0 等无法计算时返回 None.
-        """
-        factor = float(oc.get("factor", 1.5))
-        if oc.get("method", "iqr") == "zscore":
-            mean = statistics.mean(vals)
-            sd = statistics.pstdev(vals)
-            if sd > 0:
-                return (mean - factor * sd, mean + factor * sd)
-            return None
-        q1, _, q3 = statistics.quantiles(vals, n=4)
-        iqr = q3 - q1
-        return (q1 - factor * iqr, q3 + factor * iqr)
-
-    @staticmethod
     def _spark_outlier(df: Any, rconf: dict[str, Any]) -> tuple[set, int]:
-        """Spark 路径：outlier 检测（collect 到 driver 算 bounds，只标记不拒收）.
+        """Spark 路径：outlier 检测（分布式 approxQuantile，只标记不拒收）.
 
-        注：对大数据集 collect 到 driver 有性能瓶颈；Spark 原生方式是用
-        df.stat.approxQuantile 算 Q1/Q3。这里为了与 python/polars 路径
-        bounds 计算完全一致（statistics.quantiles 用线性插值），选择 collect。
-        outlier 比例通常 0.002，collect 的数据量小，可接受.
+        口径说明（轻微分歧，保留近似）：
+        python 路径用 statistics.quantiles（线性插值精确分位数）、polars 用
+        quantile(interpolation="linear") 算 IQR 界；Spark 这里用
+        approxQuantile(ε=0.001)——分位数估计误差在数据秩上最大 ±0.1%，
+        映射到值域后 Q1/Q3 边界可能与精确值相差极小，处于边界附近（±误差带）
+        的样本点在两个引擎间可能被不同地标记/放行，outlier_count 在小样本
+        边界场景下可能与 python/polars 有 ±1～2 行级别的差异。
+        不对齐精确口径的原因：精确 IQR 需要把整列 collect 到 driver，
+        千万行级直接 OOM（2026-08 亿行基准实测）；outlier 仅 flag 不拒收、
+        比例约 0.002，近似误差对下游聚合无实质影响，故按任务口径保留近似。
 
         Returns:
             (outlier_indices, outlier_count)
@@ -880,10 +933,16 @@ class RuleEngine:
         bad 行 reason 文本用 F.when + F.concat 在 executor 端生成，避免 collect.
         每个 reason_part = rt + ";" 或 ""，concat 拼接后 regexp_replace 去末尾分号，
         顺序与 reason_specs 一致.
+
+        注：dfm 由 ``_spark_indexed`` 结果派生，带物化列 ``_row_idx``——
+        good_df/bad_df 输出前必须剔除（下游按原始 schema 消费）；``_line``
+        直接取 ``_row_idx + 2``（确定性，单文件 CSV 场景对应原文件行号；
+        旧实现用 monotonically_increasing_id，非确定性且不对应行序）。
         """
         from pyspark.sql import functions as F
 
-        good_df = dfm.filter(~F.col("__bad")).drop(*(all_mask_cols + ["__bad"]))
+        drop_cols = all_mask_cols + ["__bad", "_row_idx"]
+        good_df = dfm.filter(~F.col("__bad")).drop(*drop_cols)
         bad_df_with_masks = dfm.filter(F.col("__bad"))
 
         bad_count = bad_df_with_masks.count()
@@ -896,12 +955,10 @@ class RuleEngine:
                 reasons_expr = F.regexp_replace(reasons_expr, r";$", "")
             else:
                 reasons_expr = F.lit("")
-            # _line 用 monotonically_increasing_id + 2（Spark 无文件行号概念，
-            # 仅作唯一标识，不对应原文件行号；与 python/polars 的 i+2 语义近似）
             bad_df = (
                 bad_df_with_masks.withColumn("_reasons", reasons_expr)
-                .withColumn("_line", F.monotonically_increasing_id() + 2)
-                .drop(*(all_mask_cols + ["__bad"]))
+                .withColumn("_line", F.col("_row_idx") + 2)
+                .drop(*drop_cols)
             )
         else:
             bad_df = df.limit(0)

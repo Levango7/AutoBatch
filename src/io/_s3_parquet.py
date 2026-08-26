@@ -305,9 +305,7 @@ def apply_s3a_hadoop_conf(builder: Any, cfg: dict[str, Any]) -> Any:
     builder = builder.config("spark.hadoop.fs.s3a.access.key", access)
     builder = builder.config("spark.hadoop.fs.s3a.secret.key", secret)
     builder = builder.config("spark.hadoop.fs.s3a.path.style.access", "true")
-    builder = builder.config(
-        "spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem"
-    )
+    builder = builder.config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
     # Windows Driver 端缺 hadoop.dll 时，S3A 默认 disk buffer 会触发
     # NativeIO$Windows.access0 → UnsatisfiedLinkError。改用内存 buffer 避免
     # 创建本地临时文件（Worker 在 Linux 容器中不受影响，内存 buffer 也可用）。
@@ -315,9 +313,7 @@ def apply_s3a_hadoop_conf(builder: Any, cfg: dict[str, Any]) -> Any:
     builder = builder.config("spark.hadoop.fs.s3a.fast.upload.buffer", "array")
     # FileOutputCommitter v2 避免 commitJob 时 list _temporary/0（S3 eventual
     # consistency 可能导致 list 不到刚写入的 task 输出）。
-    builder = builder.config(
-        "spark.hadoop.mapreduce.fileoutputcommitter.algorithm.version", "2"
-    )
+    builder = builder.config("spark.hadoop.mapreduce.fileoutputcommitter.algorithm.version", "2")
     return builder
 
 

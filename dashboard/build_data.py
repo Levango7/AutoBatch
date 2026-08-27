@@ -50,28 +50,41 @@ def _load_json(path: Path) -> Optional[dict[str, Any]]:
 
 
 def _load_daily_sales(path: Path) -> list[dict[str, Any]]:
-    """读 daily_sales.csv，返回 [{date, orders, units, revenue, avgOrderValue}, ...]."""
-    if not path.is_file():
-        return []
+    """读 daily_sales.csv，返回 [{date, orders, units, revenue, avgOrderValue}, ...].
+
+    兼容 Spark 后端的目录型产物：`df.write.csv(path)` 写出的是目录
+    （内含 part-00000-* 分片文件，每个分片自带 header）。此时逐分片
+    DictReader 解析（自动跳过各分片 header）后合并。跳过 "_" / "." 开头的
+    元数据文件（_SUCCESS、.crc 等），分片按文件名排序保证结果确定。
+    """
+    files: list[Path] = []
+    if path.is_file():
+        files = [path]
+    elif path.is_dir():
+        files = sorted(
+            p for p in path.iterdir() if p.is_file() and not p.name.startswith(("_", "."))
+        )
     out: list[dict[str, Any]] = []
-    try:
-        with path.open("r", encoding="utf-8", newline="") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                try:
-                    out.append(
-                        {
-                            "date": row.get("order_date", ""),
-                            "orders": int(row.get("orders", 0) or 0),
-                            "units": int(row.get("units", 0) or 0),
-                            "revenue": float(row.get("revenue", 0.0) or 0.0),
-                            "avgOrderValue": float(row.get("avg_order_value", 0.0) or 0.0),
-                        }
-                    )
-                except (ValueError, TypeError):
-                    continue
-    except OSError:
-        return []
+    for fp in files:
+        try:
+            with fp.open("r", encoding="utf-8", newline="") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    try:
+                        out.append(
+                            {
+                                "date": row.get("order_date", ""),
+                                "orders": int(row.get("orders", 0) or 0),
+                                "units": int(row.get("units", 0) or 0),
+                                "revenue": float(row.get("revenue", 0.0) or 0.0),
+                                "avgOrderValue": float(row.get("avg_order_value", 0.0) or 0.0),
+                            }
+                        )
+                    except (ValueError, TypeError):
+                        continue
+        except OSError:
+            continue
+    out.sort(key=lambda r: r.get("date", ""))
     return out
 
 

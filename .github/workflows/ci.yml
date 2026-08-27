@@ -7,10 +7,10 @@
 #     · 3.9 不在 CI：pyproject.toml 已声明 requires-python=">=3.10"
 #      （ruff target-version="py310"、mypy python_version="3.10" 同步对齐），
 #       不再有 3.9 支持声明，也没有 3.9 CI 腿
-#     · 3.13/3.14 未纳入 CI 测试矩阵。注意：应用的 Docker 运行镜像基于
-#       python:3.13.1-slim（见根目录 Dockerfile，安装完整 requirements.txt）；
-#       该版本组合尚未被任何 CI 腿验证，属已知盲区——本地无 docker，镜像
-#       可构建性亦无法本地验证，需推送后由 CI/CD 观察确认
+#     · 3.13/3.14 未纳入 CI 测试矩阵。应用的 Docker 运行镜像已对齐到
+#       python:3.12-slim（见根目录 Dockerfile，安装完整 requirements.txt），
+#       与本矩阵 3.12 腿同版本，镜像内依赖组合获得 CI 实测覆盖。
+#       （此前镜像为 python:3.13.1-slim 且无任何 CI 腿验证，已修正。）
 #   - build job 附 MinIO service：tests/test_storage_parquet.py 的 S3 测试此前
 #     因 CI 无 MinIO 服务、_minio_available() 探测 localhost:9000 恒失败而永久
 #     跳过；加 service 后在 Linux 腿实际运行。GHA service 容器仅支持 Linux
@@ -48,8 +48,8 @@ jobs:
         # 一致（requires-python=">=3.10"）。无 3.9 腿：3.9 已不在支持声明内，
         # CI 也从未有过 3.9 腿（旧注释声称"3.9 跑 python engine 核心路径"
         # 与实际不符，任务78 已修正为如实描述）。
-        # 3.13/3.14 不在矩阵：应用 Docker 运行镜像基于 python:3.13.1-slim
-        # （根目录 Dockerfile），该组合未被 CI 验证，属已知盲区。
+        # 3.13/3.14 不在矩阵：应用 Docker 运行镜像为 python:3.12-slim
+        # （根目录 Dockerfile，与本矩阵 3.12 腿同版本，见顶部版本说明）
         python-version:
           - '3.10'
           - '3.11'

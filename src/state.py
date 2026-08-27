@@ -283,10 +283,25 @@ class StateStore:
     # state.json load / save
     # ------------------------------------------------------------------
     def load(self) -> dict[str, Any]:
-        """Load state.json; return an empty skeleton if the file is absent."""
+        """Load state.json; return an empty skeleton if the file is absent.
+
+        Raises RuntimeError with recovery guidance if the file exists but is
+        corrupted — silently starting from an empty state would make the next
+        run a full re-read AND re-accumulate aggregates (double counting), so
+        this is deliberately a loud failure requiring manual recovery.
+        """
         if os.path.exists(self.state_path):
             with open(self.state_path, encoding="utf-8-sig") as f:
-                state = json.load(f)
+                try:
+                    state = json.load(f)
+                except json.JSONDecodeError as e:
+                    raise RuntimeError(
+                        f"state file {self.state_path!r} is corrupted ({e}). "
+                        "增量水位/聚合状态不可读。请人工修复该文件或从备份恢复；"
+                        "注意：直接删除会令下一批次按全量重读并对 state/aggregates "
+                        "重复累加（跨批翻倍），删除前必须同时清空 state/aggregates/ "
+                        "并接受聚合从零重建。"
+                    ) from e
             state.setdefault("version", "1.0")
             state.setdefault("tables", {})
             state.setdefault("aggregates", {})

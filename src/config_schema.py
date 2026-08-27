@@ -128,7 +128,22 @@ class DemoSection(_AllowExtra):
 class IncrementalSection(_AllowExtra):
     enabled: bool = False
     state_dir: str = "state"
-    mode: str = ""  # "" / "watermark" / "snapshot"（运行时按缺省处理）
+    # 运行时取值（src/stages/ingest.py）："high_watermark"（缺省）/
+    # "iceberg_snapshot_diff"。兼容历史文档写法 "watermark" / "snapshot"
+    # （运行时按缺省 high_watermark 处理）；未知值在 schema 层即拒绝，
+    # 避免拼写错误静默回落高水位路径。
+    mode: str = ""
+
+    @field_validator("mode")
+    @classmethod
+    def _mode_must_be_known(cls, v: str) -> str:
+        allowed = {"", "high_watermark", "iceberg_snapshot_diff", "watermark", "snapshot"}
+        if v not in allowed:
+            raise ValueError(
+                f"incremental.mode must be one of high_watermark/iceberg_snapshot_diff (or empty), got {v!r}"
+            )
+        return v
+
     tables: dict[str, Any] = Field(default_factory=dict)
 
 

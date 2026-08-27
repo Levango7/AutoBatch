@@ -140,20 +140,25 @@ def main(cfg: dict[str, Any]) -> dict[str, Any]:
         rng, n, customers, products, base_date, defects, int(gen.get("date_range_days", 90))
     )
 
-    # rows=0 / 空参考表时 orders[0] 会 IndexError；用固定列序兜底
+    # rows=0 / 空参考表时 orders[0] 会 IndexError；用固定列序兜底。
+    # 兜底列序必须与 gen_orders / gen_products 的实际字段一致（2026-08 审查 B9：
+    # 旧兜底 orders 8 列 vs 实际 10 列、products "price" vs 实际 "cost"，空表
+    # 边界下会产出 schema 错位的 CSV）。
     order_fields = (
-        list(orders[0].keys())
-        if orders
-        else [
+        [
             "order_id",
             "customer_id",
             "product_id",
             "order_date",
+            "created_ts",
+            "region",
+            "channel",
             "quantity",
             "unit_price",
             "status",
-            "channel",
         ]
+        if not orders
+        else list(orders[0].keys())
     )
     csv_write(os.path.join(out_dir, "orders.csv"), order_fields, orders)
     csv_write(
@@ -163,7 +168,7 @@ def main(cfg: dict[str, Any]) -> dict[str, Any]:
     )
     csv_write(
         os.path.join(out_dir, "products.csv"),
-        list(products[0].keys()) if products else ["product_id", "category", "price"],
+        list(products[0].keys()) if products else ["product_id", "name", "category", "cost"],
         products,
     )
 

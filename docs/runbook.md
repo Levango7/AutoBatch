@@ -2,7 +2,7 @@
 
 ## 1. 环境要求
 
-- Python 3.9+（Windows / Linux / macOS 均可）
+- Python 3.10+（Windows / Linux / macOS 均可；与 pyproject.toml requires-python 一致）
 - 零第三方依赖（仅标准库），无需安装任何包
 - 可选：Polars>=1.0,<2.0（`pip install polars`，启用 `engine.backend="polars"` 列式加速路径）
 - 可选：PySpark 4.x + JDK 11+ 或 17（`pip install pyspark`，启用 `engine.backend="spark"` 分布式加速路径；Windows 额外需 `winutils.exe` + `hadoop.dll` 并设 `HADOOP_HOME`，详见第 21 节；多机模式需 Docker Desktop + MinIO，详见第 21.3 节）

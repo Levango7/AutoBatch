@@ -16,7 +16,7 @@
 # 支持范围内全部可安装，不再有"3.9 时不装引擎依赖"的分支。
 # CI 版本矩阵（如实描述）：ubuntu-latest × 3.10/3.11/3.12 + macos-latest × 3.12；
 # 无 3.9 腿（旧注释称"3.9 CI 跑 python engine + local_csv 核心路径"与实际不符），
-# 3.13/3.14 未纳入矩阵（运行镜像 python:3.13.1-slim 属已知验证盲区，见 ci.yml 注释）。
+# 3.13/3.14 未纳入矩阵；Docker 运行镜像为 python:3.12-slim（与 CI 3.12 腿同版本）。
 polars>=1.0,<2.0       # Phase 2a 列式加速（engine.backend="polars" 时需要；Python >=3.10）
 pyspark>=4.0,<5.0      # Phase 2b Spark 分布式加速（engine.backend="spark" 时需要；需 JDK17+；Python >=3.10）
 pyarrow>=23.0.1,<25.0   # Phase 3 湖存储（storage.backend="parquet" 时需要；Python >=3.10 因 wheel 支持；>=23.0.1 修复 PYSEC-2026-113）

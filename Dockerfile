@@ -2,17 +2,23 @@
 # Stage 1: builder  — 安装 Python 依赖到独立目录
 # Stage 2: runtime  — 仅拷贝必要文件 + 依赖，非 root 运行
 # 设计参见 docs/evolution.md §6.x（Docker 化部署）
+#
+# 基础镜像 python:3.12-slim：与 CI 测试矩阵覆盖的 3.10/3.11/3.12 对齐
+# （此前基于 python:3.13.1-slim，该版本组合从未被任何 CI 腿验证，
+#   属交付盲区——2026-08 审查后对齐到已验证的 3.12）。
+# 注意：镜像内无 JDK，`engine.backend="spark"` 在容器内不可用；
+# 容器化运行仅支持 python / polars 计算路径（见 readme「Docker」一节）。
 # ────────────────────────────────────────────────────────────────
 
 # ── Stage 1: builder ────────────────────────────────────────────
-FROM python:3.13.1-slim AS builder
+FROM python:3.12-slim AS builder
 WORKDIR /build
 COPY requirements.txt .
 # 装到 /install（便于 runtime 阶段精确拷贝，不含 pip/setuptools 等工具）
 RUN pip install --no-cache-dir --target=/install -r requirements.txt
 
 # ── Stage 2: runtime ────────────────────────────────────────────
-FROM python:3.13.1-slim AS runtime
+FROM python:3.12-slim AS runtime
 WORKDIR /app
 
 # 拷贝 builder 阶段安装的依赖

@@ -1,0 +1,79 @@
+# =============================================================================
+# AutoBatch 发布流水线（CD）
+# 触发：推送 v* 格式 tag（如 v1.5.0）时执行：
+#   1. 构建运行镜像并推送到 GHCR（ghcr.io/<owner>/<repo>:<版本> + :latest）
+#   2. 用发布镜像跑一次流水线冒烟（pipeline_small 配置），失败则中止发布
+#   3. 创建 GitHub Release（自动生成 changelog）
+#
+# 说明：
+#   - tag 版本号应与 pyproject.toml version / src/helpers.py VERSION 同步
+#     （两处手工维护，发布前请核对一致）
+#   - 镜像基于 python:3.12-slim（与 CI 测试矩阵 3.12 腿同版本），容器内
+#     无 JDK，仅支持 python/polars 计算路径——镜像内含 pyspark 依赖是为
+#     复用 requirements.txt，spark 路径仍需自备 JDK 环境运行
+#   - GHCR 凭证使用内置 GITHUB_TOKEN，无需配置 Secrets
+# =============================================================================
+name: Release / AutoBatch Publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build, smoke-test and publish image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ !contains(github.ref, '-rc') && !contains(github.ref, '-pre') }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # 发布门禁：用刚推送的镜像跑一次小规模流水线冒烟。
+      # 失败说明镜像内运行路径损坏，中止发布（后续步骤不再执行）。
+      - name: Smoke test published image
+        run: |
+          IMAGE_TAG=$(echo "${{ steps.meta.outputs.tags }}" | head -n1)
+          docker run --rm "$IMAGE_TAG" python main.py --config config/pipeline_small.json
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true

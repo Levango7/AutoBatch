@@ -8,11 +8,11 @@
 
 ## 特性
 
-- **缺省零依赖**：`engine.backend="python"` + `storage.backend="local_csv"` 路径仅用 Python 3.9+ 标准库（csv / json / hashlib / statistics / logging），无安装步骤；演进路径按需 `pip install`（Polars / PySpark / pyarrow / minio / pyiceberg，均 lazy import，缺省路径零额外依赖）
+- **缺省零依赖**：`engine.backend="python"` + `storage.backend="local_csv"` 路径仅用 Python 3.10+ 标准库（csv / json / hashlib / statistics / logging），无安装步骤；演进路径按需 `pip install`（Polars / PySpark / pyarrow / minio / pyiceberg，均 lazy import，缺省路径零额外依赖）
 - **一键端到端运行**：自动生成示例数据（2 万订单 + 3 千客户 + 200 商品，含 8 类缺陷）并完成五阶段处理
 - **可追溯**：每次运行独立批次号（batch_id），全部中间产物持久化，台账（manifest.json）记录每个文件的 sha256、行数与来源标记
 - **数据质量内置**：完整性 / 唯一性 / 范围 / 格式 / 枚举 / 日期 / 引用完整性 / 异常值 8 类规则，不合格行带原因码隔离，产出质量报告与 DQ Score
-- **可配置**：数据规模、缺陷率、质量规则、计算逻辑、输出目录全部由配置文件控制
+- **可配置**：数据规模、缺陷率、质量规则、计算参数（top_n / 币种）、引擎与存储后端、增量、错误处理、监控、血缘全部由配置文件控制；五阶段产物目录为固定约定（`01_raw` … `05_output`），不随配置改变
 - **可监控**：每阶段独立 JSON Lines 日志 + 状态登记，失败可定位到具体阶段与原因
 - **血缘自动推导**：各 stage 声明式登记 lineage（产物 ← 上游），output 阶段自动拼接为完整血缘图写入 manifest，无需硬编码字典
 - **类型强化**：src/helpers.py 提供 PipelineContext dataclass 替换原 ctx: Dict[str, Any] 弱类型包，IDE 可静态检查阶段间传递的上下文
@@ -34,7 +34,7 @@
 
 ## 快速开始
 
-环境要求：Python 3.9+（无第三方依赖）。
+环境要求：Python 3.10+（无第三方依赖；与 pyproject.toml `requires-python=">=3.10"` 一致）。
 
 Windows（双击 run.bat 或命令行）：
 
@@ -225,7 +225,7 @@ python main.py --config config/pipeline_small.json
 
 依赖说明：
 
-- **python 路径**（`engine.backend="python"`，缺省）：零第三方依赖，仅用 Python 3.9+ 标准库
+- **python 路径**（`engine.backend="python"`，缺省）：零第三方依赖，仅用 Python 3.10+ 标准库
 - **polars 路径**（`engine.backend="polars"`）：需 `pip install polars`（Polars 1.0+，requirements.txt：`polars>=1.0,<2.0`，Rust 内核，wheel 约 30MB）。`polars` 采用 lazy import，未安装时仅 `backend="polars"` 路径报 `ImportError`，python 路径不受影响
 - **spark 路径**（`engine.backend="spark"`）：需 `pip install pyspark`（PySpark 4.x，含 Spark 内核，约 200MB）+ JDK 11+ 或 17。Windows 额外需 `winutils.exe` + `hadoop.dll`（设 `HADOOP_HOME`）。`pyspark` 采用 lazy import，未安装时仅 `backend="spark"` 路径报 `ImportError`，python / polars 路径不受影响
 - **parquet 湖存储路径**（`storage.backend="parquet"`）：需 `pip install pyarrow minio`（pyarrow 23.0.1+，requirements.txt：`pyarrow>=23.0.1,<25.0`，提供 Parquet 列式读写 + S3FileSystem 客户端，minio 7+ 提供 bucket 初始化与迁移脚本）。`pyarrow` / `minio` 采用 lazy import，未安装时仅 `storage.backend="parquet"` 路径报 `ImportError`，`storage.backend="local_csv"`（缺省）路径不受影响
@@ -244,10 +244,12 @@ Docker：
 docker compose up --build
 ```
 
+> 注意：容器镜像基于 `python:3.12-slim`（与 CI 已验证版本一致），**镜像内无 JDK**——容器化运行仅支持 `engine.backend="python"` / `"polars"` 计算路径；`"spark"` 路径需在自备 JDK 11/17 的宿主机或集群环境运行（多机模式见 `docker/spark-cluster/`）。
+
 运行结束后：
 
 - 运行结果在 `run\<batch_id>\`（最新批次指针：`run\latest.json`）
-- 打开 `dashboard\dashboard.html` 查看可视化看板
+- 打开 `dashboard\dashboard.html` 查看可视化看板（看板数据由 `dashboard\data.js` 承载——run.bat / run.sh 已在流水线结束后自动执行 `python dashboard\build_data.py` 刷新；手动执行流水线后请自行运行该命令，否则看板展示的是上一次刷新的数据）
 - 打开 `docs\design.html` 查看设计文档，`docs\runbook.md` 查看运行与扩展手册
 
 ## 目录结构

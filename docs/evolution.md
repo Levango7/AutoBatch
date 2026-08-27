@@ -24,7 +24,7 @@ AutoBatch 当前是一个**可演进的大数据批处理工作流骨架——�
 | 4 compute | `stages/compute.py` | `daily_sales` / `category_stats` / `region_channel_stats` / `customer_value` 四聚合 | `04_aggregates/` |
 | 5 output | `stages/output.py` | 最终数据集（带批次标记）、看板数据、manifest 台账登记 | `05_output/`、`manifest.json` |
 
-权威批次（B-20260815-134548-E85420）实测：23,400 行接入 → 22,268 校验通过 → 19,068 清洗后 → 91 天聚合 → 19,068 输出，总耗时 4,400 ms，DQ Score 99.60%。技术栈以 Python 3.9+ 标准库（csv / json / hashlib / statistics / logging / shutil / dataclasses）为缺省路径（`engine.backend="python"` + `storage.backend="local_csv"`），`requirements.txt` 列出演进路径可选依赖（polars / pyspark / pyarrow / minio / pyiceberg，均 lazy import，缺省路径零额外依赖）。
+权威批次（B-20260815-134548-E85420）实测：23,400 行接入 → 22,268 校验通过 → 19,068 清洗后 → 91 天聚合 → 19,068 输出，总耗时 4,400 ms，DQ Score 99.60%。技术栈以 Python 3.10+ 标准库（csv / json / hashlib / statistics / logging / shutil / dataclasses）为缺省路径（`engine.backend="python"` + `storage.backend="local_csv"`），`requirements.txt` 列出演进路径可选依赖（polars / pyspark / pyarrow / minio / pyiceberg，均 lazy import，缺省路径零额外依赖）。
 
 ### 1.2 演进驱动力
 
@@ -989,7 +989,7 @@ def table_write(path: str, df: "SparkDataFrame", cfg: Dict[str, Any]) -> int:
 
 - **Spark 集群**：Standalone（Docker Compose 一键部署，`docker/spark-cluster/up.ps1`，已实现）/ Yarn（Hadoop 集群）/ K8s（云原生）。
 - **JDK 17**：Spark 4.x 要求 JDK 11 或 17（多机模式容器内 JRE 17，driver 端 JDK 17）。
-- **Python 3.9+**：PySpark 4.x 兼容。
+- **Python 3.10+**：PySpark 4.x 兼容。
 - **网络**：executor 间 shuffle 需网络互通，Docker Compose `autobatch-net` bridge 网络已配置。
 - **存储**：executor 共享存储（MinIO / HDFS / S3），本地 FS 不支持多机共享。Phase 3 MinIO+Parquet 已于 2026-08-15 实现并上线，多机模式已落地（2026-08-16）。
 - **S3A connector**：`hadoop-aws 3.5.0` + `aws-sdk-v2-bundle 2.35.4` + `analyticsaccelerator-s3 1.3.1`，构建时打入 `/opt/spark/jars/`，Spark 启动自动加载到 classpath。

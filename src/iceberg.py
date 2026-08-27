@@ -221,7 +221,26 @@ def _table_write_iceberg(
             ) from e
         try:
             if mode == "overwrite":
-                df.writeTo(full_name).createOrReplace()
+                if _spark_table_exists(spark, full_name):
+                    # 表已存在：INSERT OVERWRITE 在同一张表上以单个新 snapshot 原子
+                    # 替换全部数据文件，旧 snapshot 仍可 time travel——与 python 路径
+                    # table.overwrite() 语义一致。旧实现无条件 createOrReplace：每次
+                    # 全量跑都重建表，历史 snapshot 全部不可达，spark 路径的 time
+                    # travel 承诺被打破（2026-08 审查 B5）。
+                    # 用 SQL 语句而非 DFv2 overwrite(lit(True))：后者需要 F.lit（依赖
+                    # 活跃 SparkContext，无 JVM 的 fake 单测无法覆盖），前者分支决策
+                    # 是纯 catalog 查询 + SQL 字符串。
+                    df.createOrReplaceTempView("_autobatch_overwrite_src")
+                    try:
+                        spark.sql(
+                            f"INSERT OVERWRITE TABLE {full_name} "
+                            "SELECT * FROM _autobatch_overwrite_src"
+                        )
+                    finally:
+                        spark.catalog.dropTempView("_autobatch_overwrite_src")
+                else:
+                    # 表不存在：建表并写入（与旧实现的建表路径一致）
+                    df.writeTo(full_name).createOrReplace()
             elif _spark_table_exists(spark, full_name):
                 # 表已存在：只允许 append。旧实现里 append 失败即无条件
                 # createOrReplace 回退，任何瞬态错误（S3 抖动、catalog 超时）

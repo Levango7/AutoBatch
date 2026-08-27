@@ -49,6 +49,22 @@ from .state import _DERIVED_COLS, _DIMENSION_COLS, StateStore, recompute_derived
 
 STAGES = ["ingest", "validate", "clean", "compute", "output"]
 
+# 合法计算引擎后端；_get_engine_backend 读到的未知值会经 dispatch 兜底走 python
+# 路径（_dispatch.py），行为不中断但性能预期（polars/spark）落空——在此告警。
+_KNOWN_ENGINE_BACKENDS = ("python", "polars", "spark")
+
+
+def _warn_unknown_engine_backend(engine_backend: str, logger) -> None:
+    if engine_backend not in _KNOWN_ENGINE_BACKENDS:
+        logger.warning(
+            "unknown engine.backend %r (expected python/polars/spark); "
+            "falling back to the python engine — install pydantic to enable "
+            "config validation and catch typos at startup",
+            engine_backend,
+            extra={"stage": "pipeline"},
+        )
+
+
 # Stage 输出目录前缀映射（任务39 幂等性保证）.
 # 每个 stage 把产物写到 run/<batch>/<NN>_<name>/ 下；重试前清理这些目录
 # 确保不残留部分产物.**注意**：state/ 目录由 incremental 模式管理，
@@ -812,6 +828,7 @@ def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
     # 见 docs/evolution.md §4.3.1.1（polars）/ §4.3.2.1（spark）。缺省 "python"
     # 保持向后兼容；"polars" 走列式路径；"spark" 走分布式路径。
     ctx.engine_backend = _get_engine_backend(cfg)
+    _warn_unknown_engine_backend(ctx.engine_backend, logger)
 
     # --- Resume (断点续跑) ---
     resumed_stages = set()
@@ -898,6 +915,7 @@ def run_pipeline(cfg: dict[str, Any], batch_id: str, fail_at: str) -> int:
                         config=cfg, run_dir=run_dir, batch_id=batch_id, manifest=manifest
                     )
                     ctx.engine_backend = _get_engine_backend(cfg)
+                    _warn_unknown_engine_backend(ctx.engine_backend, logger)
                     metrics = MetricsRecorder(batch_id)
                     # 后续 spark 初始化会使用新的 ctx
                     break

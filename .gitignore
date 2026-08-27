@@ -72,3 +72,7 @@ secrets/
 Thumbs.db
 desktop.ini
 ci_runs_tmp.json
+
+# AI 会话工作区（本地产物，不入库）
+.zcode/
+

@@ -11,7 +11,9 @@
   存在跨盘 ValueError，用例带 skipif）。
 - 【1/C6】_table_write_iceberg spark 分支：表存在时 append 失败绝不回退
   createOrReplace（用 fake SparkSession/DataFrame 纯逻辑单测，不依赖
-  真实 Spark）；表不存在时保留建表兜底；overwrite 模式行为不变。
+  真实 Spark）；表不存在时保留建表兜底；overwrite 模式表已存在走
+  INSERT OVERWRITE（保留历史 snapshot，2026-08 审查 B5）、表不存在才
+  createOrReplace 建表。
 - 【2/minor】catalog_uri 相对 sqlite URI 归一为相对 ROOT 的绝对路径。
 - 【5/minor】StageLog close 幂等 + close 后 emit 安全 no-op。
 
@@ -248,11 +250,19 @@ class _FakeCatalog:
     def tableExists(self, name: str) -> bool:  # noqa: N802 - Spark API 原名
         return self.exists
 
+    def dropTempView(self, name: str) -> None:  # noqa: N802 - Spark API 原名
+        return None
+
 
 class _FakeSpark:
     def __init__(self, exists: bool, fail_append: bool = False):
         self.catalog = _FakeCatalog(exists)
         self.writer = _FakeTableWriter(fail_append)
+        self.sql_queries: list[str] = []
+
+    def sql(self, query: str):
+        self.sql_queries.append(query)
+        return None
 
 
 class _FakeDF:
@@ -264,6 +274,9 @@ class _FakeDF:
 
     def count(self) -> int:
         return self._rows
+
+    def createOrReplaceTempView(self, name: str) -> None:  # noqa: N802 - Spark API 原名
+        self.temp_view = name
 
     def writeTo(self, name: str):  # noqa: N802 - Spark API 原名
         return self._writer
@@ -305,8 +318,14 @@ def test_spark_missing_table_falls_back_to_create():
     assert spark.writer.create_or_replace_calls == 1
 
 
-def test_spark_overwrite_mode_uses_create_or_replace():
-    """overwrite 模式行为不变：无条件 createOrReplace."""
+def test_spark_overwrite_existing_table_preserves_history():
+    """overwrite 模式（表已存在）：INSERT OVERWRITE 原子替换、保留历史.
+
+    2026-08 审查 B5 回归：旧实现无条件 createOrReplace——每次全量跑重建表，
+    旧 snapshot 全部不可达，spark 路径 time travel 承诺被打破。新契约：表已
+    存在时必须走 INSERT OVERWRITE（等价 pyiceberg table.overwrite 的单 snapshot
+    替换），createOrReplace 仅允许用于表不存在时的建表兜底。
+    """
     from src.iceberg import _table_write_iceberg
 
     spark = _FakeSpark(exists=True)
@@ -314,7 +333,24 @@ def test_spark_overwrite_mode_uses_create_or_replace():
         "ns.orders", _FakeDF(spark.writer), _ICE_CFG, "spark", spark=spark, mode="overwrite"
     )
     assert n == 42
+    assert len(spark.sql_queries) == 1
+    assert "INSERT OVERWRITE TABLE autobatch.ns.orders" in spark.sql_queries[0]
+    assert "SELECT * FROM _autobatch_overwrite_src" in spark.sql_queries[0]
+    assert spark.writer.create_or_replace_calls == 0
+    assert spark.writer.append_calls == 0
+
+
+def test_spark_overwrite_missing_table_creates():
+    """overwrite 模式（表不存在）：建表兜底 createOrReplace（首次运行合法路径）."""
+    from src.iceberg import _table_write_iceberg
+
+    spark = _FakeSpark(exists=False)
+    n = _table_write_iceberg(
+        "ns.orders", _FakeDF(spark.writer), _ICE_CFG, "spark", spark=spark, mode="overwrite"
+    )
+    assert n == 42
     assert spark.writer.create_or_replace_calls == 1
+    assert spark.sql_queries == []
     assert spark.writer.append_calls == 0
 
 

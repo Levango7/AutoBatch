@@ -583,7 +583,8 @@ class RuleEngine:
         SparkDataFrame；bad_df 额外带 ``_reasons``/``_line`` 列。
 
         - completeness/uniqueness/range/allowed_values: Spark SQL 表达式向量化
-        - referential: orders.join(ref_df, key, 'left_anti') 找外键不匹配的行
+        - referential: broadcast join 小参考键表物化孤儿标记列（不 collect 孤儿键，
+          内存 O(|ref|) 与孤儿数量无关；per-row 布尔语义与旧 isin 实现一致）
         - format (regex): F.col.rlike（Java regex，与 python re 在常见模式下等价）
         - date_valid: F.coalesce(F.to_date(...), ...) 多格式解析
         - outlier: collect 到 driver 算 bounds（与 polars 路径一致），只标记不拒收
@@ -599,7 +600,8 @@ class RuleEngine:
         - uniqueness 用窗口函数 row_number > 1 标记重复的后续行（与 polars
           is_duplicated & ~is_first_distinct 语义一致）；null/空串 key 不参与
           判定（对齐 python 路径），窗口 orderBy 用物化的稳定行号 _row_idx
-        - referential 用 left_anti join 一次找出孤儿 key 集合，再 isin 标记
+        - referential 孤儿标记由 _spark_referential_markers 广播参考键表实现；
+          旧实现 anti-join collect 孤儿键再 isin，孤儿键量大时 driver/序列化爆炸
         - format 用 F.when(vs.isNull() | trim==""，False).otherwise(~rlike)，
           null/空字符串视为通过（与 python/polars 一致）；rlike 前缀补 ^ 与
           python re.match 的前缀锚定对齐
@@ -618,8 +620,17 @@ class RuleEngine:
         # 参见 _spark_indexed 注释：monotonically_increasing_id 非确定性不可用）
         df_indexed, n = self._spark_indexed(df)
 
+        # 0.5 referential 孤儿标记物化（broadcast join 小参考键表）。与 clean 阶段
+        # is_anomaly 的修复同理：旧实现把孤儿键 collect 回 driver 后 isin——孤儿键
+        # 恰是质量校验的目标产出，量大时 driver 内存 + 每 task 序列化双重爆炸。
+        df_indexed, orphan_markers, orphan_drop_cols = self._spark_referential_markers(
+            df_indexed, rconf, spark
+        )
+
         # 1. 各规则 fail mask（Spark Expr）
-        expr_masks, reason_specs, rule_masks = self._spark_collect_masks(df_indexed, rconf, spark)
+        expr_masks, reason_specs, rule_masks = self._spark_collect_masks(
+            df_indexed, rconf, spark, orphan_markers
+        )
 
         # 2. 把 mask 加到 df，合并 bad_mask
         dfm, all_mask_cols = self._spark_apply_masks(df_indexed, expr_masks)
@@ -631,10 +642,58 @@ class RuleEngine:
         counters = self._spark_counters(dfm, rule_masks, n, rconf, outlier_count)
 
         # 5. good / bad + reason 文本（df 原样传入仅作 bad 为空时的 schema 兜底）
-        good_df, bad_df = self._spark_good_bad(df, dfm, all_mask_cols, reason_specs)
+        good_df, bad_df = self._spark_good_bad(
+            df, dfm, all_mask_cols, reason_specs, extra_drop=orphan_drop_cols
+        )
 
         stats = self._build_stats(counters)
         return good_df, bad_df, stats, outlier_indices
+
+    def _spark_referential_markers(
+        self, df: Any, rconf: dict[str, Any], spark: Any
+    ) -> tuple[Any, dict[str, str], list[str]]:
+        """为每条 referential 规则物化孤儿标记列（broadcast join，不 collect 孤儿键）.
+
+        旧实现：keys_df anti-join collect 孤儿键到 driver → ``vs.isin(list)`` 构建表
+        达式。悬空外键是质量校验的目标场景，孤儿键可达数万～百万级——isin 的巨型
+        表达式树会 driver 内存 + 每 task 序列化双重爆炸（clean.py 同款问题 2026-08
+        已改 broadcast join 修复）。现改为：broadcast **参考键表**（维度表，量级有界，
+        先 set() 去重保证 1:1 命中不改变行数），left join 未命中且非空 → 孤儿标记列
+        ``__orphan_rk<i>``。内存 O(|ref|)，与孤儿数量无关，per-row 布尔语义与旧
+        isin 实现完全一致。
+
+        Returns:
+            (df_with_markers, orphan_markers, orphan_drop_cols)
+            - orphan_markers:   {col: 标记列名}——_spark_collect_masks 据此引用标记列
+            - orphan_drop_cols: 本方法引入的全部辅助列（__ref_rk<i> / __orphan_rk<i>），
+                                good/bad 输出前需剔除
+        参考表缺失或无有效键时不引入 join（_spark_collect_masks 回退 non_empty 表达式，
+        语义与旧实现一致：所有非空值都是孤儿）。
+        """
+        from pyspark.sql import functions as F
+
+        orphan_markers: dict[str, str] = {}
+        orphan_drop_cols: list[str] = []
+        for i, (col, target) in enumerate((rconf.get("referential", {}) or {}).items()):
+            ref_table, ref_col = target.split(".")
+            ref_rows = self.ref_data.get(ref_table, [])
+            if not ref_rows:
+                continue
+            ref_keys = [str(r.get(ref_col)) for r in ref_rows if r.get(ref_col) not in (None, "")]
+            if not ref_keys:
+                continue
+            ref_name = f"__ref_rk{i}"
+            marker_name = f"__orphan_rk{i}"
+            ref_df = spark.createDataFrame(
+                [(k,) for k in set(ref_keys)], "k string"
+            ).withColumnRenamed("k", ref_name)
+            vs = F.col(col).cast("string")
+            non_empty = ~vs.isNull() & (F.trim(vs) != "")
+            df = df.join(F.broadcast(ref_df), vs == F.col(ref_name), "left")
+            df = df.withColumn(marker_name, F.col(ref_name).isNull() & non_empty)
+            orphan_markers[col] = marker_name
+            orphan_drop_cols.extend([ref_name, marker_name])
+        return df, orphan_markers, orphan_drop_cols
 
     @staticmethod
     def _spark_indexed(df: Any) -> tuple[Any, int]:
@@ -676,12 +735,20 @@ class RuleEngine:
         return indexed, n
 
     def _spark_collect_masks(
-        self, df: Any, rconf: dict[str, Any], spark: Any
+        self,
+        df: Any,
+        rconf: dict[str, Any],
+        spark: Any,
+        orphan_markers: Optional[dict[str, str]] = None,
     ) -> tuple[list[tuple[str, Any]], list[tuple[str, str]], dict[str, list[str]]]:
         """Spark 路径：构建各规则 fail mask.
 
         遍历 completeness/uniqueness/range/allowed_values/referential/format/date_valid
         七类规则，为每个子规则生成一个 Spark Expr mask.
+
+        referential：孤儿标记列由 ``_spark_referential_markers`` 预先以 broadcast join
+        物化（orphan_markers[col] 给出标记列名），此处仅引用；参考表缺失/无有效键时
+        回退 non_empty 表达式（所有非空值都是孤儿，语义与历史实现一致）.
 
         Returns:
             (expr_masks, reason_specs, rule_masks)
@@ -742,30 +809,15 @@ class RuleEngine:
                 ~vs.isin(list(vals)) & ~vs.isNull() & (F.trim(vs) != ""),
             )
 
-        # referential: left_anti join 一次找出孤儿 key 集合，再 isin 标记
-        # ref_data 始终为 List[Dict] 格式（validate.py 用 load_csv 读），
-        # 这里用 spark.createDataFrame 转成 SparkDataFrame 再 join。
-        for col, target in (rconf.get("referential", {}) or {}).items():
-            ref_table, ref_col = target.split(".")
-            ref_rows = self.ref_data.get(ref_table, [])
+        # referential: 孤儿标记列已由 _spark_referential_markers 以 broadcast join
+        # 物化（内存 O(|ref|)，与孤儿数量无关）；标记缺失时回退 non_empty（参考表
+        # 缺失/无有效键 → 所有非空值都是孤儿，语义不变）
+        for col, _target in (rconf.get("referential", {}) or {}).items():
             vs = F.col(col).cast("string")
             non_empty = ~vs.isNull() & (F.trim(vs) != "")
-            if ref_rows:
-                ref_keys = [
-                    str(r.get(ref_col)) for r in ref_rows if r.get(ref_col) not in (None, "")
-                ]
-                if ref_keys:
-                    # 用 left_anti join 找孤儿 key（分布式，避免 collect 整张 ref 表）
-                    ref_keys_df = spark.createDataFrame(
-                        [(k,) for k in set(ref_keys)], "k string"
-                    ).withColumnRenamed("k", "__k")
-                    keys_df = df.select(vs.alias("__k")).distinct()
-                    orphan_rows = keys_df.join(ref_keys_df, "__k", "left_anti").collect()
-                    orphan_key_list = [row["__k"] for row in orphan_rows if row["__k"] is not None]
-                    expr = vs.isin(orphan_key_list) & non_empty
-                else:
-                    # ref 表为空：所有非空值都是孤儿
-                    expr = non_empty
+            marker = (orphan_markers or {}).get(col)
+            if marker is not None:
+                expr = F.col(marker)
             else:
                 expr = non_empty
             add_expr_mask("referential", "orphan_reference:" + col, expr)
@@ -927,12 +979,16 @@ class RuleEngine:
         dfm: Any,
         all_mask_cols: list[str],
         reason_specs: list[tuple[str, str]],
+        extra_drop: Optional[list[str]] = None,
     ) -> tuple[Any, Any]:
         """Spark 路径：构造 good_df / bad_df + bad 行 reason 文本.
 
         bad 行 reason 文本用 F.when + F.concat 在 executor 端生成，避免 collect.
         每个 reason_part = rt + ";" 或 ""，concat 拼接后 regexp_replace 去末尾分号，
         顺序与 reason_specs 一致.
+
+        extra_drop：调用方（check_spark）引入的辅助列（referential broadcast join
+        的 __ref_rk<i> / __orphan_rk<i> 标记列），随 mask 列一并剔除.
 
         注：dfm 由 ``_spark_indexed`` 结果派生，带物化列 ``_row_idx``——
         good_df/bad_df 输出前必须剔除（下游按原始 schema 消费）；``_line``
@@ -941,7 +997,7 @@ class RuleEngine:
         """
         from pyspark.sql import functions as F
 
-        drop_cols = all_mask_cols + ["__bad", "_row_idx"]
+        drop_cols = all_mask_cols + ["__bad", "_row_idx"] + list(extra_drop or [])
         good_df = dfm.filter(~F.col("__bad")).drop(*drop_cols)
         bad_df_with_masks = dfm.filter(F.col("__bad"))
 

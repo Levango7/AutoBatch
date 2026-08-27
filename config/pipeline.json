@@ -38,8 +38,7 @@
     "rules": {
       "orders": {
         "completeness": {
-          "required_columns": ["order_id", "customer_id", "product_id", "order_date", "quantity", "unit_price", "status"],
-          "max_null_ratio": 0.0
+          "required_columns": ["order_id", "customer_id", "product_id", "order_date", "quantity", "unit_price", "status"]
         },
         "uniqueness": { "columns": ["order_id"] },
         "range": [
@@ -62,21 +61,17 @@
         "outlier": { "column": "total_amount", "method": "iqr", "factor": 1.5, "action": "flag" }
       },
       "customers": {
-        "completeness": { "required_columns": ["customer_id", "tier", "city", "join_date"], "max_null_ratio": 0.0 },
+        "completeness": { "required_columns": ["customer_id", "tier", "city", "join_date"] },
         "uniqueness": { "columns": ["customer_id"] },
         "allowed_values": { "tier": ["bronze", "silver", "gold", "platinum"] },
         "date_valid": { "columns": ["join_date"], "min": "2015-01-01", "max": "2026-12-31" }
       },
       "products": {
-        "completeness": { "required_columns": ["product_id", "name", "category", "cost"], "max_null_ratio": 0.0 },
+        "completeness": { "required_columns": ["product_id", "name", "category", "cost"] },
         "uniqueness": { "columns": ["product_id"] },
         "range": [{ "column": "cost", "min": 0, "max": 100000 }]
       }
-    },
-    "quarantine_reasons": [
-      "missing_required", "duplicate_key", "range_violation", "invalid_value",
-      "format_violation", "invalid_date", "orphan_reference", "schema_error"
-    ]
+    }
   },
   "clean": {
     "dedup_columns": ["order_id"],
@@ -85,15 +80,8 @@
     "flag_column": "is_anomaly"
   },
   "compute": {
-    "aggregations": ["daily_sales", "category_stats", "region_channel_stats", "customer_value"],
     "top_n_customers": 20,
     "currency": "CNY"
-  },
-  "output": {
-    "formats": ["csv"],
-    "aggregates_dir": "aggregates",
-    "report_dir": "report",
-    "dashboard_data": "dashboard_data.json"
   },
   "monitoring": {
     "log_level": "INFO",
@@ -130,12 +118,10 @@
     "mode": "high_watermark",
     "state_dir": "state",
     "tables": {
-      "orders": {"watermark_column": "order_date", "watermark_type": "date", "init_mode": "full_load"},
-      "customers": {"watermark_column": "join_date", "watermark_type": "date", "init_mode": "full_load"},
-      "products": {"watermark_column": null, "watermark_type": "full_load"}
-    },
-    "aggregates_persist": true,
-    "fail_safe": "backup_before_merge"
+      "orders": {"watermark_column": "order_date", "watermark_type": "date"},
+      "customers": {"watermark_column": "join_date", "watermark_type": "date"},
+      "products": {"watermark_type": "full_load"}
+    }
   },
   "engine": {
     "backend": "python",

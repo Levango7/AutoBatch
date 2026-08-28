@@ -42,4 +42,13 @@ if ($existingNetworks -match [regex]::Escape($targetNetworkId)) {
 # 验证
 Write-Host ""
 Write-Host "[INFO] MinIO 网络信息:" -ForegroundColor Cyan
-docker inspect $minioContainer --format "  IP in ${NetworkName}: {{range .NetworkSettings.Networks}}{{if eq .NetworkID `"${targetNetworkId}`"}}{{.IPAddress}}{{end}}{{end}}" 2>$null
+# 模板内绝不能含双引号：Windows PowerShell 5.1 向原生命令传参会剥离内嵌引号
+# （CommandLineToArgvW 语义，2026-08-28 实测 {{if eq .NetworkID "<id>"}} 到达
+# docker 时引号丢失 → template parsing error: bad number syntax → 脚本 exit 1，
+# 导致 up.ps1 误报 connect-minio 失败）。改用无引号 range 模板枚举 网络名=IP。
+$netInfo = docker inspect $minioContainer --format '{{range $name, $conf := .NetworkSettings.Networks}}{{$name}}={{$conf.IPAddress}} {{end}}'
+Write-Host "  Networks: $netInfo"
+if ($netInfo -notmatch [regex]::Escape($NetworkName)) {
+    Write-Host "[ERROR] MinIO 未在 ${NetworkName} 网络中！" -ForegroundColor Red
+    exit 1
+}

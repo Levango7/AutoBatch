@@ -11,7 +11,7 @@ Phase 2b 增加 Spark 分布式分支（``ctx.engine_backend == "spark"``）：
   ``df.write.mode("overwrite").csv/parquet``
 - ``orders_final.csv`` 加标记列用 ``df.withColumn``（Spark DataFrame API）
 - ``dashboard_data.json`` 生成逻辑不变（从 ``ctx.aggregates`` 读，已是 List[Dict]，
-  Spark 路径下 compute stage 已用 ``df.toPandas().to_dict()`` 收集到 driver）
+  Spark 路径下 compute stage 已用 ``df.collect()+asDict()`` 收集到 driver）
 - manifest/血缘：与现有路径一致（manifest 是 Python dict，不依赖引擎）
 
 向后兼容：``engine.backend="python"/"polars"`` 时行为不变。

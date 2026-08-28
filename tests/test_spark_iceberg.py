@@ -95,7 +95,8 @@ try:
 except ImportError:
     _PYSPARK_AVAILABLE = False
 
-# 检测 iceberg-spark-runtime JAR 是否在 SPARK_HOME/jars/
+# 检测 iceberg-spark-runtime / sqlite-jdbc JAR 是否在 SPARK_HOME/jars/
+# （fixture 用 SQL catalog：Spark 侧经 JdbcCatalog 连 SQLite，需 sqlite-jdbc 驱动）
 _SPARK_HOME_CANDIDATES = [
     _os.environ.get("SPARK_HOME", ""),
     "/opt/spark",
@@ -103,6 +104,7 @@ _SPARK_HOME_CANDIDATES = [
     r"F:\spark_home",
 ]
 _ICEBERG_JAR_EXISTS = False
+_SQLITE_JDBC_JAR_EXISTS = False
 for _home in _SPARK_HOME_CANDIDATES:
     if not _home or not _os.path.isdir(_os.path.join(_home, "jars")):
         continue
@@ -110,17 +112,21 @@ for _home in _SPARK_HOME_CANDIDATES:
         for _fname in _os.listdir(_os.path.join(_home, "jars")):
             if _fname.startswith("iceberg-spark-runtime") and _fname.endswith(".jar"):
                 _ICEBERG_JAR_EXISTS = True
-                break
+            if _fname.startswith("sqlite-jdbc") and _fname.endswith(".jar"):
+                _SQLITE_JDBC_JAR_EXISTS = True
     except OSError:
         pass
-    if _ICEBERG_JAR_EXISTS:
-        break
 
-SPARK_ICEBERG_DISABLED = not _HADOOP_DLL_EXISTS or not _PYSPARK_AVAILABLE or not _ICEBERG_JAR_EXISTS
+SPARK_ICEBERG_DISABLED = (
+    not _HADOOP_DLL_EXISTS
+    or not _PYSPARK_AVAILABLE
+    or not _ICEBERG_JAR_EXISTS
+    or not _SQLITE_JDBC_JAR_EXISTS
+)
 
 _SKIP_REASON = (
     "hadoop native IO library not found or pyspark not installed or "
-    "iceberg-spark-runtime JAR missing in SPARK_HOME/jars/ - "
+    "iceberg-spark-runtime / sqlite-jdbc JAR missing in SPARK_HOME/jars/ - "
     "Spark+Iceberg tests require Hadoop native IO + Iceberg Spark extensions"
 )
 

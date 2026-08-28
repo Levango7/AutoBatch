@@ -174,7 +174,12 @@ def _table_read_iceberg(
         try:
             reader = spark.read
             if snapshot_id is not None:
-                reader = reader.option("snapshot-id", int(snapshot_id))
+                # Iceberg 1.11 移除了 snapshot-id reader option（抛
+                # IllegalArgumentException: "no longer supported, use Spark
+                # built-in versionAsOf"）。versionAsOf 是 Spark 标准 time
+                # travel 选项，Iceberg 把值解析为 snapshot id（与 snapshot
+                # id 相等时优先按 id 匹配）。
+                reader = reader.option("versionAsOf", int(snapshot_id))
             return reader.table(full_name)
         except Exception as e:  # noqa: BLE001
             raise RuntimeError(f"failed to read Iceberg table {full_name} via Spark: {e}") from e
@@ -205,8 +210,15 @@ def _table_write_iceberg(
     spark: Any = None,
     mode: str = "append",
 ) -> int:
-    """storage.backend='iceberg' 时的写路径."""
-    if engine_backend == "spark":
+    """storage.backend='iceberg' 时的写路径.
+
+    分派按输入类型而非仅 engine_backend：engine.backend="spark" 时调用方仍可能
+    传入 List[Dict]（如 pyiceberg 建表+写初始数据、增量 merge 的 python 产物），
+    这类输入必须走 pyiceberg 路径——误入 Spark 分支会对 list 调 df.count()
+    （list.count 需 1 个参数）直接崩溃。仅当输入真是 SparkDataFrame（有 writeTo）
+    时才走 Spark 写路径。
+    """
+    if engine_backend == "spark" and hasattr(df_or_rows, "writeTo"):
         from .helpers import _get_spark_session
 
         if spark is None:

@@ -1,8 +1,8 @@
 # AutoBatch 交付清单
 
-**最新提交**: 见 `git log`（P0/P1/P2 修复 `74660f1`，交付清单 `185b228`，P3 收尾见后续提交）
+**最新提交**: 见 `git log`（P0/P1/P2 修复 `74660f1`，交付清单 `185b228`，P3 收尾 `9455869`，WSL/Docker 真环境验证轮见最新提交）
 **时间**: 2026-08-28
-**状态**: ✅ 可交付（P0/P1/P2/P3 全部闭环）
+**状态**: ✅ 可交付（P0/P1/P2/P3 全部闭环；Spark 集群/S3/Iceberg 集成测试已在 WSL2+Docker 真环境跑通，见第五节）
 
 ---
 
@@ -10,16 +10,16 @@
 
 | 维度 | 结论 | 证据 |
 |------|------|------|
-| 单元测试 | ✅ 全绿 | 415 passed / 22 skipped / 0 failed |
+| 单元测试（Windows） | ✅ 全绿 | 416 passed / 26 skipped / 0 failed |
+| 集成测试（WSL2+Docker 真环境） | ✅ 全绿 | 423 passed / 9 skipped / 0 failed + Iceberg 套件 10/10（见第五节） |
 | Lint | ✅ 全绿 | `ruff check src tests tools scripts dashboard` pass |
-| Format | ✅ 全绿 | `ruff format --check` 52 files already formatted |
+| Format | ✅ 全绿 | `ruff format --check` 59 files already formatted |
 | Type check | ✅ 全绿 | `mypy src` pass (23 files) |
 | 分支覆盖 | ✅ 74.35% | `[tool.coverage.run] branch=true`，门禁 60% 通过 |
-| 集成测试 | ⚠️ 部分 skip | Windows 缺 hadoop native DLL（环境限制，非代码问题） |
 | Spark 集群真值 | ✅ B1/B2/B3 通过 | `B1_BROADCAST_JOIN_OK`、`B2_B3_SPARK_VERIFY_ALL_OK` |
 | Iceberg 假单测 | ✅ 5 passed | `test_spark_overwrite_*` 全绿 |
 
-**综合判定**: 可交付。P0/P1/P2/P3 全部闭环，核心修复经真实 Spark 集群验证。跳过测试为环境限制（Windows 无 hadoop.dll），在 Linux/macOS 或装齐 Hadoop native lib 的 Windows 上可全跑。
+**综合判定**: 可交付。P0/P1/P2/P3 全部闭环，核心修复经真实 Spark 集群验证。原 Windows 环境 skip 的 Spark 集成/集群测试已在 WSL2+Docker 真环境跑通（第五节）；剩余 skip 均为合理环境跳过（benchmark 需 `BENCHMARK=1`、跨盘回退 Windows 专属等）。
 
 ---
 
@@ -97,17 +97,64 @@
 - B1 广播 join 真值：`B1_BROADCAST_JOIN_OK` ✅
 - B2/B3 Spark 逻辑真值：`B2_B3_SPARK_VERIFY_ALL_OK` ✅
 - B5 INSERT OVERWRITE 假单测：5 passed ✅
-- 全量回归：415 passed / 22 skipped / 0 failed ✅
+- Windows 全量回归：416 passed / 26 skipped / 0 failed ✅
+- WSL2+Docker 真环境全量回归：423 passed / 9 skipped / 0 failed（第五节）✅
 - 分支覆盖：74.35%（门禁 60%）✅
 
 ---
 
-## 五、交付后操作建议
+## 五、WSL/Docker 真环境验证轮（2026-08-28）
 
-1. **Linux 环境补跑**: 在 Linux 机器或 CI runner 上跑全量测试（含 Spark 集成测试）
-2. **Hadoop native 补齐**: Windows 开发机安装 hadoop.dll 后可跑全部 Spark 测试
+> 第四节所列 Windows 环境限制本轮已用本地 **WSL2（Ubuntu 24.04）+ Docker Desktop**
+> （`docker/spark-cluster`：spark-master + 2 worker + MinIO）克服：原 skip 的
+> Spark 集成/集群/Iceberg 测试全部真跑并通过，且过程中定位修复了 1 个真实代码 bug
+> 与 4 个此前未暴露的代码缺陷。
+
+### 5.1 真环境测试结果
+
+| 套件 | 结果 | 说明 |
+|------|------|------|
+| test_engine_spark_cluster.py | ✅ 4/4 passed（207s） | Spark standalone 集群 + S3/MinIO 全量 pipeline、与 local_csv 等价性对比、增量、多 executor |
+| test_spark_iceberg.py | ✅ 10/10 passed | 独立 .venv-ice（Spark 4.1 + Iceberg 1.11；官方 iceberg-spark-runtime JAR 尚不支持主 .venv 的 Spark 4.2） |
+| 全量回归（主 .venv，不含 iceberg 套件） | ✅ 423 passed / 9 skipped / 0 failed（328s） | 对比 Windows 416 passed / 26 skipped，17 个环境 skip 转为真跑通过 |
+| Windows 回归（同一提交） | ✅ 416 passed / 26 skipped / 0 failed | 确认本轮重构对 Windows 侧零破坏 |
+
+剩余 9 个 skip 均为合理环境跳过：benchmark 套件需 `BENCHMARK=1`（6 个）、
+polars parquet 格式限制（1 个）、跨盘符回退为 Windows 专属逻辑（2 个）。
+
+### 5.2 集群模式五根因与修复
+
+| # | 根因 | 修复 | 位置 |
+|---|------|------|------|
+| ① | PySpark JVM gateway 是进程级单例，JVM `-D` 参数只在首次启动时生效；WSL2 localhost 转发仅 IPv4，`-Djava.net.preferIPv4Stack=true` 必须在收集期 JVM 启动前设置 | conftest.py 模块级设置 `JAVA_TOOL_OPTIONS` | tests/conftest.py |
+| ② | 容器内 executor 需回连 driver，WSL2 下 `spark.driver.host` 必须通告 `host.docker.internal` | conftest 按 `platform.release()` 含 "microsoft" 检测并注入 driver_host | tests/conftest.py |
+| ③ | Worker 容器 Python 次版本必须与 Driver（3.12）一致，否则 PYTHON_VERSION_MISMATCH 拒绝 | 基座钉扎 `eclipse-temurin:17-jre-noble`（Ubuntu 24.04，python3=3.12）+ 构建期版本守卫 | docker/spark-cluster/Dockerfile |
+| ④ | Driver 端 pyspark/jars 缺 S3A 三件套（hadoop-aws / aws-sdk-v2-bundle / analyticsaccelerator-s3）→ `S3AFileSystem` ClassNotFound、`ObjectClient` NoClassDefFound | 按 Dockerfile 钉扎版本从 aliyun maven 镜像装入 Driver pyspark/jars（SHA1 校验）；Worker 端已内置镜像 | 环境供给 |
+| ⑤ | **真实代码 bug**：`run_pipeline` 结束 `spark.stop()` 后，`table_read` 惰性重建 session 未注入 cluster driver 通告配置（`driver.bindAddress`/`driver.host`/`pyspark.python`），driver 以自动探测的容器不可达 IP 通告（实测 `10.255.255.254`），executor 回连失败约 60s 后 exit 1，master 无限重发，读操作永久挂起 | 新增 `helpers.apply_cluster_conf`，`pipeline._init_spark_session` 与 `helpers._get_spark_session` 共享同一注入（沿用 `apply_s3a_hadoop_conf` 的下沉模式） | src/helpers.py；src/pipeline.py |
+
+⑤ 的证据链：worker 日志 launch command 中 `--driver-url spark://CoarseGrainedScheduler@10.255.255.254:44587`，
+executor 每 ~64s `Command exited with code 1` 循环；master 日志显示 executor 0→15+ 反复 Launch/EXITED；
+修复后 cluster 套件 4/4 全绿。
+
+### 5.3 本轮修复的其余代码缺陷（真环境暴露）
+
+| 问题 | 修复 | 文件 |
+|------|------|------|
+| Spark 聚合收集用 `df.toPandas()` 引入未声明的 pandas 硬依赖（spark extra 只装 pyspark） | 改 `df.collect()` + `row.asDict()`，语义等价 | src/stages/compute.py |
+| `_table_write_iceberg` 仅按 engine_backend 分派：spark 后端收到 List[Dict] 输入（pyiceberg 建表初始数据、增量 merge 产物）误入 Spark 分支，对 list 调 `df.count()` 直接崩溃 | 按输入类型分派：仅 `hasattr(df_or_rows, "writeTo")` 才走 Spark 写路径；新增路由单测 | src/iceberg.py；tests/test_output_artifacts.py |
+| Iceberg 1.11 移除 `snapshot-id` reader option（抛 IllegalArgumentException） | 改用 Spark 标准 `versionAsOf`（Iceberg 按 snapshot id 匹配） | src/iceberg.py |
+| `_dedup_keep_first_spark` 空表崩溃：`rdd.zipWithIndex().toDF()` 对空 RDD 做 schema 推断抛 `ValueError: RDD is empty`（增量零新增批次触发） | `df.rdd.isEmpty()` 短路返回 | src/stages/clean.py |
+| connect-minio.ps1 Go 模板含双引号，PowerShell 5.1 向原生命令传参时剥离内嵌引号 → template parsing error、脚本误报失败 exit 1 | 改无引号 range 模板枚举 网络名=IP + 正则校验网络归属 | docker/spark-cluster/connect-minio.ps1 |
+| test_spark_iceberg.py skip 条件未检测 iceberg-spark-runtime / sqlite-jdbc JAR 就位 | 补 JAR 探测，缺 JAR 才 skip | tests/test_spark_iceberg.py |
+
+---
+
+## 六、交付后操作建议
+
+1. **CI 补跑**: Spark 集成/集群测试已在本地 WSL2+Docker 验证通过；建议 CI 增加 Linux runner 跑全量（cluster 套件需 docker compose 起 master+worker+MinIO）
+2. **Hadoop native 补齐**: Windows 开发机安装 hadoop.dll 后可直接在 Windows 跑全部 Spark 测试
 3. **Codecov 观察**: 开启分支覆盖后 coverage.xml 含 branch 数据，首次上传 Codecov 基线会变化属正常
 
 ---
 
-**交付结论**: ✅ **可以交付**。核心功能完整，测试全绿，P0/P1/P2/P3 全部闭环，关键修复经真实 Spark 集群验证。
+**交付结论**: ✅ **可以交付**。核心功能完整，测试全绿（Windows 416 passed / 26 skipped；WSL2+Docker 真环境 423 passed / 9 skipped + Iceberg 10/10，0 failed），P0/P1/P2/P3 全部闭环，关键修复经真实 Spark 集群验证。

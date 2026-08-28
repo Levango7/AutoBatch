@@ -34,6 +34,29 @@ from src.helpers import (
 from src.lineage import Manifest
 from src.pipeline import config_digest, run_pipeline
 
+# ----------------------------------------------------------------------
+# JVM 启动参数：必须在任何 JVM 启动之前设置（模块级）
+# ----------------------------------------------------------------------
+# WSL2 + Docker Desktop 反向连接修复：Driver JVM 默认把 RPC 端口绑到 IPv6
+# dual-stack socket（ss 显示 *:port），而 WSL2 localhost forwarding 只把
+# IPv4 listener 转发到 Windows 宿主——容器内 executor 经 host.docker.internal
+# 回连 Driver 被 refused → exit(1) 崩溃循环 → "Initial job has not accepted any
+# resources"（2026-08-28 实测对照：IPv6 dual-stack listener refused，同机制
+# IPv4 listener OK）。preferIPv4Stack=true 使 Driver 全部 socket 绑 IPv4。
+# executor 侧 JVM 在容器内、不受本变量影响（其自带 preferIPv6Addresses=false，
+# host.docker.internal 优先解析 IPv4 192.168.65.254，连接方向无需改动）。
+#
+# 为什么必须放模块级而不是 fixture 内：PySpark 的 JVM gateway 是进程级单例
+# （SparkContext._gateway 只 launch 一次），JVM -D 参数只在启动时生效。
+# tests/test_engine_spark_cluster.py 的收集期门禁 _jvm_available() 会在模块
+# import 时启动 local[1] SparkContext——那是 pytest 进程最早的 JVM 启动点；
+# 在 fixture 内才设置环境变量时 JVM 已启动、参数不生效（2026-08-28 实测：
+# fixture 内设置导致连续两个 app 的 executor 全部 exit(1) 崩溃循环）。
+# conftest.py 先于所有测试模块 import，放这里保证对任何 JVM 启动点生效。
+_jto = os.environ.get("JAVA_TOOL_OPTIONS", "")
+if "preferIPv4Stack" not in _jto:
+    os.environ["JAVA_TOOL_OPTIONS"] = (_jto + " -Djava.net.preferIPv4Stack=true").strip()
+
 
 # ----------------------------------------------------------------------
 # 命令行选项：--runslow（任务73 / #69审查H3 修复）
@@ -643,6 +666,8 @@ def spark_cluster_env(_same_drive_tmp_root, request):
     # 跨平台探测 Spark/Hadoop 路径（环境变量优先，系统路径次之，Windows 回退）
     spark_paths = detect_spark_paths()
     old_env = _build_spark_env(spark_paths)
+    # JAVA_TOOL_OPTIONS（preferIPv4Stack）已在模块级设置——必须早于收集期
+    # JVM 启动，fixture 内再设为时已晚，见文件头部注释。
     # PYSPARK_DRIVER_PYTHON 是 Driver 端 Python 路径（宿主机路径）。detect 链条
     # 会把 DRIVER 缺省为 worker 侧的 "python3" 占位值，因此以进入本 fixture 前
     # 的外部配置（old_env 快照）为准：外部显式设置则尊重，未设置则回指宿主机
@@ -664,14 +689,28 @@ def spark_cluster_env(_same_drive_tmp_root, request):
     cfg["engine"]["format"] = "csv"
     cfg["engine"]["spark"]["master"] = "spark://localhost:15077"
     cfg["engine"]["spark"]["shuffle_partitions"] = 4
-    cfg["engine"]["spark"]["executor_memory"] = "2g"
+    # executor_memory 必须适配 docker-compose.yml 的 SPARK_WORKER_MEMORY（2g）：
+    # Spark 调度按 executor 内存 + overhead（缺省 max(384MB, 10%)）占用 worker，
+    # 2g executor 需 ~2.4g > 2g worker → 永远无法调度（"Initial job has not
+    # accepted any resources" 直到超时）。1g + 384MB = 1.4g ≤ 2g 可放下。
+    cfg["engine"]["spark"]["executor_memory"] = "1g"
     cfg["engine"]["spark"]["executor_cores"] = 2
     cfg["engine"]["spark"]["num_executors"] = 2
     cfg["engine"]["spark"]["driver_memory"] = "4g"
     # 多机模式：Driver ↔ Worker 反向连接
-    # WSL/macOS Docker 场景下 host.docker.internal 可能不可达，回退到 localhost
+    # driver_host 是容器内 executor 回连 Driver 用的地址。Docker Desktop
+    # （Windows/macOS）与 WSL2 场景容器内均有 host.docker.internal DNS：
+    # WSL2 localhost forwarding 只把 IPv4 listener 转发到 Windows 宿主，
+    # host.docker.internal 指向 Windows 宿主侧（192.168.65.254），链路为
+    # 容器 → Windows 宿主 → 转发到 WSL IPv4 listener。原生 Linux 保留
+    # localhost 旧行为（Driver 在容器外时实际需宿主桥接 IP，用
+    # SPARK_CLUSTER_DRIVER_HOST 覆盖）。2026-08-28 实测：WSL2 走 "localhost"
+    # 缺省时 executor 在容器内连自己的 loopback → refused → exit(1) 崩溃循环。
+    _is_wsl = "microsoft" in platform.release().lower()
     _driver_host = os.environ.get("SPARK_CLUSTER_DRIVER_HOST") or (
-        "host.docker.internal" if platform.system() == "Windows" else "localhost"
+        "host.docker.internal"
+        if platform.system() in ("Windows", "Darwin") or _is_wsl
+        else "localhost"
     )
     cfg["engine"]["spark"]["cluster"] = {
         "enabled": True,
@@ -1238,6 +1277,7 @@ def spark_iceberg_env(_same_drive_tmp_root, request):
             "pyiceberg": "0.12.0rc1",
             "iceberg_spark_runtime": "iceberg-spark-runtime-4.1_2.13-1.11.0.jar",
             "iceberg_aws_bundle": "iceberg-aws-bundle-1.11.0.jar",
+            "sqlite_jdbc": "sqlite-jdbc-3.50.3.0.jar",
             "spark_compat": "spark-4.1.0+iceberg-1.11.0+scala-2.13",
         },
     }
@@ -1274,6 +1314,17 @@ def spark_iceberg_env(_same_drive_tmp_root, request):
 
     # cleanup: 清理本测试创建的 test-spark-iceberg-* run_dir + 还原环境变量
     def _cleanup():
+        # 停止活跃 SparkSession：每个测试的 catalog_uri/warehouse 指向各自
+        # work_dir 的 SQLite/目录，getOrCreate 复用旧 session 会让后续测试的
+        # Spark catalog 仍指向第一个测试的库（表跨测试串库）。
+        try:
+            from pyspark.sql import SparkSession as _SparkSess
+
+            _active = _SparkSess.getActiveSession()
+            if _active is not None:
+                _active.stop()
+        except Exception:  # noqa: BLE001 - pyspark 未安装或 JVM 已关闭
+            pass
         if os.path.isdir(run_root):
             for name in os.listdir(run_root):
                 if name.startswith("test-spark-iceberg-"):

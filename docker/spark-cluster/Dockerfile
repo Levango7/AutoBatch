@@ -18,7 +18,13 @@
 #   - 各校验值来源与获取日期见同目录 CHECKSUMS.md
 # ────────────────────────────────────────────────────────────────
 
-FROM eclipse-temurin:17-jre
+# 基座钉扎 noble（Ubuntu 24.04，默认 python3=3.12）：浮动标签 17-jre 已漂移
+# 到 Ubuntu 26.04（默认 python3=3.14），而项目 Driver 端 Python 钉扎 3.12
+# （CI 矩阵 / 主 Dockerfile python:3.12-slim）。PySpark 要求 Driver 与
+# Worker 的 Python 次版本一致（否则 PYTHON_VERSION_MISMATCH，2026-08-28
+# 实测集群 Python 任务全灭），故基座必须钉扎以保持 worker python3=3.12。
+# 下方 apt 安装后另有构建期断言，基座再漂移时 fail-fast。
+FROM eclipse-temurin:17-jre-noble
 
 # ── 元数据 ──────────────────────────────────────────────────────
 LABEL maintainer="AutoBatch DevOps"
@@ -48,6 +54,16 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         curl ca-certificates tini procps python3 python3-pip python3-venv socat && \
     rm -rf /var/lib/apt/lists/*
+
+# ── 构建期防护：worker python3 必须是 3.12（与 Driver 端 Python 对齐） ──
+# PySpark 要求 Driver/Worker Python 次版本一致，否则 worker 端抛
+# PYTHON_VERSION_MISMATCH 拒绝执行任何 Python 任务。基座钉扎 noble 时
+# 默认 python3=3.12；若未来基座升级再次漂移（如 26.04 → 3.14），
+# 此处立即终止构建，绝不产出带病镜像（与供应链校验同一 fail-fast 原则）。
+RUN python3 --version | grep -q "Python 3\.12\." || { \
+        echo ">>> [FATAL] worker python3 不是 3.12（实际 $(python3 --version)），将与 Driver 端 Python 错配！"; \
+        exit 1; \
+    }
 
 # ── Spark 下载（含版本回退 + 国内镜像） ─────────────────────────
 # 优先 ${SPARK_VERSION}（ARG，缺省 4.2.0），若不可用则回退 3.5.5

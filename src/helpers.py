@@ -226,6 +226,17 @@ def _get_spark_session(cfg: dict[str, Any]) -> Any:
     # NoAuthWithAWSException——典型触发路径：run_pipeline 结束 spark.stop() 后，
     # table_read 惰性重建 session 读 MinIO 产物（2026-08-26 cluster 测试实测）。
     builder = apply_s3a_hadoop_conf(builder, cfg)
+    # cluster 多机场景注入 driver.bindAddress/driver.host/pyspark.python（与
+    # pipeline._init_spark_session 同一组键值）。缺失时重建 session 的 driver
+    # 以自动探测的本机 IP 通告，容器内 executor 回连失败无限重启，读操作挂死
+    # ——典型触发路径：run_pipeline 结束 spark.stop() 后，table_read 惰性重建
+    # session 读 cluster 产物（2026-08-28 cluster 等价性测试实测）。
+    builder = apply_cluster_conf(builder, cfg)
+    # iceberg 场景注入 spark.sql.extensions + spark.sql.catalog.<name>（与
+    # pipeline._init_spark_session 同一组键值）。缺失时重建的 session 未注册
+    # catalog，三段式表名落回 spark_catalog 抛 REQUIRES_SINGLE_PART_NAMESPACE
+    # ——典型触发路径：测试/工具直接经 table_read/table_write 访问 Iceberg 表。
+    builder = apply_iceberg_spark_conf(builder, cfg)
     return builder.getOrCreate()
 
 
@@ -277,6 +288,97 @@ def _apply_spark_base_config(builder: Any, scfg: dict[str, Any]) -> Any:
     # AQE 实际从未生效（2026-08 亿行基准 OOM 排查中发现）
     aqe = scfg.get("adaptive_query_execution", True)
     builder = builder.config("spark.sql.adaptive.enabled", "true" if aqe else "false")
+    return builder
+
+
+def apply_cluster_conf(builder: Any, cfg: dict[str, Any]) -> Any:
+    """cluster.enabled=true 时向 Spark builder 注入 Driver↔Worker 反向连接配置.
+
+    注入 spark.driver.bindAddress=0.0.0.0、spark.driver.host（cluster.driver_host，
+    缺省 "host.docker.internal"）、spark.pyspark.python（cluster.worker_python，
+    缺省 "python3"，容器内 Worker 的 Python 解释器）。与 pipeline._init_spark_session
+    的内联注入保持同一组键值；供 helpers._get_spark_session 在 session 重建场景
+    （run_pipeline 结束 spark.stop() 之后，测试层 table_read 触发的惰性重建）复用——
+    否则重建 session 的 driver 以自动探测的本机 IP 对外通告（WSL2 下为容器不可达
+    地址），容器内 executor 回连失败约 60s 后 exit 1，master 无限重发 executor，
+    读操作永久挂起（2026-08-28 cluster 等价性测试实测）。
+    cluster.enabled 非 true 时原样返回 builder，零影响。
+    """
+    cluster = (cfg.get("engine", {}).get("spark", {}) or {}).get("cluster", {}) or {}
+    if not cluster.get("enabled"):
+        return builder
+    builder = builder.config("spark.driver.bindAddress", "0.0.0.0")
+    driver_host = cluster.get("driver_host", "host.docker.internal")
+    builder = builder.config("spark.driver.host", driver_host)
+    # Worker 在 Docker Linux 容器中运行，PYSPARK_PYTHON（Windows 路径如
+    # F:\Py314\python.exe）在容器内不存在。设置 spark.pyspark.python 为
+    # 容器内的 Python 路径（缺省 python3），使 Worker 能启动 Python worker。
+    # spark.pyspark.driver.python 保持环境变量 PYSPARK_DRIVER_PYTHON（Driver
+    # 端在宿主机上运行，使用 Windows 路径）。
+    worker_python = cluster.get("worker_python", "python3")
+    builder = builder.config("spark.pyspark.python", worker_python)
+    return builder
+
+
+def apply_iceberg_spark_conf(builder: Any, cfg: dict[str, Any]) -> Any:
+    """storage.backend="iceberg" 时向 Spark builder 注入 Iceberg catalog 配置.
+
+    注入 spark.sql.extensions（IcebergSparkSessionExtensions）与
+    spark.sql.catalog.<name>（SparkCatalog + type/uri/warehouse），使
+    spark.read.table("catalog.ns.tbl") / df.writeTo(...) 路由到 Iceberg 表。
+    catalog_type="sql" 时改经 catalog-impl=JdbcCatalog 连同一 SQLite 库
+    （SparkCatalog 不支持 sql 类型，详见下方分支注释）。
+    非 iceberg backend 原样返回 builder。
+
+    与 pipeline._init_spark_session 共用（原内联实现下沉于此）：
+    helpers._get_spark_session 惰性重建 session 时（如 run_pipeline 结束后
+    table_read/table_write 再访问 Iceberg 表）也必须注册 catalog，否则
+    三段式表名落回 spark_catalog 抛 REQUIRES_SINGLE_PART_NAMESPACE。
+
+    关键约束：Iceberg 官方 JAR 最高支持 Spark 4.1（不支持 4.2）。
+    推荐组合：Spark 4.1.x + Iceberg 1.11.0（Scala 2.13）。
+    """
+    storage = cfg.get("storage", {}) or {}
+    if storage.get("backend") != "iceberg":
+        return builder
+    ice_cfg = storage.get("iceberg", {}) or {}
+    catalog_name = ice_cfg.get("catalog_name", "autobatch")
+    spark_extensions = ice_cfg.get(
+        "spark_extensions",
+        "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
+    )
+    builder = builder.config("spark.sql.extensions", spark_extensions)
+    spark_catalog_class = ice_cfg.get(
+        "spark_catalog_class",
+        "org.apache.iceberg.spark.SparkCatalog",
+    )
+    builder = builder.config(f"spark.sql.catalog.{catalog_name}", spark_catalog_class)
+    # catalog 类型：rest（生产）/ sql（开发测试）/ hive（兼容 Hive Metastore）
+    catalog_type = ice_cfg.get("catalog_type", "rest")
+    catalog_uri = ice_cfg.get("catalog_uri", "")
+    if catalog_type == "sql":
+        # Iceberg SparkCatalog 不认识 "sql" 类型（那是 pyiceberg SqlCatalog
+        # 的类型；Spark 侧仅支持 hive/hadoop/rest 等，1.11.0 实测抛
+        # Unknown catalog type: sql）。改用 catalog-impl 指定 JdbcCatalog
+        # 连同一 SQLite 库：JdbcCatalog 与 pyiceberg SqlCatalog 共用
+        # iceberg_tables 元数据表 schema，两引擎可互操作。需
+        # SPARK_HOME/jars/ 下有 sqlite-jdbc 驱动 JAR（如
+        # sqlite-jdbc-3.50.3.0.jar）。
+        builder = builder.config(
+            f"spark.sql.catalog.{catalog_name}.catalog-impl",
+            "org.apache.iceberg.jdbc.JdbcCatalog",
+        )
+        if catalog_uri.startswith("sqlite:///"):
+            # SQLAlchemy 形式 sqlite:///path → JDBC 形式 jdbc:sqlite:path
+            catalog_uri = "jdbc:sqlite:" + catalog_uri[len("sqlite:///") :]
+        builder = builder.config(f"spark.sql.catalog.{catalog_name}.uri", catalog_uri)
+    else:
+        builder = builder.config(f"spark.sql.catalog.{catalog_name}.type", catalog_type)
+        builder = builder.config(f"spark.sql.catalog.{catalog_name}.uri", catalog_uri)
+    builder = builder.config(
+        f"spark.sql.catalog.{catalog_name}.warehouse",
+        ice_cfg.get("warehouse", ""),
+    )
     return builder
 
 

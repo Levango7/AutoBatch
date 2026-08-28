@@ -32,8 +32,8 @@ Phase 2a Polars 分支（``ctx.engine_backend == "polars"``）：
 Phase 2b Spark 分支（``ctx.engine_backend == "spark"``）：
 四个聚合用 ``groupBy().agg()`` 分布式实现，customer_value Top N 用窗口函数
 ``F.row_number().over(Window.orderBy(F.desc("revenue")))``。读入用
-``table_read``，写出用 ``table_write``，``ctx.aggregates`` 用 ``df.toPandas().to_dict()``
-收集到 driver 为 List[Dict]（小数据量安全）。增量模式下 customer_value/tier 用
+``table_read``，写出用 ``table_write``，``ctx.aggregates`` 用 ``df.collect()``
++ ``row.asDict()`` 收集到 driver 为 List[Dict]（小数据量安全）。增量模式下 customer_value/tier 用
 ``_customer_value_incremental_spark`` 输出未按 top_n 截断的 delta 客户 buckets
 （tiers 仅计 history 中不存在的真新客户），与 Python/Polars 增量语义对齐。
 向后兼容：``engine.backend="python"/"polars"`` 时行为不变。
@@ -567,7 +567,7 @@ def _df_to_dicts(df):
 # ---------------------------------------------------------------------------
 # 设计参见 docs/evolution.md §4.4.2.1。读入用 table_read（backend="spark" 下
 # 返回 SparkDataFrame），聚合用 Spark DataFrame API（groupBy+agg+window），
-# 写出用 table_write。ctx.aggregates 用 df.toPandas().to_dict() 收集到 driver
+# 写出用 table_write。ctx.aggregates 用 df.collect()+asDict() 收集到 driver
 # 为 List[Dict]（小数据量安全，与 Python/Polars 路径格式对齐供 output 消费）。
 
 
@@ -845,15 +845,14 @@ def _customer_value_incremental_spark(
 def _spark_df_to_dicts(df):
     """SparkDataFrame → list of dict（与 Python 路径 ctx.aggregates 格式对齐）.
 
-    用 df.toPandas().to_dict(orient="records") 收集到 driver 为 pandas DataFrame
-    再转 List[Dict]。仅用于小数据量（聚合结果，dashboard 数据）。
+    用 df.collect() + row.asDict() 收集到 driver 为 List[Dict]。仅用于小数据量
+    （聚合结果，dashboard 数据）。不用 df.toPandas()：它引入未声明的 pandas
+    硬依赖（spark extra 只装 pyspark），且聚合输出列已全部 cast 为
+    string/int/double，asDict 直接给出原生类型，语义等价。
     """
     if df is None:
         return []
-    pdf = df.toPandas()
-    if pdf.empty:
-        return []
-    return pdf.to_dict(orient="records")
+    return [row.asDict() for row in df.collect()]
 
 
 # ---------------------------------------------------------------------------
@@ -1122,7 +1121,7 @@ def _run_spark(ctx: PipelineContext, log, agg_dir: str, cconf: dict[str, Any]) -
 
     四个聚合用 Spark DataFrame API（groupBy+agg+window），写出用 table_write
     （backend="spark" 下调 df.write.mode("overwrite").csv/parquet）。
-    ctx.aggregates 用 df.toPandas().to_dict() 收集到 driver 为 List[Dict]
+    ctx.aggregates 用 df.collect()+asDict() 收集到 driver 为 List[Dict]
     （小数据量安全，与 Python/Polars 路径格式对齐供 output 消费）。
     """
     from ..helpers import table_write

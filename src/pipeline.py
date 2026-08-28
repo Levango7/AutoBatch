@@ -33,6 +33,8 @@ from .helpers import (
     _get_storage_backend,
     _table_exists,
     abs_path,
+    apply_cluster_conf,
+    apply_iceberg_spark_conf,
     batch_id_new,
     json_load,
     json_save,
@@ -195,59 +197,25 @@ def _init_spark_session(cfg: dict[str, Any], logger) -> Any:
     # --- Driver ↔ Worker 反向连接（多机模式）---
     # 当 engine.spark.cluster.enabled=true 时，Driver 绑定 0.0.0.0 并通过
     # driver_host 暴露给 Docker 容器中的 Worker，使 Worker 可反向连接 Driver。
+    # 注入逻辑下沉到 helpers.apply_cluster_conf，与 _get_spark_session 惰性
+    # 重建 session 共享（run_pipeline 结束 spark.stop() 后 table_read 重建
+    # session 读 cluster 产物时同样需要这组 driver 通告配置，否则容器内
+    # executor 回连自动探测的不可达 IP，约 60s 后 exit 1 无限重启，
+    # 读操作永久挂起——2026-08-28 cluster 等价性测试实测）。
     # cluster.enabled=false（缺省）时不注入，不影响本地单机模式。
-    if cluster.get("enabled"):
-        builder = builder.config("spark.driver.bindAddress", "0.0.0.0")
-        driver_host = cluster.get("driver_host", "host.docker.internal")
-        builder = builder.config("spark.driver.host", driver_host)
-        # Worker 在 Docker Linux 容器中运行，PYSPARK_PYTHON（Windows 路径如
-        # F:\Py314\python.exe）在容器内不存在。设置 spark.pyspark.python 为
-        # 容器内的 Python 路径（缺省 python3），使 Worker 能启动 Python worker。
-        # spark.pyspark.driver.python 保持环境变量 PYSPARK_DRIVER_PYTHON（Driver
-        # 端在宿主机上运行，使用 Windows 路径）。
-        worker_python = cluster.get("worker_python", "python3")
-        builder = builder.config("spark.pyspark.python", worker_python)
+    builder = apply_cluster_conf(builder, cfg)
 
     # --- Phase 5: Spark + Iceberg 三合一 ---
     # 当 storage.backend="iceberg" 时，注入 IcebergSparkSessionExtensions +
     # SparkCatalog 配置，使 spark.read.table("catalog.ns.tbl") / df.writeTo(...)
     # 能路由到 Iceberg 表. 详见 docs/evolution.md §6.x（Phase 5）.
-    #
-    # 关键约束：Iceberg 官方 JAR 最高支持 Spark 4.1（不支持 4.2）.
-    # 推荐组合：Spark 4.1.0 + Iceberg 1.11.0（Scala 2.13）.
-    # 若 SPARK_HOME/jars/ 缺 iceberg-spark-runtime JAR，spark.read.table 会抛
-    # ClassNotFoundException，由测试层 skipif 跳过，不阻塞回归.
+    # 注册逻辑下沉到 helpers.apply_iceberg_spark_conf（_get_spark_session 惰性
+    # 重建 session 时同样注入，避免 REQUIRES_SINGLE_PART_NAMESPACE）.
     #
     # 表名格式：Spark 用 catalog.namespace.table（catalog 前缀），
     # pyiceberg 用 namespace.table（无前缀），由 helpers._iceberg_spark_full_name 统一.
+    builder = apply_iceberg_spark_conf(builder, cfg)
     if storage.get("backend") == "iceberg":
-        ice_cfg = storage.get("iceberg", {}) or {}
-        catalog_name = ice_cfg.get("catalog_name", "autobatch")
-        # spark.sql.extensions：Iceberg SQL 扩展（DFv2 writeTo / MERGE INTO 等）
-        spark_extensions = ice_cfg.get(
-            "spark_extensions",
-            "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
-        )
-        builder = builder.config("spark.sql.extensions", spark_extensions)
-        # spark.sql.catalog.<name>：注册 Iceberg catalog
-        spark_catalog_class = ice_cfg.get(
-            "spark_catalog_class",
-            "org.apache.iceberg.spark.SparkCatalog",
-        )
-        builder = builder.config(f"spark.sql.catalog.{catalog_name}", spark_catalog_class)
-        # catalog 类型：rest（生产）/ sql（开发测试）/ hive（兼容 Hive Metastore）
-        builder = builder.config(
-            f"spark.sql.catalog.{catalog_name}.type",
-            ice_cfg.get("catalog_type", "rest"),
-        )
-        builder = builder.config(
-            f"spark.sql.catalog.{catalog_name}.uri",
-            ice_cfg.get("catalog_uri", ""),
-        )
-        builder = builder.config(
-            f"spark.sql.catalog.{catalog_name}.warehouse",
-            ice_cfg.get("warehouse", ""),
-        )
         # S3/MinIO 访问：复用前面注入的 hadoop-aws S3A connector.
         # 当 catalog_type="rest" 且 warehouse="s3://..." 时，Iceberg REST
         # server 通过 S3A 访问数据文件，需要 fs.s3a.* 配置（已在 parquet

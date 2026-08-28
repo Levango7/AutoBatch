@@ -354,6 +354,34 @@ def test_spark_overwrite_missing_table_creates():
     assert spark.writer.append_calls == 0
 
 
+def test_spark_engine_list_input_routes_to_pyiceberg(monkeypatch):
+    """engine.backend="spark" 下 List[Dict] 输入必须走 pyiceberg 路径.
+
+    回归：旧实现仅按 engine_backend 分派，spark 引擎下对 list 调 df.count()
+    （list.count 需 1 个参数）直接崩溃——pyiceberg 建表+写初始数据等场景
+    （test_spark_iceberg.py 多用例）在真实 Spark 环境首次暴露。契约：仅当
+    输入有 writeTo（真 SparkDataFrame）才走 Spark 写路径。
+    """
+    from src.iceberg import _table_write_iceberg
+
+    def _spark_session_boom(*args, **kwargs):
+        raise AssertionError("spark session must not be created for list input")
+
+    # 惰性 import（函数体内 from .helpers import）在调用时解析模块属性，可拦截
+    monkeypatch.setattr("src.helpers._get_spark_session", _spark_session_boom)
+
+    # 哨兵：到达 pyiceberg 路径的第一个入口即证明分派正确
+    sentinel = RuntimeError("pyiceberg-path-reached")
+
+    def _catalog_sentinel(cfg):
+        raise sentinel
+
+    monkeypatch.setattr("src.iceberg._get_iceberg_catalog", _catalog_sentinel)
+
+    with pytest.raises(RuntimeError, match="pyiceberg-path-reached"):
+        _table_write_iceberg("ns.orders", [{"id": "1"}], _ICE_CFG, "spark", fields=["id"])
+
+
 # ----------------------------------------------------------------------
 # 【2/minor】catalog_uri 相对路径归一到 ROOT
 # ----------------------------------------------------------------------

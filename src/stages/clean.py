@@ -191,9 +191,15 @@ def _dedup_keep_first_spark(df: Any, dedup_cols: list[str]) -> tuple[int, Any]:
     - 窗口函数不允许直接出现在 WHERE 子句（SQLSTATE 42601
       WINDOW_FUNCTION_NOT_ALLOWED_IN_CLAUSE），必须先 ``withColumn`` 物化
       ``row_number`` 再按列过滤。
+    - 空表短路：``rdd.zipWithIndex().toDF()`` 在空 RDD 上做 schema 推断会调
+      ``rdd.first()`` 抛 ``ValueError: RDD is empty``（增量批次零新增行时
+      clean 即拿到空 DataFrame，与 quality.py 同源问题，同样短路处理）。
     """
     from pyspark.sql import functions as F
     from pyspark.sql.window import Window
+
+    if df.rdd.isEmpty():
+        return 0, df
 
     indexed = (
         df.rdd.zipWithIndex()

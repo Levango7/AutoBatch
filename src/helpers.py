@@ -146,12 +146,27 @@ def _strip_bom_polars(df: Any) -> Any:
 
 
 def csv_write(path: str, fields: Sequence[str], data: Sequence[dict[str, Any]]) -> int:
+    # 原子写：先写同目录临时文件再 os.replace，并发读方永远不会看到半截
+    # 文件（与 json_save 同口径）。generator 的 data/raw 写出与各 stage 的
+    # 产物写出都经此函数——旧实现直接 open(path, "w") 流式写，进程崩溃留下
+    # 半截 CSV，双进程并发写同一目标（如 generator.enabled 的两个批次同时
+    # 跑）会互相撕裂内容（2026-08 审查 B10）。tmp 名含 pid+uuid 唯一化，
+    # 避免并发双写碰撞同一 tmp；os.replace 在 Windows/POSIX 同卷均为原子。
     _ensure_parent_dir(path)
-    with open(path, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(fields), extrasaction="ignore")
-        writer.writeheader()
-        for row in data:
-            writer.writerow(row)
+    tmp = f"{path}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(fields), extrasaction="ignore")
+            writer.writeheader()
+            for row in data:
+                writer.writerow(row)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
     return len(data)
 
 
@@ -461,12 +476,21 @@ def json_load(path: str) -> Any:
 
 def json_save(path: str, obj: Any) -> None:
     # 原子写：先写临时文件再 os.replace，避免崩溃留下半截 JSON
-    # （latest.json / metrics.json 的读取方会把解析失败当批次缺失）
+    # （latest.json / metrics.json 的读取方会把解析失败当批次缺失）。
+    # tmp 名含 pid+uuid 唯一化：并发双进程写同一目标（如 latest.json）
+    # 时不会碰撞同一 tmp 互相覆盖（2026-08 审查 B10 同批加固）。
     _ensure_parent_dir(path)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+    tmp = f"{path}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def copy_file(src: str, dst: str) -> str:

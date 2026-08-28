@@ -280,12 +280,14 @@ def _clean_orders_spark(ctx: PipelineContext, log) -> tuple[int, Any, list[str]]
     # 用 try_cast 而非 cast：Spark 4.x 默认 ANSI 开启，cast 对非法值
     # （如 "abc"）抛 CAST_INVALID_INPUT 而不是返回 null，只有 try_cast 在
     # ANSI 开/关下都保证"解析失败 → null → coalesce 0"的 python 语义。
-    # cluster 模式 ingest 用 createDataFrame(str_rows)，quantity/unit_price 是 string，
-    # 需先 cast 成 double（单机模式 inferSchema 已是 double，cast 无副作用；
-    # 这两列经 validate 的 completeness/range 规则校验，值必为合法数值，
-    # ANSI 模式下 cast 不会失败）。
-    qty = F.col("quantity").cast("double")
-    price = F.col("unit_price").cast("double")
+    # quantity/unit_price 同样用 try_cast + coalesce 0：与 python 路径
+    # `as_int(...) or 0` / polars 路径 `cast(strict=False).fill_null(0.0)`
+    # 对齐。shipped config 下 validate 的 completeness+range 规则保证这两列
+    # 必为合法数值，try_cast 不会命中失败分支；但用户自定义 config 若未配
+    # 相应规则，旧实现的裸 cast 会让 null 传播为 null total_amount，与
+    # python/polars 的 0.0 语义分歧（2026-08 审查 B3 残留项）。
+    qty = F.coalesce(F.col("quantity").try_cast("double"), F.lit(0.0))
+    price = F.coalesce(F.col("unit_price").try_cast("double"), F.lit(0.0))
     if "discount" in df.columns:
         disc = F.coalesce(F.col("discount").try_cast("double"), F.lit(0.0))
         amt_expr = F.round(qty * price * (F.lit(1.0) - disc), 2)

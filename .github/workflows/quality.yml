@@ -9,6 +9,9 @@
 #     门禁判断 = pytest 退出码（测试失败或覆盖率低于阈值即 job 失败）。
 #     不再依赖 tools/quality_collect.py 的中间收集结果做门禁判断——该步骤在 GHA
 #     runner 上有已知平台层故障（见步骤注释），现降级仅做产物归档
+#   - CI 去重（2026-08 审查 P3）：原「Collect pytest log (archive only)」步骤
+#     经 quality_collect.py 再跑一遍全量 suite 仅用于日志归档，且在 GHA runner
+#     平台层故障下恒失败，已移除；门禁由 coverage gate 步骤独家承担
 #   - ruff check 范围含 tools/（quality_collect.py 等 CI 基础设施同样受 lint 约束）
 #   - 顶层 concurrency 取消同分支旧任务，节省 CI 资源
 # =============================================================================
@@ -120,36 +123,17 @@ jobs:
           echo "::endgroup::"
 
       # -------------------------------------------------------------------------
-      # 5. pytest 日志收集（仅归档用途，不参与门禁判断）
-      #    收集逻辑整体在 Python 脚本内（subprocess 直跑 pytest、自行落盘与打
-      #    ::error:: 注解），绕开 bash 管道/YAML 层；产物为
-      #    benchmarks/quality_pytest.log，供下一步 failure artifact 使用。
-      #
-      # ⚠ 已知平台怪象（2026-08，连续 5 轮未解，如实记录）：本步骤在 GHA
-      # runner 上以 exit 1 零输出秒退——四种实现（bash tee 管道 / 显式
-      # shell:bash / python subprocess 脚本）× 两种 Python(3.10/3.12) ×
-      # 是否装引擎依赖，全部同一症状；本地 Windows/WSL/Docker(python:3.13-slim)
-      # 同命令均正常，判定为 runner 平台层故障而非代码问题。
-      # 任务78 起门禁已由步骤 4「Coverage gate (pytest --cov-fail-under=60)」
-      # 直接承担，本步骤失败不影响任何门禁结论；保留 continue-on-error
-      # （归档失败不阻塞），该平台故障恢复后若确认不再需要日志归档，可连同
-      # 「Upload pytest log」步骤一并移除。
+      # 5.（已移除）pytest 日志收集步骤 —— 2026-08 审查 P3 CI 去重
+      #    原「Collect pytest log (archive only)」步骤经 tools/quality_collect.py
+      #    再跑一遍全量 suite，仅用于归档日志，却在 GHA runner 上有已知平台层
+      #    故障（exit 1 零输出秒退，连续 5 轮未解），且与步骤 4 的 coverage 门禁
+      #    pytest 构成重复执行。门禁职责已由步骤 4 直接承担，本步骤的日志归档
+      #    价值可由步骤 4 的 job 日志 + ci.yml 的失败注解替代。按原注释「该平台
+      #    故障恢复后若确认不再需要日志归档，可连同 Upload pytest log 步骤一并
+      #    移除」，此处移除该步骤及下方 Upload pytest log 步骤。
+      #    tools/quality_collect.py 脚本本身保留（tests/test_tools_quality_collect.py
+      #    仍有其单测），仅不再被 CI 调用。
       # -------------------------------------------------------------------------
-      - name: Collect pytest log (archive only)
-        id: collect
-        continue-on-error: true
-        run: |
-          python tools/quality_collect.py tests/ \
-            -k "not cluster" \
-            --tb=short -q
-
-      - name: Upload pytest log (failure diagnosis)
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pytest-quality-log
-          path: benchmarks/quality_pytest.log
-          retention-days: 7
 
       # -------------------------------------------------------------------------
       # 6. 上传覆盖率 artifacts（保留 14 天）

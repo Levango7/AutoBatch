@@ -233,6 +233,40 @@ def test_csv_write_mixed_none_and_empty(tmp_path):
 
 
 # ----------------------------------------------------------------------
+# 原子写（2026-08 审查 B10）：csv_write / json_save 成功后无 .tmp 残留，
+# 且覆盖写是原子的（读方不会看到半截内容）
+# ----------------------------------------------------------------------
+def test_csv_write_atomic_no_tmp_residue(tmp_path):
+    """csv_write 成功后目录内不得残留任何 *.tmp 临时文件."""
+    path = tmp_path / "atomic.csv"
+    csv_write(str(path), ["a", "b"], [{"a": "1", "b": "2"}])
+    leftovers = [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+    assert leftovers == []
+    assert path.exists()
+
+
+def test_csv_write_atomic_overwrite_keeps_old_until_complete(tmp_path):
+    """覆盖已有文件：replace 前旧内容完整可读，replace 后为新内容."""
+    path = tmp_path / "overwrite.csv"
+    csv_write(str(path), ["a"], [{"a": "old"}])
+    # 第二次覆盖写
+    csv_write(str(path), ["a"], [{"a": "new1"}, {"a": "new2"}])
+    data, _ = csv_read(str(path))
+    assert [r["a"] for r in data] == ["new1", "new2"]
+    leftovers = [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+    assert leftovers == []
+
+
+def test_json_save_atomic_no_tmp_residue(tmp_path):
+    """json_save 成功后目录内不得残留任何 *.tmp 临时文件."""
+    path = tmp_path / "atomic.json"
+    json_save(str(path), {"k": "v"})
+    leftovers = [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+    assert leftovers == []
+    assert json_load(str(path)) == {"k": "v"}
+
+
+# ----------------------------------------------------------------------
 # 坏配置：JSON 序列化边界
 # ----------------------------------------------------------------------
 def test_json_save_load_empty_dict(tmp_path):

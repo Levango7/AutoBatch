@@ -898,18 +898,27 @@ class RuleEngine:
 
     @staticmethod
     def _spark_outlier(df: Any, rconf: dict[str, Any]) -> tuple[set, int]:
-        """Spark 路径：outlier 检测（分布式 approxQuantile，只标记不拒收）.
+        """Spark 路径：outlier 检测（分布式分位数/矩统计，只标记不拒收）.
 
-        口径说明（轻微分歧，保留近似）：
-        python 路径用 statistics.quantiles（线性插值精确分位数）、polars 用
-        quantile(interpolation="linear") 算 IQR 界；Spark 这里用
-        approxQuantile(ε=0.001)——分位数估计误差在数据秩上最大 ±0.1%，
-        映射到值域后 Q1/Q3 边界可能与精确值相差极小，处于边界附近（±误差带）
-        的样本点在两个引擎间可能被不同地标记/放行，outlier_count 在小样本
-        边界场景下可能与 python/polars 有 ±1～2 行级别的差异。
-        不对齐精确口径的原因：精确 IQR 需要把整列 collect 到 driver，
-        千万行级直接 OOM（2026-08 亿行基准实测）；outlier 仅 flag 不拒收、
-        比例约 0.002，近似误差对下游聚合无实质影响，故按任务口径保留近似。
+        口径说明（与 python/polars 路径对齐项）：
+        - 样本门槛：有效样本 < 100 时跳过检测，与 python _outlier_bounds /
+          polars _polars_outlier 的 ``len >= 100`` 门槛一致（旧 Spark 实现
+          缺失该门槛，小样本批次会单独计算 bounds，与另两引擎分歧——
+          2026-08 审查 B2）。
+        - method=zscore：mean + stddev_pop（总体标准差，对齐 python
+          statistics.pstdev / polars std(ddof=0)）；旧 Spark 实现无视
+          method 配置恒走 iqr，zscore 配置被静默改写（2026-08 审查 B2）。
+        - 非法值处理：try_cast 解析失败 → null 排除统计，对齐 python
+          as_float / polars cast(strict=False)。
+
+        仍保留的轻微分歧（有意设计）：iqr 分位数用 approxQuantile(ε=0.001)
+        而非精确线性插值——分位数估计误差在数据秩上最大 ±0.1%，映射到值域
+        后 Q1/Q3 边界可能与精确值相差极小，边界附近（±误差带）的样本点在
+        两个引擎间可能被不同地标记/放行，outlier_count 在小样本边界场景下
+        可能与 python/polars 有 ±1～2 行级别的差异。不对齐精确口径的原因：
+        精确 IQR 需要把整列 collect 到 driver，千万行级直接 OOM
+        （2026-08 亿行基准实测）；outlier 仅 flag 不拒收、比例约 0.002，
+        近似误差对下游聚合无实质影响。
 
         Returns:
             (outlier_indices, outlier_count)
@@ -921,23 +930,38 @@ class RuleEngine:
         outlier_indices: set = set()
         outlier_count = 0
         if oc_col and oc.get("action") == "flag" and oc_col in df.columns:
-            # bounds/count 用分布式 approxQuantile(+count) 求 IQR 界与越界行数
-            # （driver 仅收 2 个分位数标量 + 1 个计数）。旧实现把单列值**全表
-            # collect 到 driver** 再算精确 IQR，千万行级直接 OOM
-            # （2026-08 亿行基准实测）。ε=0.001 的分位近似在大表上的标记数
-            # 差异可忽略；Spark 路径的 indices 仅作"存在越界行"信号，
-            # 消费方 stages/validate.py 据此自行做越界 id 收集。
             factor = float(oc.get("factor", 1.5))
             # total_amount 等派生列在 Spark 路径为 StringType：先落 double
-            # 派生列再求分位数（approxQuantile 不收字符串列）
-            dfn = df.withColumn("_oc_num", F.col(oc_col).cast("double"))
-            qs = dfn.approxQuantile("_oc_num", [0.25, 0.75], 0.001)
-            if qs and all(q is not None for q in qs):
+            # 派生列再求统计量（approxQuantile/mean 不收字符串列）。
+            # try_cast 而非 cast：ANSI 模式下非法值 cast 抛异常，try_cast
+            # 保证"解析失败 → null → 排除统计"的 python/polars 语义。
+            dfn = df.withColumn("_oc_num", F.col(oc_col).try_cast("double"))
+            # 样本门槛对齐 python/polars：有效（非 null）样本 < 100 跳过.
+            n_valid = dfn.where(F.col("_oc_num").isNotNull()).count()
+            if n_valid < 100:
+                return outlier_indices, outlier_count
+            if oc.get("method", "iqr") == "zscore":
+                # zscore 口径：分布式 mean/stddev_pop 聚合，driver 仅收 2 标量.
+                row = dfn.agg(F.mean("_oc_num"), F.stddev_pop("_oc_num")).collect()[0]
+                mean, sd = row[0], row[1]
+                if mean is None or sd is None or sd == 0:
+                    return outlier_indices, outlier_count
+                lo, hi = mean - factor * sd, mean + factor * sd
+            else:
+                # bounds/count 用分布式 approxQuantile(+count) 求 IQR 界与越界
+                # 行数（driver 仅收 2 个分位数标量 + 1 个计数）。旧实现把单列
+                # 值**全表 collect 到 driver** 再算精确 IQR，千万行级直接 OOM
+                # （2026-08 亿行基准实测）。ε=0.001 的分位近似在大表上的标记
+                # 数差异可忽略；Spark 路径的 indices 仅作"存在越界行"信号，
+                # 消费方 stages/validate.py 据此自行做越界 id 收集。
+                qs = dfn.approxQuantile("_oc_num", [0.25, 0.75], 0.001)
+                if not qs or any(q is None for q in qs):
+                    return outlier_indices, outlier_count
                 iqr = qs[1] - qs[0]
                 lo, hi = qs[0] - factor * iqr, qs[1] + factor * iqr
-                outlier_count = dfn.where((F.col("_oc_num") < lo) | (F.col("_oc_num") > hi)).count()
-                if outlier_count > 0:
-                    outlier_indices.add(0)
+            outlier_count = dfn.where((F.col("_oc_num") < lo) | (F.col("_oc_num") > hi)).count()
+            if outlier_count > 0:
+                outlier_indices.add(0)
         return outlier_indices, outlier_count
 
     @staticmethod

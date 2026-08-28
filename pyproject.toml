@@ -186,3 +186,29 @@ allow_redefinition = true        # 允许条件重定义（兼容运行时分支
 # -----------------------------------------------------------------------------
 # pytest 配置：保留在 pytest.ini 中（已存在），此处不重复以避免配置冲突警告
 # -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+# coverage：分支覆盖（2026-08 审查 P3 收尾）
+# 此前 CI 仅统计语句覆盖（coverage.xml branch-rate=0）。开启 branch=true 后
+# pytest-cov（ci.yml / quality.yml 的 --cov=src）自动同时统计分支覆盖，
+# 门禁 --cov-fail-under=60 以「语句+分支」合并口径判断。
+# 依据：2026-08-28 本地实测（412 passed / 22 skipped，Windows，Spark 集成
+# 用例 skip）分支口径 TOTAL=75%，高于 60% 门禁；Linux CI 腿额外运行 MinIO
+# S3 用例，覆盖只会更高，门禁余量充足。
+# -----------------------------------------------------------------------------
+[tool.coverage.run]
+branch = true
+source = ["src"]
+omit = [
+    "*/__pycache__/*",
+    "*/tests/*",
+]
+
+[tool.coverage.report]
+# 与门禁阈值一致，本地 coverage report 直出同一判断线
+fail_under = 60
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]

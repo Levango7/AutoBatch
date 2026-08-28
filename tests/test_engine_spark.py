@@ -76,17 +76,32 @@ def _pyspark_jvm_exists() -> bool:
     try:
         import os as _os
 
-        # 若 JAVA_HOME / spark_home 未设置，直接假设为无环境
-        if not _os.environ.get("JAVA_HOME") and not _os.environ.get("SPARK_HOME"):
+        # Auto-detect SPARK_HOME from pyspark package location if not set
+        if not _os.environ.get("SPARK_HOME"):
+            try:
+                import pyspark
+
+                _spark_home = _os.path.dirname(pyspark.__file__)
+                if _os.path.isdir(_os.path.join(_spark_home, "bin")):
+                    _os.environ["SPARK_HOME"] = _spark_home
+            except ImportError:
+                pass
+        # Auto-set PYSPARK_PYTHON so batch scripts can find Python (paths with spaces)
+        if not _os.environ.get("PYSPARK_PYTHON"):
+            _os.environ["PYSPARK_PYTHON"] = _os.sys.executable
+        if not _os.environ.get("PYSPARK_DRIVER_PYTHON"):
+            _os.environ["PYSPARK_DRIVER_PYTHON"] = _os.sys.executable
+        # 若 JAVA_HOME 未设置，直接假设为无环境
+        if not _os.environ.get("JAVA_HOME"):
             return False
         from pyspark.conf import SparkConf  # noqa: N814
         from pyspark.context import SparkContext  # noqa: N814 使用 CamelCase 原名
 
-        conf = SparkConf().setMaster("local[1]")
+        conf = SparkConf().setMaster("local[1]").setAppName("test")
         sc = SparkContext.getOrCreate(conf=conf)
         sc.stop()
         return True
-    except Exception:  # noqa: BLE001
+    except Exception as _exc:  # noqa: BLE001
         return False
 
 
@@ -96,6 +111,34 @@ _HADOOP_HOME_CANDIDATES = [
     "/usr/local/hadoop",
     r"F:\hadoop",
 ]
+
+# 是否"显式"配置 HADOOP_HOME：项目设计意图是 Spark 真跑验证在 WSL/Docker
+# （见 DELIVERY.md 第四节），Windows 上未显式配置 HADOOP_HOME 时这些用例应
+# skip——仅凭文件系统存在 hadoop.dll（如 F:\hadoop 字面量）不足以判定 Windows
+# 上 Spark 可写文件（2026-08-29 实测：装入 hadoop.dll 后探测翻转为可用，随即
+# 依次暴露 HADOOP_HOME unset / NativeIO JNI / worker socket 三层 Windows 坑，
+# 全部为环境限制而非代码回归）。显式设置 HADOOP_HOME 的用户则真跑，预注入
+# 保证 JVM 从启动即携带正确 env/PATH。
+_HADOOP_HOME_EXPLICIT = bool(_os.environ.get("HADOOP_HOME"))
+
+# 2026-08-29 审查修复：PySpark JVM gateway 是进程级单例，进程 env/PATH 在 JVM
+# 启动时固化。若此处不预注入 HADOOP_HOME 与 PATH 中的 <HADOOP_HOME>\bin，
+# 下方模块级 PYSPARK_JVM_OK 探测（会真正启动 JVM）将固化为"无 HADOOP_HOME /
+# 无 hadoop.dll 加载路径"，之后 conftest spark_env fixture 的 os.environ 注入
+# 对已启动的 JVM 无效——本机 2026-08-29 实测依次出现 "HADOOP_HOME ... are
+# unset" → 注入 HADOOP_HOME 后 → "NativeIO$Windows.access0 UnsatisfiedLinkError"
+# （hadoop.dll 不在 JVM 的 PATH/库路径）。预注入使 JVM 从启动即携带正确环境。
+if not _os.environ.get("HADOOP_HOME"):
+    for _cand in ("/opt/hadoop", "/usr/local/hadoop", r"F:\hadoop"):
+        if _os.path.isdir(_cand):
+            _os.environ["HADOOP_HOME"] = _cand
+            break
+_hh = _os.environ.get("HADOOP_HOME")
+if _hh and _os.name == "nt" and _os.path.isdir(_os.path.join(_hh, "bin")):
+    _hadoop_bin = _os.path.join(_hh, "bin")
+    if _hadoop_bin not in _os.environ.get("PATH", ""):
+        _os.environ["PATH"] = _hadoop_bin + _os.pathsep + _os.environ.get("PATH", "")
+
 _HADOOP_DLL_EXISTS = any(_hadoop_native_exists(h) for h in _HADOOP_HOME_CANDIDATES if h)
 
 
@@ -113,7 +156,12 @@ try:
 except ImportError:
     _PYSPARK_AVAILABLE = False
 
-SPARK_WRITE_DISABLED = not _HADOOP_DLL_EXISTS or not _PYSPARK_AVAILABLE or not PYSPARK_JVM_OK
+SPARK_WRITE_DISABLED = (
+    not _HADOOP_HOME_EXPLICIT
+    or not _HADOOP_DLL_EXISTS
+    or not _PYSPARK_AVAILABLE
+    or not PYSPARK_JVM_OK
+)
 
 _SKIP_REASON = (
     "hadoop native IO library not found or pyspark not installed - "

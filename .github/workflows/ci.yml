@@ -19,6 +19,10 @@
 #   - 顶层 concurrency 取消同分支旧任务，节省 CI 资源
 #   - pip-audit 依赖安全扫描为独立 job，与测试矩阵并行
 #   - smoke test 失败时上传 run/ 目录 artifact 便于诊断
+#   - spark-cluster job（2026-08-28）：ubuntu 单腿用 docker compose 拉起
+#     docker/spark-cluster 真集群（master+2 worker）+ MinIO service，
+#     跑 tests/test_engine_spark_cluster.py 4 个集群测试；Driver 端 S3A JAR
+#     按 docker/spark-cluster/Dockerfile 钉扎版本下载并 SHA1 校验
 # =============================================================================
 name: CI / AutoBatch Pipeline CI
 
@@ -102,7 +106,7 @@ jobs:
           pip install -r requirements.txt
           # optional 引擎依赖：pyspark / polars / pyarrow / pyiceberg 均要求 Python >=3.10，
           # 在 CI 当前矩阵（3.10–3.12）中均可安装；pyarrow>=23.0.1 修复 PYSEC-2026-113
-          pip install "pyspark>=4.0,<5.0" "polars>=1.0,<2.0" "pyarrow>=23.0.1,<25.0" "pyiceberg==0.12.0rc1"
+          pip install "pyspark>=4.0,<5.0" "polars>=1.0,<2.0" "pyarrow>=23.0.1,<25.0" "pyiceberg>=0.12.0,<0.13"
           pip install -r requirements-dev.txt
 
       # 全量运行；重型测试（Spark 集群 / 需要 hadoop native lib 的路径）
@@ -110,8 +114,8 @@ jobs:
       # S3（MinIO）测试在本 Linux 腿因 job 级 minio service 而实际运行
       # （任务78 前因无 MinIO 服务永久跳过）；Spark 本地模式在 Linux CI
       # 缺 hadoop native lib 时经 skipif 自动跳过，不阻塞流水线。
-      # 注意：Spark cluster 测试需要 Docker Spark 集群（localhost:7077），CI 环境无此条件，
-      #       通过 -k "not cluster" 显式排除以避免 JVM 初始化失败导致整个 suite 失败
+      # 注意：Spark cluster 测试在本 job 中仍排除（本 job 无集群），由下方
+      # 独立的 spark-cluster job 拉起真集群专跑（2026-08-28 起）
       # 显式 shell: bash 使 GHA 以 `bash --noprofile --norc -eo pipefail` 运行：
       # 默认的 `bash -e {0}` 不含 pipefail，pytest 经 tee 管道后失败会被掩蔽
       # （管道退出码取 tee 恒为 0）——这是 2026-08 审计发现的 P0 门禁缺陷.
@@ -184,6 +188,174 @@ jobs:
           retention-days: 7
 
   # ===========================================================================
+  # Spark 集群测试腿（2026-08-28）：ubuntu 单腿，docker compose 拉起真集群
+  # （spark-master + 2 worker，镜像由 docker/spark-cluster/Dockerfile 构建）
+  # + MinIO service，专跑 tests/test_engine_spark_cluster.py 的 4 个集群测试。
+  #
+  # 与本地 WSL2/Docker Desktop 验证（DELIVERY.md 第五节）同链路，差异点：
+  #   - 原生 Linux 容器内 host.docker.internal 由 compose 的 extra_hosts
+  #     (host-gateway) 提供；Driver 通告地址用 SPARK_CLUSTER_DRIVER_HOST
+  #     覆盖 conftest 的 localhost 缺省（tests/conftest.py 集群 fixture）
+  #   - MinIO service 容器默认在 job 网络，用 docker network connect
+  #     --alias minio 接入 autobatch-net：worker 容器内 socat 代理
+  #     （entrypoint.sh 固定转发 localhost:9000 → minio:9000）经 DNS
+  #     别名找到 MinIO；Driver 端 pyarrow 走 service 的 9000 端口映射
+  #   - Driver 端 S3A 三件套（hadoop-aws / aws-sdk-v2-bundle /
+  #     analyticsaccelerator-s3）按 Dockerfile 钉扎版本下载进
+  #     pyspark/jars/ 并 SHA1 校验（Worker 端已在镜像内）
+  #   - pyspark==4.2.0 与镜像 SPARK_VERSION=4.2.0 钉扎一致：Driver 与
+  #     Worker 的 Spark 小版本必须匹配（本地模式无此约束，集群有）
+  # ===========================================================================
+  spark-cluster:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      minio:
+        image: minio/minio:RELEASE.2024-08-29T01-40-52Z
+        command: server /data --console-address ":9001"
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+        ports:
+          - 9000:9000
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/live || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17 (Temurin, 与集群镜像基座一致)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          # pyspark==4.2.0 与集群镜像 SPARK_VERSION=4.2.0 钉扎一致
+          #（Driver/Worker Spark 小版本错配在 standalone 集群上直接报错）
+          pip install "pyspark==4.2.0" "polars>=1.0,<2.0" "pyarrow>=23.0.1,<25.0"
+          pip install -r requirements-dev.txt
+
+      # Driver 端 S3A JAR：版本/SHA1 与 docker/spark-cluster/Dockerfile 钉扎
+      # 完全一致（改 Dockerfile 时必须同步此处与 cache key）。缓存大文件
+      # aws-sdk-v2-bundle（~654MB），key 不含版本号、以内容校验兜底。
+      - name: Cache S3A driver JARs
+        uses: actions/cache@v4
+        with:
+          path: .s3a-jars
+          key: s3a-jars-hadoop-aws-3.5.0-bundle-2.35.4-aacc-1.3.1
+
+      - name: Download S3A driver JARs (pinned + SHA1 verified)
+        run: |
+          set -euo pipefail
+          mkdir -p .s3a-jars
+          dl() { # dl <输出文件> <maven路径> <sha1>
+            if [ ! -s ".s3a-jars/$1" ]; then
+              curl -fsSL --retry 3 --retry-delay 3 \
+                -o ".s3a-jars/$1" \
+                "https://repo1.maven.org/maven2/$2"
+            fi
+            echo "$3  .s3a-jars/$1" | sha1sum -c -
+          }
+          dl hadoop-aws-3.5.0.jar \
+            org/apache/hadoop/hadoop-aws/3.5.0/hadoop-aws-3.5.0.jar \
+            9e594525d264c0db653c7f68da98b245f7d61ea5
+          dl bundle-2.35.4.jar \
+            software/amazon/awssdk/bundle/2.35.4/bundle-2.35.4.jar \
+            7252265e3970b214708e68a8b74a8fa8c875af1e
+          dl analyticsaccelerator-s3-1.3.1.jar \
+            software/amazon/s3/analyticsaccelerator/analyticsaccelerator-s3/1.3.1/analyticsaccelerator-s3-1.3.1.jar \
+            6c9bd0f6c440c9a78e82d272f5f0252d942419f6
+
+      - name: Install S3A JARs into driver pyspark/jars
+        run: |
+          set -euo pipefail
+          JARS_DIR=$(python -c "import pyspark, os; print(os.path.join(os.path.dirname(pyspark.__file__), 'jars'))")
+          cp -v .s3a-jars/*.jar "$JARS_DIR/"
+          echo "driver jars dir: $JARS_DIR"
+
+      - name: Build & start Spark cluster (docker compose)
+        working-directory: docker/spark-cluster
+        run: |
+          docker compose build --pull=false
+          docker compose up -d
+
+      # MinIO service 容器接入 autobatch-net（别名 minio）：worker 容器内
+      # socat 代理固定转发 localhost:9000 → minio:9000，靠该别名解析。
+      - name: Connect MinIO service to autobatch-net (alias minio)
+        run: |
+          set -euo pipefail
+          MINIO_ID=$(docker ps --filter "name=minio" --format "{{.ID}}" | head -1)
+          test -n "$MINIO_ID" || { echo "::error::MinIO service container not found"; exit 1; }
+          docker network connect --alias minio autobatch-net "$MINIO_ID"
+
+      - name: Wait for cluster ready (master + 2 ALIVE workers)
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            N=$(curl -fsSL http://localhost:8080/json/ 2>/dev/null \
+              | python3 -c "import json,sys; d=json.load(sys.stdin); print(sum(1 for w in d.get('workers', []) if w.get('state') == 'ALIVE'))" \
+              || echo 0)
+            echo "attempt $i: ALIVE workers = $N"
+            [ "$N" = "2" ] && exit 0
+            sleep 5
+          done
+          echo "::error::cluster not ready (2 ALIVE workers) within 300s"
+          docker compose -f docker/spark-cluster/docker-compose.yml ps
+          exit 1
+
+      # SPARK_CLUSTER_DRIVER_HOST：conftest 集群 fixture 的覆盖口——原生
+      # Linux 缺省 localhost 会让 executor 回连容器自身 loopback（ refused
+      # 崩溃循环），host.docker.internal 经 compose extra_hosts(host-gateway)
+      # 解析到宿主，executor 可回连 Driver（Driver 绑定 0.0.0.0）。
+      - name: Run Spark cluster tests
+        shell: bash
+        env:
+          SPARK_CLUSTER_DRIVER_HOST: host.docker.internal
+        run: |
+          set -eo pipefail
+          python -m pytest tests/test_engine_spark_cluster.py -v \
+            --tb=short \
+            2>&1 | tee /tmp/pytest-cluster.log
+
+      - name: Surface failed tests as annotations
+        if: failure()
+        shell: bash
+        run: |
+          grep -E "^(FAILED|ERROR) " /tmp/pytest-cluster.log | head -30 | while IFS= read -r line; do
+            echo "::error::${line:0:180}"
+          done
+          grep -E "^(FAILED|ERROR) " /tmp/pytest-cluster.log | head -30 || echo "::error::no FAILED lines parsed (crash before summary?)"
+
+      - name: Upload cluster test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-cluster-log
+          path: /tmp/pytest-cluster.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Tear down Spark cluster
+        if: always()
+        working-directory: docker/spark-cluster
+        run: |
+          docker compose down --remove-orphans
+
+  # ===========================================================================
   # macOS 测试腿：单版本（3.12）验证 POSIX 兼容性，控制矩阵规模（任务78
   # 从原 matrix include 拆为独立 job）。
   # GHA service 容器仅支持 Linux runner，本 job 无 services 定义：
@@ -211,7 +383,7 @@ jobs:
           pip install -r requirements.txt
           # optional 引擎依赖：与 build job 完全一致，pyspark / polars / pyarrow /
           # pyiceberg 均要求 Python >=3.10（本腿 3.12 全部可安装）
-          pip install "pyspark>=4.0,<5.0" "polars>=1.0,<2.0" "pyarrow>=23.0.1,<25.0" "pyiceberg==0.12.0rc1"
+          pip install "pyspark>=4.0,<5.0" "polars>=1.0,<2.0" "pyarrow>=23.0.1,<25.0" "pyiceberg>=0.12.0,<0.13"
           pip install -r requirements-dev.txt
 
       # 与 build job 同口径：-k "not cluster" 排除 Spark 集群测试；

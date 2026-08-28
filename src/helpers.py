@@ -221,6 +221,8 @@ def _get_spark_session(cfg: dict[str, Any]) -> Any:
     spark_cfg = cfg.get("engine", {}).get("spark", {}) or {}
     builder = SparkSession.builder
     builder = _apply_spark_base_config(builder, spark_cfg)
+    # 绕过 Windows NativeIO（stub hadoop.dll 缺 NativeIO$Windows.access0）
+    builder = builder.config("spark.hadoop.io.nativeio.config.bypass", "true")
     # parquet+S3 场景注入 fs.s3a.* 凭证/endpoint（与 pipeline._init_spark_session
     # 同一组键值）。缺失时重建的 session 无凭证读 s3a://，报
     # NoAuthWithAWSException——典型触发路径：run_pipeline 结束 spark.stop() 后，
@@ -655,6 +657,9 @@ def apply_spark_env(spark_paths: dict[str, str]) -> None:
     探测回退会给出不存在的占位路径（如 POSIX 风格 /opt/hadoop）——这类值一旦
     注入会让 Driver JVM 以 'Hadoop home directory ... is not an absolute path'
     拒绝写文件（2026-08 亿行基准实测），故目录不存在时跳过不设.
+
+    Windows 上还需把 HADOOP_HOME\\bin 前置到 PATH，使 Spark NativeCodeLoader
+    能找到 hadoop.dll（NativeIO JNI 方法由此提供）。
     """
     for key, value in spark_paths.items():
         if not value:
@@ -662,6 +667,13 @@ def apply_spark_env(spark_paths: dict[str, str]) -> None:
         if key in ("SPARK_HOME", "HADOOP_HOME", "JAVA_HOME") and not os.path.isdir(value):
             continue
         os.environ.setdefault(key, value)
+    # Windows: prepend HADOOP_HOME/bin to PATH so NativeCodeLoader finds hadoop.dll
+    if os.name == "nt" and spark_paths.get("HADOOP_HOME"):
+        hadoop_bin = os.path.join(spark_paths["HADOOP_HOME"], "bin")
+        if os.path.isdir(hadoop_bin):
+            current = os.environ.get("PATH", "")
+            if hadoop_bin not in current:
+                os.environ["PATH"] = hadoop_bin + os.pathsep + current
 
 
 def rmtree_retry(path: str, attempts: int = 4, base_delay: float = 0.3) -> bool:

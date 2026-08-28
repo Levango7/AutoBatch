@@ -53,7 +53,7 @@
 | quality.rules.<表>.range | 数值范围 | quantity 1~1000、unit_price 0.01~100000 |
 | quality.rules.<表>.allowed_values | 枚举白名单 | status/channel/tier |
 | quality.rules.<表>.format | 正则格式 | order_id ^ORD-\\d{8}$ |
-| quality.rules.<表>.date_valid | 日期范围 | order_date 2020-01-01 ~ 2026-12-31 |
+| quality.rules.<表>.date_valid | 日期范围 | order_date 2020-01-01 ~ 2099-12-31 |
 | quality.rules.<表>.referential | 引用完整性（外键在参考表存在） | customer_id → customers.customer_id |
 | quality.rules.<表>.outlier | 异常值（IQR/zscore，action=flag 仅标记） | total_amount, method=iqr, factor=1.5 |
 | clean.dedup_columns | 去重键 | order_id |

@@ -196,14 +196,25 @@ def _dedup_keep_first_spark(df: Any, dedup_cols: list[str]) -> tuple[int, Any]:
       clean 即拿到空 DataFrame，与 quality.py 同源问题，同样短路处理）。
     """
     from pyspark.sql import functions as F
+    from pyspark.sql.types import LongType, StructField, StructType
     from pyspark.sql.window import Window
 
-    if df.rdd.isEmpty():
+    # isEmpty() 底层调 take(1)，Python 3.14 + PySpark 4.2.0 下同样会触发
+    # worker pickle 崩溃（Connection reset by peer）。改用 count()==0。
+    if df.rdd.count() == 0:
         return 0, df
 
+    # 显式 schema 绕开 rdd.first() 推断（Python 3.14 + PySpark 4.2.0 crash）
+    inner = StructType(df.schema.fields)
+    zw_schema = StructType(
+        [
+            StructField("_1", inner, nullable=False),
+            StructField("_2", LongType(), nullable=False),
+        ]
+    )
     indexed = (
         df.rdd.zipWithIndex()
-        .toDF()
+        .toDF(zw_schema)
         .select(
             *[F.col("_1." + c).alias(c) for c in df.columns],
             F.col("_2").alias("_row_idx"),

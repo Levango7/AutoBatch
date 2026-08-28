@@ -60,6 +60,13 @@ services:
       SPARK_MASTER_URL: spark://spark-master:7077
       SPARK_WORKER_CORES: "2"
       SPARK_WORKER_MEMORY: 2g
+    # host-gateway：原生 Linux（CI ubuntu runner 等）上容器内无法解析
+    # host.docker.internal，显式映射到宿主网关，使 executor 能回连 Driver。
+    # Docker Desktop（Windows/macOS/WSL2）本就内置该 DNS 记录，此映射无害。
+    # 原生 Linux 上 Driver 宿主机需配套 SPARK_CLUSTER_DRIVER_HOST=
+    # host.docker.internal（conftest 按 env 覆盖，见 tests/conftest.py）。
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "127.0.0.1:8081:8081"   # Worker-1 Web UI
     networks:
@@ -97,6 +104,9 @@ services:
       SPARK_MASTER_URL: spark://spark-master:7077
       SPARK_WORKER_CORES: "2"
       SPARK_WORKER_MEMORY: 2g
+    # 同 spark-worker-1：原生 Linux 容器回连 Driver 需要 host.docker.internal 映射
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "127.0.0.1:8082:8081"   # Worker-2 Web UI → 宿主机 8082
     networks:

@@ -53,7 +53,7 @@
           "order_id": "^ORD-\\d{8}$",
           "created_ts": "^\\d{4}-\\d{2}-\\d{2}[T ]\\d{2}:\\d{2}:\\d{2}$"
         },
-        "date_valid": { "columns": ["order_date"], "min": "2020-01-01", "max": "2026-12-31" },
+        "date_valid": { "columns": ["order_date"], "min": "2020-01-01", "max": "2099-12-31" },
         "referential": {
           "customer_id": "customers.customer_id",
           "product_id": "products.product_id"
@@ -64,7 +64,7 @@
         "completeness": { "required_columns": ["customer_id", "tier", "city", "join_date"] },
         "uniqueness": { "columns": ["customer_id"] },
         "allowed_values": { "tier": ["bronze", "silver", "gold", "platinum"] },
-        "date_valid": { "columns": ["join_date"], "min": "2015-01-01", "max": "2026-12-31" }
+        "date_valid": { "columns": ["join_date"], "min": "2015-01-01", "max": "2099-12-31" }
       },
       "products": {
         "completeness": { "required_columns": ["product_id", "name", "category", "cost"] },

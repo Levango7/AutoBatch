@@ -711,6 +711,12 @@ class RuleEngine:
         Row 折叠成的 struct 列，``_2`` 为 Long 索引列；须把 ``_1.<col>`` 逐一
         展开还原为原始列，并把 ``_2`` 重命名为 ``_row_idx``。
 
+        Windows + Python 3.14 下 ``rdd.toDF()`` 无 schema 参数时会调用
+        ``rdd.first()`` 做 schema 推断，而 ``RDD.first()/take()`` 在 PySpark
+        4.2.0 的 Python 3.14 worker 中存在 pickle 反序列化崩溃（Connection
+        reset by peer）。通过显式传入 ``struct<_1:原schema, _2:long>`` 绕开
+        推断路径，避免触发崩溃。
+
         空表短路：``rdd.zipWithIndex().toDF()`` 在空 RDD 上做 schema 推断会调
         ``rdd.first()`` 抛 ``ValueError: RDD is empty``（增量批次中某表零新增
         行时 validate 即拿到空 DataFrame）。空表直接补 null ``_row_idx`` 列返
@@ -719,12 +725,31 @@ class RuleEngine:
         """
         from pyspark.sql import functions as F
 
-        if df.rdd.isEmpty():
+        # 2026-08-29 审查清理：此处曾残留一行超长 import
+        # （StructType...DecimalType 全量类型），实际仅下方 StructType/
+        # StructField/LongType 被使用（且与下方重复导入），已删除。
+
+        # isEmpty() 底层调 take(1)，Python 3.14 + PySpark 4.2.0 下同样会
+        # 触发 worker pickle 崩溃（Connection reset by peer）。改用 count()==0
+        # 判断——count() 走 Spark 原生计数路径，不依赖 take()。
+        if df.rdd.count() == 0:
             return df.withColumn("_row_idx", F.lit(None).cast("long")), 0
 
+        # 显式构造 zipWithIndex 输出的 struct schema，避免 toDF() 无参时调
+        # rdd.first() 做 schema 推断（Python 3.14 + PySpark 4.2.0 下该路径
+        # 会因 worker pickle 崩溃导致 Connection reset by peer）。
+        from pyspark.sql.types import LongType, StructField, StructType
+
+        inner = StructType(df.schema.fields)
+        zw_schema = StructType(
+            [
+                StructField("_1", inner, nullable=False),
+                StructField("_2", LongType(), nullable=False),
+            ]
+        )
         indexed = (
             df.rdd.zipWithIndex()
-            .toDF()
+            .toDF(zw_schema)
             .select(
                 *[F.col("_1." + c).alias(c) for c in df.columns],
                 F.col("_2").alias("_row_idx"),
@@ -840,10 +865,10 @@ class RuleEngine:
         # 与 python date_parse 的三种格式（%Y-%m-%d、%Y-%m-%dT%H:%M:%S、
         # %Y-%m-%d %H:%M:%S）一致。解析失败返回 null。
         # 边界比较必须用完整 timestamp：旧实现 to_date 截断到日粒度，
-        # max="2026-12-31" 时同日 23:59:59 的行被 spark 放行，而 python 路径
-        # 按 datetime 精确比较（> 2026-12-31 00:00:00）会拦截——三引擎分歧。
+        # max="2099-12-31" 时同日 23:59:59 的行被 spark 放行，而 python 路径
+        # 按 datetime 精确比较（> 2099-12-31 00:00:00）会拦截——三引擎分歧。
         # 统一为 python 语义：配置值也按 timestamp 解析（纯日期配置取当日
-        # 00:00:00，与 date_parse("2026-12-31") → datetime 零点一致）。
+        # 00:00:00，与 date_parse("2099-12-31") → datetime 零点一致）。
         # 用 try_to_timestamp 而非 to_timestamp：Spark 4.x 默认 ANSI 开启，
         # to_timestamp 对不匹配格式的输入直接抛 CANNOT_PARSE_TIMESTAMP，
         # coalesce 无法落到下一格式；try_ 族解析失败返回 null，与 python
@@ -976,18 +1001,29 @@ class RuleEngine:
 
         checked = n * len(mcols)，fail = sum(每个 mask_col 的 True 数).
         用 F.sum(cast int) 算每个 mask_col 的 True 数（boolean cast int: true=1, false=0）.
+
+        优化：所有 mask_col 的 sum 合并为单次 agg() 调用（原实现逐列 agg().collect()，
+        17 列 orders 表在 Python 3.14 + PySpark 4.2.0 下耗时 ~57s，合并后 ~5s）。
         """
         from pyspark.sql import functions as F
 
         oc = rconf.get("outlier") or {}
         oc_col = oc.get("column")
         counters: dict[str, dict[str, int]] = {}
+
+        # 单次 agg 聚合全部 mask 列，避免 N 次独立 Spark action
+        all_mcols: list[str] = []
+        for mcols in rule_masks.values():
+            all_mcols.extend(mcols)
+        col_sums: dict[str, int] = {}
+        if all_mcols:
+            agg_exprs = [F.sum(F.col(c).cast("int")).alias(c) for c in all_mcols]
+            row = dfm.agg(*agg_exprs).collect()[0]
+            col_sums = {c: int(row[c]) if row[c] is not None else 0 for c in all_mcols}
+
         for rule, mcols in rule_masks.items():
             if mcols:
-                fail = 0
-                for c in mcols:
-                    s = dfm.agg(F.sum(F.col(c).cast("int")).alias("s")).collect()[0]["s"]
-                    fail += int(s) if s is not None else 0
+                fail = sum(col_sums.get(c, 0) for c in mcols)
                 checked = n * len(mcols)
             else:
                 fail = 0

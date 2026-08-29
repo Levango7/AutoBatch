@@ -718,14 +718,15 @@ def test_e2e_retry_exhausted_fails(_same_drive_tmp_root, request, monkeypatch):
 def test_backoff_exponential_and_capped(fake_ctx, monkeypatch):
     """验证退避时间 = min(base * 2^attempt, max)，且 sleep 被调用.
 
-    打桩 pipeline 模块内绑定的 time.sleep 而非全局 time.sleep：
+    打桩 pipeline 模块的 _sleep 别名而非全局 time.sleep：
     全局打桩会把同进程内其它并发线程的 sleep 调用（psutil 采样、
-    state.py 锁轮询、超时测试泄漏的 daemon stage 线程）也计入本
-    测试的计数器——macOS CI 实测出现过 sleep 计数 200 万级的污染
-    （进程内后台线程在零耗时打桩下全速空转），断言彻底失真。
+    state.py 锁轮询、超时测试泄漏的 daemon stage 线程）也变成零耗时
+    桩——后台限速循环蜕变为全速空转，且其调用会污染本测试的计数器
+    （macOS CI 实测出现过 sleep 计数 200 万级污染 / exit 3 崩溃两种
+    表象）。_sleep 是 pipeline.py 模块级私有别名，只被重试路径引用。
     """
     sleep_calls: list[float] = []
-    monkeypatch.setattr(pipeline_mod.time, "sleep", lambda s: sleep_calls.append(s))
+    monkeypatch.setattr(pipeline_mod, "_sleep", lambda s: sleep_calls.append(s))
 
     cfg = {
         "error_handling": {
@@ -762,10 +763,10 @@ def test_backoff_capped_at_max(fake_ctx, monkeypatch):
     """退避时间不超过 backoff_max_seconds.
 
     打桩范围同 test_backoff_exponential_and_capped（见该测试 docstring：
-    全局 time.sleep 打桩会被进程内并发线程的 sleep 调用污染计数）.
+    pipeline._sleep 别名隔离，避免全局 time.sleep 打桩被并发线程污染）.
     """
     sleep_calls: list[float] = []
-    monkeypatch.setattr(pipeline_mod.time, "sleep", lambda s: sleep_calls.append(s))
+    monkeypatch.setattr(pipeline_mod, "_sleep", lambda s: sleep_calls.append(s))
 
     cfg = {
         "error_handling": {

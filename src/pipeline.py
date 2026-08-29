@@ -49,6 +49,12 @@ from .monitoring import HealthServer, MetricsSampler, check_alerts, load_monitor
 from .openlineage import OpenLineageEmitter
 from .state import _DERIVED_COLS, _DIMENSION_COLS, StateStore, recompute_derived
 
+# 退避等待的模块级别名：测试打桩 _sleep 即可隔离重试路径的等待行为，
+# 不必全局替换 time.sleep——全局打桩会把进程内其它线程的 sleep 调用
+# （psutil 采样、state.py 锁轮询等）也变成零耗时桩，后台限速循环
+# 蜕变为全速空转（macOS CI 实测 sleep 计数被污染到百万级）。
+_sleep = time.sleep
+
 STAGES = ["ingest", "validate", "clean", "compute", "output"]
 
 # 合法计算引擎后端；_get_engine_backend 读到的未知值会经 dispatch 兜底走 python
@@ -538,11 +544,11 @@ def _run_stage_with_retry(
                         )
                     remaining = backoff - (time.monotonic() - wait_start)
                     if remaining > 0:
-                        time.sleep(remaining)
+                        _sleep(remaining)
                 else:
                     # 非超时失败路径：恰好 sleep 一次完整退避
                     # （test_error_handling.py 的退避行为契约）.
-                    time.sleep(backoff)
+                    _sleep(backoff)
                 continue
             if attempt > 0:
                 logger.info(

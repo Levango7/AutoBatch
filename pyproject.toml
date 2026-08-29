@@ -64,9 +64,10 @@ storage = [
     "pyarrow>=23.0.1,<25.0",
     "minio>=7.0,<8.0",
 ]
-# Iceberg 湖表（storage.backend="iceberg"；版本与 requirements.txt 严格一致）
+# Iceberg 湖表（storage.backend="iceberg"；版本与 requirements.txt 严格一致；
+# 0.12 系列当前仅有 rc 预发布版，精确 pin 可直接安装，正式版发布后改区间）
 iceberg = [
-    "pyiceberg>=0.12.0,<0.13",
+    "pyiceberg==0.12.0rc1",
     "sqlalchemy>=2.0,<3.0",
 ]
 # 监控告警（monitoring.enabled=true）
@@ -85,7 +86,7 @@ all = [
     "pyarrow>=23.0.1,<25.0",
     "minio>=7.0,<8.0",
     "psutil>=5.9,<7.0",
-    "pyiceberg>=0.12.0,<0.13",
+    "pyiceberg==0.12.0rc1",
     "sqlalchemy>=2.0,<3.0",
     "pydantic>=2.10.6,<2.14.0b1",
 ]

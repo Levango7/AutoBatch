@@ -24,7 +24,11 @@ minio>=7.0,<8.0        # Phase 3 湖存储（MinIO SDK；bucket 初始化与迁�
 psutil>=5.9,<7.0       # 任务41 监控告警（monitoring.enabled=true 时可选；不可用则降级返回 None）
 pydantic>=2.10.6,<2.14.0b1 # 配置校验（src/config_schema.py；pipeline.py 导入失败时自动降级跳过校验；
                        # 版本窗口与 pyproject.toml validation/all/dev 分组保持一致）
-# 注意：iceberg 增量扫描用的 incremental_append_scan API 仅存在于 0.12 系列。
-# 0.12.0 正式版已发布（2026-08 实测环境即在 0.12.0 上全量回归通过），改用正式版区间。
-pyiceberg>=0.12.0,<0.13  # Phase 4+5 湖表 ACID + time travel + snapshot diff（storage.backend="iceberg" 时需要）
+# 注意：iceberg 增量扫描用的 incremental_append_scan API 仅存在（且仅稳定）于
+# 0.12 系列。PyPI 实测（2026-08-29 pip index versions --pre 查证）：0.12 系列仅有
+# 0.12.0rc1/rc2 预发布版，0.12.0 正式版尚未发布——此前注释"正式版已发布"失实，
+# 且 >=0.12.0 区间在 pip 默认排除预发布版时无解，导致 0cda952/aabc5c1 两提交
+# CI 全矩阵 Install dependencies 失败。精确 pin 预发布版可直接安装（无需 --pre）。
+# 0.12.0 正式版发布后应改为 pyiceberg>=0.12.0,<0.13。
+pyiceberg==0.12.0rc1  # Phase 4+5 湖表 ACID + time travel + snapshot diff（storage.backend="iceberg" 时需要）
 sqlalchemy>=2.0,<3.0    # pyiceberg SQL catalog 依赖（storage.backend="iceberg" + catalog_type="sql" 时需要）

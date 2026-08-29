@@ -59,7 +59,8 @@ jobs:
           pip install -r requirements-dev.txt
           # 引擎依赖与 ci.yml 对齐：此前 3.10+无引擎依赖组合下 pytest 曾零输出
           # 秒退（2026-08 连续数轮未定位），对齐绿腿环境以收敛变量
-          pip install "pyspark>=4.0,<5.0" "polars>=1.0,<2.0" "pyarrow>=23.0.1,<25.0" "pyiceberg>=0.12.0,<0.13"
+          # pyiceberg==0.12.0rc1 精确 pin：PyPI 无 0.12.0 正式版（原因见 ci.yml 注释）
+          pip install "pyspark>=4.0,<5.0" "polars>=1.0,<2.0" "pyarrow>=23.0.1,<25.0" "pyiceberg==0.12.0rc1"
 
       # -------------------------------------------------------------------------
       # 1. ruff lint（pyproject.toml 配置）

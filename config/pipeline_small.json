@@ -95,14 +95,15 @@
     "fail_at": null
   },
   "error_handling": {
-    "max_retries": 0,
+    "_note": "超时按 2026-08-29 Spark 压测校准(local[1]，百万行以内)：validate 100K=57s/500K=114s/1M 撞 300s 墙，线性外推 1M 纯计算约 230s，validate 提到 900s 留 3 倍余量；retries=1 兜住 worker 瞬时崩溃。数据量显著超过百万行请按 pipeline.json 同口径重调。",
+    "max_retries": 1,
     "backoff_base_seconds": 2,
     "backoff_max_seconds": 60,
     "stage_timeouts": {
       "ingest": 300,
-      "validate": 300,
-      "clean": 300,
-      "compute": 600,
+      "validate": 900,
+      "clean": 600,
+      "compute": 900,
       "output": 300
     },
     "cleanup_on_retry": true,

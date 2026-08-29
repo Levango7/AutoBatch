@@ -106,7 +106,9 @@ jobs:
           pip install -r requirements.txt
           # optional 引擎依赖：pyspark / polars / pyarrow / pyiceberg 均要求 Python >=3.10，
           # 在 CI 当前矩阵（3.10–3.12）中均可安装；pyarrow>=23.0.1 修复 PYSEC-2026-113
-          pip install "pyspark>=4.0,<5.0" "polars>=1.0,<2.0" "pyarrow>=23.0.1,<25.0" "pyiceberg>=0.12.0,<0.13"
+          # pyiceberg==0.12.0rc1 精确 pin：PyPI 无 0.12.0 正式版（区间 >=0.12.0 无解，
+          # 0cda952 曾因此全矩阵失败）；预发布精确 pin 无需 --pre 可直接安装
+          pip install "pyspark>=4.0,<5.0" "polars>=1.0,<2.0" "pyarrow>=23.0.1,<25.0" "pyiceberg==0.12.0rc1"
           pip install -r requirements-dev.txt
 
       # 全量运行；重型测试（Spark 集群 / 需要 hadoop native lib 的路径）
@@ -382,8 +384,9 @@ jobs:
           # 核心依赖（版本约束见 requirements.txt，与 pyproject.toml 可选依赖分组同步）
           pip install -r requirements.txt
           # optional 引擎依赖：与 build job 完全一致，pyspark / polars / pyarrow /
-          # pyiceberg 均要求 Python >=3.10（本腿 3.12 全部可安装）
-          pip install "pyspark>=4.0,<5.0" "polars>=1.0,<2.0" "pyarrow>=23.0.1,<25.0" "pyiceberg>=0.12.0,<0.13"
+          # pyiceberg 均要求 Python >=3.10（本腿 3.12 全部可安装）；
+          # pyiceberg==0.12.0rc1 精确 pin 原因见 build job 同步注释
+          pip install "pyspark>=4.0,<5.0" "polars>=1.0,<2.0" "pyarrow>=23.0.1,<25.0" "pyiceberg==0.12.0rc1"
           pip install -r requirements-dev.txt
 
       # 与 build job 同口径：-k "not cluster" 排除 Spark 集群测试；

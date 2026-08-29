@@ -121,9 +121,9 @@ def _init_spark_session(cfg: dict[str, Any], logger) -> Any:
         master / app_name / executor_memory / executor_cores / num_executors /
         driver_memory / shuffle_partitions / adaptive_query_execution
 
-    额外注入 ``spark.hadoop.io.nativeio.config.bypass=true`` 以绕过 Windows 上
-    stub hadoop.dll 缺 NativeIO$Windows.access0 导致的 UnsatisfiedLinkError。
-    hadoop.dll 的环境下写文件仍会失败，但内存操作可正常进行）。
+    Windows 环境注意：hadoop.dll 必须在 JVM 启动时就位于 java.library.path 上
+    （JVM 启动时从进程 PATH 继承），其 NativeIO$Windows.access0 JNI 方法才能
+    加载；否则 Spark 写本地文件抛 UnsatisfiedLinkError。调用方需先 apply_spark_env。
 
     Phase 2b 多机模式新增配置项：
         S3/MinIO connector（当 storage.backend="parquet" 且有 endpoint 时注入）：
@@ -147,10 +147,6 @@ def _init_spark_session(cfg: dict[str, Any], logger) -> Any:
     # 基础配置（appName/master/资源/AQE）抽到 helpers._apply_spark_base_config，
     # 与 helpers._get_spark_session 共享同一份配置项，避免两处重复维护。
     builder = _apply_spark_base_config(builder, scfg)
-    # 绕过 Windows NativeIO（stub hadoop.dll 缺 NativeIO$Windows.access0 时
-    # Py4JJavaError: UnsatisfiedLinkError）。使用 config.bypass=true 而非
-    # nativeio=false，后者不生效（Spark 4.x 配置键已变更）。
-    builder = builder.config("spark.hadoop.io.nativeio.config.bypass", "true")
 
     # --- S3/MinIO connector（Phase 2b 多机模式）---
     # 当 storage.backend="parquet" 且配置了 endpoint 时，注入 hadoop-aws S3A connector，

@@ -1156,8 +1156,12 @@ def spark_env(_same_drive_tmp_root, request):
     cfg["engine"]["backend"] = "spark"
     # format 保持 csv（与 python backend 产物路径一致，便于 _advance_and_merge 读）
     cfg["engine"]["format"] = "csv"
-    # local[*] 用所有核；shuffle_partitions 小以加速本地测试
-    cfg["engine"]["spark"]["master"] = "local[*]"
+    # local[*] 用所有核；shuffle_partitions 小以加速本地测试。
+    # Windows 例外：spawn 型 Python worker 单个启动 ~2-4s，local[*]（32 核机）
+    # 下每个 action 需 32 个 worker，validate 实测 >300s 超时；local[1] 同机
+    # 同数据 68.6-73.2s 完成、全 pipeline 135s 成功（2026-08-29 实测）。
+    # Linux/WSL fork 型 worker 启动开销小，保持 local[*]。
+    cfg["engine"]["spark"]["master"] = "local[1]" if os.name == "nt" else "local[*]"
     cfg["engine"]["spark"]["shuffle_partitions"] = 4
     cfg["engine"]["spark"]["executor_memory"] = "1g"
     cfg["engine"]["spark"]["driver_memory"] = "512m"

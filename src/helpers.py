@@ -221,8 +221,6 @@ def _get_spark_session(cfg: dict[str, Any]) -> Any:
     spark_cfg = cfg.get("engine", {}).get("spark", {}) or {}
     builder = SparkSession.builder
     builder = _apply_spark_base_config(builder, spark_cfg)
-    # 绕过 Windows NativeIO（stub hadoop.dll 缺 NativeIO$Windows.access0）
-    builder = builder.config("spark.hadoop.io.nativeio.config.bypass", "true")
     # parquet+S3 场景注入 fs.s3a.* 凭证/endpoint（与 pipeline._init_spark_session
     # 同一组键值）。缺失时重建的 session 无凭证读 s3a://，报
     # NoAuthWithAWSException——典型触发路径：run_pipeline 结束 spark.stop() 后，

@@ -1,5 +1,7 @@
 ﻿# AutoBatch · 可演进的大数据批处理工作流骨架
 
+> **⚠️ 已归并（2026-09-04）**：本项目的五阶段批处理流水线引擎已完整迁入 [DataEngineBDP](https://github.com/Levango7/DataEngineBDP) 的 `platform/batch-pipeline/`（含五阶段 pipeline、8 类质量规则、高水位/Iceberg 增量、断点续跑、OpenLineage 血缘、多租户 API 壳），走平台 CI（`batch-pipeline-test` 独立 job）。后续演进请前往 BDP 仓库，本仓库仅保留历史沿革与精力投入记录，不再接受功能变更。
+
 **AutoBatch** —— 可运行、可追溯、可扩展的大数据批处理工作流骨架——当前为单机原型，通过 Phase 1-5 演进可扩展至分布式湖平台。覆盖数据接入、质量校验、清洗、计算、输出全流程，内置批次台账、质量规则引擎、失败定位与可视化看板。
 
 > **规模上限**（两档，避免"大数据"标签与单机实测张力）：
